@@ -1,0 +1,38 @@
+[package]
+name = "unfault"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sylvain Hellegouarch <sylvain@unfault.dev>"]
+description = "Unfault — a calm reviewer for thoughtful engineers"
+repository = "https://github.com/unfault/cli"
+homepage = "https://unfault.dev"
+documentation = "https://docs.rs/unfault"
+keywords = ["cli", "fault-tolerance", "observability", "devops", "monitoring"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+colored = "3"
+futures-util = "0.3"
+glob = "0.3"
+hex = "0.4"
+ignore = "0.4"
+indicatif = "0.17"
+rayon = "1.10"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+termimad = "0.31.3"
+thiserror = "2"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3.8"
+mockall = "0.12"
+serial_test = "3.0"
