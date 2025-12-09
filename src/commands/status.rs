@@ -41,15 +41,8 @@ pub async fn execute() -> Result<i32> {
             Some(config)
         }
         Err(_) => {
-            println!(
-                "{} Configuration: {}",
-                "✗".red().bold(),
-                "Not found".red()
-            );
-            println!(
-                "  {} Run `unfault login` to authenticate",
-                "→".cyan()
-            );
+            println!("{} Configuration: {}", "✗".red().bold(), "Not found".red());
+            println!("  {} Run `unfault login` to authenticate", "→".cyan());
             None
         }
     };
@@ -79,17 +72,10 @@ pub async fn execute() -> Result<i32> {
                 "⚠".yellow().bold(),
                 "Unhealthy".yellow()
             );
-            println!(
-                "  {} The API returned a non-success status",
-                "→".cyan()
-            );
+            println!("  {} The API returned a non-success status", "→".cyan());
         }
         Err(e) => {
-            println!(
-                "{} API Status: {}",
-                "✗".red().bold(),
-                "Unreachable".red()
-            );
+            println!("{} API Status: {}", "✗".red().bold(), "Unreachable".red());
             println!("  {} {}", "Error:".dimmed(), format!("{}", e).dimmed());
             println!();
             println!("{}", "Possible causes:".yellow());

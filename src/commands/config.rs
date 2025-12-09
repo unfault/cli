@@ -47,10 +47,7 @@ pub enum LlmProvider {
         api_key: Option<String>,
     },
     /// Local Ollama instance
-    Ollama {
-        endpoint: String,
-        model: String,
-    },
+    Ollama { endpoint: String, model: String },
     /// Custom OpenAI-compatible endpoint
     Custom {
         endpoint: String,
@@ -146,7 +143,9 @@ pub fn execute_show(args: ConfigShowArgs) -> Result<i32> {
         println!("  {} Configure with:", "→".cyan());
         println!("    unfault config llm openai --model gpt-4");
         println!("    unfault config llm anthropic --model claude-3-5-sonnet-latest");
-        println!("    unfault config llm ollama --endpoint http://localhost:11434 --model llama3.2");
+        println!(
+            "    unfault config llm ollama --endpoint http://localhost:11434 --model llama3.2"
+        );
     }
     println!();
 
@@ -201,10 +200,12 @@ fn set_llm_config(provider: LlmProvider) -> Result<i32> {
             }
             cfg
         }
-        LlmProvider::Ollama { endpoint, model } => {
-            LlmConfig::ollama(&endpoint, &model)
-        }
-        LlmProvider::Custom { endpoint, model, api_key } => {
+        LlmProvider::Ollama { endpoint, model } => LlmConfig::ollama(&endpoint, &model),
+        LlmProvider::Custom {
+            endpoint,
+            model,
+            api_key,
+        } => {
             let mut cfg = LlmConfig::custom(&endpoint, &model);
             cfg.api_key = api_key;
             cfg
@@ -218,10 +219,7 @@ fn set_llm_config(provider: LlmProvider) -> Result<i32> {
     config.save()?;
 
     println!();
-    println!(
-        "{} LLM configured successfully!",
-        "✓".green().bold()
-    );
+    println!("{} LLM configured successfully!", "✓".green().bold());
     println!();
     println!("  {} {}", "Provider:".dimmed(), provider_name);
     println!("  {} {}", "Model:".dimmed(), model_name);
@@ -237,10 +235,7 @@ fn set_llm_config(provider: LlmProvider) -> Result<i32> {
         );
     } else {
         println!();
-        println!(
-            "  {} Ready to use with `unfault ask`",
-            "→".cyan()
-        );
+        println!("  {} Ready to use with `unfault ask`", "→".cyan());
     }
     println!();
 
@@ -301,7 +296,9 @@ fn show_llm_config(show_secrets: bool) -> Result<i32> {
         println!("  {} Configure with:", "→".cyan());
         println!("    unfault config llm openai --model gpt-4");
         println!("    unfault config llm anthropic --model claude-3-5-sonnet-latest");
-        println!("    unfault config llm ollama --endpoint http://localhost:11434 --model llama3.2");
+        println!(
+            "    unfault config llm ollama --endpoint http://localhost:11434 --model llama3.2"
+        );
     }
     println!();
 
@@ -323,10 +320,7 @@ fn remove_llm_config() -> Result<i32> {
 
     if config.llm.is_none() {
         println!();
-        println!(
-            "{} LLM configuration is not set.",
-            "ℹ".blue()
-        );
+        println!("{} LLM configuration is not set.", "ℹ".blue());
         println!();
         return Ok(EXIT_SUCCESS);
     }
@@ -335,10 +329,7 @@ fn remove_llm_config() -> Result<i32> {
     config.save()?;
 
     println!();
-    println!(
-        "{} LLM configuration removed.",
-        "✓".green().bold()
-    );
+    println!("{} LLM configuration removed.", "✓".green().bold());
     println!();
 
     Ok(EXIT_SUCCESS)
@@ -424,7 +415,11 @@ mod tests {
             api_key: None,
         };
         match provider {
-            LlmProvider::Custom { endpoint, model, api_key } => {
+            LlmProvider::Custom {
+                endpoint,
+                model,
+                api_key,
+            } => {
                 assert_eq!(endpoint, "https://api.example.com/v1");
                 assert_eq!(model, "custom-model");
                 assert!(api_key.is_none());

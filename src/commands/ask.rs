@@ -19,9 +19,9 @@ use anyhow::Result;
 use colored::Colorize;
 use termimad::MadSkin;
 
-use crate::api::llm::{build_llm_context, LlmClient};
-use crate::api::rag::{RAGQueryRequest, RAGQueryResponse};
 use crate::api::ApiClient;
+use crate::api::llm::{LlmClient, build_llm_context};
+use crate::api::rag::{RAGQueryRequest, RAGQueryResponse};
 use crate::config::Config;
 use crate::exit_codes::*;
 
@@ -123,11 +123,7 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
                 return Ok(EXIT_NETWORK_ERROR);
             }
             if e.is_server_error() {
-                eprintln!(
-                    "{} {}",
-                    "Error:".red().bold(),
-                    e
-                );
+                eprintln!("{} {}", "Error:".red().bold(), e);
                 if args.verbose {
                     eprintln!("  {}: {}", "API URL".dimmed(), config.base_url());
                 }
@@ -144,7 +140,7 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
     // Check if LLM is configured for generating AI response (unless --no-llm)
     let llm_response = if !args.no_llm && config.llm_ready() {
         let llm_config = config.llm.as_ref().unwrap();
-        
+
         if args.verbose {
             eprintln!(
                 "{} Using {} ({}) for AI response...",
@@ -153,14 +149,14 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
                 llm_config.model
             );
         }
-        
+
         // Build rich context for LLM
         let llm_context = build_llm_context(
             &response.context_summary,
             &response.sessions,
             &response.findings,
         );
-        
+
         // Create LLM client and generate response with streaming
         match LlmClient::new_with_options(llm_config, args.verbose) {
             Ok(client) => {
@@ -176,7 +172,7 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
 
                 // Stream tokens directly to stdout
                 let result = client.generate_streaming(&args.query, &llm_context).await;
-                
+
                 match result {
                     Ok(text) => {
                         // Treat empty or whitespace-only responses as failures
@@ -216,7 +212,13 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
     if args.json {
         output_json(&response, llm_response.as_deref())?;
     } else {
-        output_formatted(&response, llm_response.as_deref(), args.verbose, config.llm_ready(), streamed);
+        output_formatted(
+            &response,
+            llm_response.as_deref(),
+            args.verbose,
+            config.llm_ready(),
+            streamed,
+        );
     }
 
     Ok(EXIT_SUCCESS)
@@ -237,7 +239,7 @@ fn output_json(response: &RAGQueryResponse, llm_response: Option<&str>) -> Resul
     } else {
         serde_json::to_value(response)?
     };
-    
+
     let json = serde_json::to_string_pretty(&output)?;
     println!("{}", json);
     Ok(())
@@ -253,7 +255,8 @@ fn create_markdown_skin() -> MadSkin {
     // Customize colors for better terminal appearance
     skin.set_headers_fg(termimad::crossterm::style::Color::Cyan);
     skin.bold.set_fg(termimad::crossterm::style::Color::White);
-    skin.italic.set_fg(termimad::crossterm::style::Color::Yellow);
+    skin.italic
+        .set_fg(termimad::crossterm::style::Color::Yellow);
     skin.code_block.set_fgbg(
         termimad::crossterm::style::Color::Green,
         termimad::crossterm::style::Color::Reset,
@@ -270,7 +273,13 @@ fn render_markdown(text: &str) {
     print!("{}", fmt_text);
 }
 
-fn output_formatted(response: &RAGQueryResponse, llm_response: Option<&str>, verbose: bool, has_llm: bool, streamed: bool) {
+fn output_formatted(
+    response: &RAGQueryResponse,
+    llm_response: Option<&str>,
+    verbose: bool,
+    has_llm: bool,
+    streamed: bool,
+) {
     // Print LLM response if available (this is the main answer)
     // If streamed=true, the response was already printed in real-time
     if llm_response.is_some() {
@@ -280,14 +289,14 @@ fn output_formatted(response: &RAGQueryResponse, llm_response: Option<&str>, ver
             println!();
             println!("{} {}", "🤖".green(), "AI Analysis".bold().underline());
             println!();
-            
+
             // Render markdown with termimad (max 80 columns)
             if let Some(answer) = llm_response {
                 render_markdown(answer);
             }
             println!();
         }
-        
+
         // Show separator before raw context in verbose mode
         if verbose {
             println!();
@@ -304,7 +313,7 @@ fn output_formatted(response: &RAGQueryResponse, llm_response: Option<&str>, ver
             "unfault config llm openai".cyan()
         );
     }
-    
+
     // Print context summary (always in verbose, or when no LLM answer)
     if llm_response.is_none() || verbose {
         println!();
@@ -317,11 +326,11 @@ fn output_formatted(response: &RAGQueryResponse, llm_response: Option<&str>, ver
     if (llm_response.is_none() || verbose) && !response.sessions.is_empty() {
         println!("{}", "Related Sessions".bold());
         println!("{}", "─".repeat(50).dimmed());
-        
+
         for session in &response.sessions {
             let workspace = session.workspace_label.as_deref().unwrap_or("Unknown");
             let similarity_pct = (session.similarity * 100.0).round() as i32;
-            
+
             println!(
                 "  {} {} {} ({}% match)",
                 "•".cyan(),
@@ -329,23 +338,31 @@ fn output_formatted(response: &RAGQueryResponse, llm_response: Option<&str>, ver
                 format!("[{} findings]", session.total_findings).dimmed(),
                 similarity_pct
             );
-            
+
             if verbose && !session.dimension_counts.is_empty() {
                 let dims: Vec<String> = session
                     .dimension_counts
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, v))
                     .collect();
-                println!("    {} {}", "Dimensions:".dimmed(), dims.join(", ").dimmed());
+                println!(
+                    "    {} {}",
+                    "Dimensions:".dimmed(),
+                    dims.join(", ").dimmed()
+                );
             }
-            
+
             if verbose && !session.severity_counts.is_empty() {
                 let sevs: Vec<String> = session
                     .severity_counts
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, v))
                     .collect();
-                println!("    {} {}", "Severities:".dimmed(), sevs.join(", ").dimmed());
+                println!(
+                    "    {} {}",
+                    "Severities:".dimmed(),
+                    sevs.join(", ").dimmed()
+                );
             }
         }
         println!();
@@ -355,13 +372,13 @@ fn output_formatted(response: &RAGQueryResponse, llm_response: Option<&str>, ver
     if (llm_response.is_none() || verbose) && !response.findings.is_empty() {
         println!("{}", "Related Findings".bold());
         println!("{}", "─".repeat(50).dimmed());
-        
+
         for finding in &response.findings {
             let rule = finding.rule_id.as_deref().unwrap_or("unknown");
             let severity = finding.severity.as_deref().unwrap_or("unknown");
             let dimension = finding.dimension.as_deref().unwrap_or("unknown");
             let similarity_pct = (finding.similarity * 100.0).round() as i32;
-            
+
             // Color severity
             let severity_colored = match severity.to_lowercase().as_str() {
                 "critical" | "high" => severity.red().bold(),
@@ -369,7 +386,7 @@ fn output_formatted(response: &RAGQueryResponse, llm_response: Option<&str>, ver
                 "low" => severity.green(),
                 _ => severity.normal(),
             };
-            
+
             println!(
                 "  {} {} [{}] ({}% match)",
                 "•".cyan(),
@@ -377,13 +394,13 @@ fn output_formatted(response: &RAGQueryResponse, llm_response: Option<&str>, ver
                 severity_colored,
                 similarity_pct
             );
-            
+
             if let (Some(file), Some(line)) = (&finding.file_path, finding.line) {
                 println!("    {} {}:{}", "→".dimmed(), file.cyan(), line);
             } else if let Some(file) = &finding.file_path {
                 println!("    {} {}", "→".dimmed(), file.cyan());
             }
-            
+
             if verbose {
                 println!("    {} {}", "Dimension:".dimmed(), dimension.dimmed());
             }
@@ -393,10 +410,7 @@ fn output_formatted(response: &RAGQueryResponse, llm_response: Option<&str>, ver
 
     // If nothing found (only show when no LLM answer)
     if llm_response.is_none() && response.sessions.is_empty() && response.findings.is_empty() {
-        println!(
-            "{} No relevant context found for your query.",
-            "ℹ".blue()
-        );
+        println!("{} No relevant context found for your query.", "ℹ".blue());
         println!("  Try running `unfault review` first to analyze your code.");
         println!();
     }

@@ -466,11 +466,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let session_response: SessionNewResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let session_response: SessionNewResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse session response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(session_response)
     }
@@ -510,11 +509,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let run_response: SessionRunResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let run_response: SessionRunResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse analysis response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(run_response)
     }
@@ -551,11 +549,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let status_response: SessionStatusResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let status_response: SessionStatusResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse session status response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(status_response)
     }
@@ -595,11 +592,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let embed_response: SessionEmbedResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let embed_response: SessionEmbedResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse embed response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(embed_response)
     }

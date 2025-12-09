@@ -250,7 +250,10 @@ impl LlmClient {
         if config.provider != "ollama" {
             let api_key = config.get_api_key();
             if api_key.is_none() {
-                let env_var = config.api_key_env.clone().unwrap_or_else(|| "API_KEY".to_string());
+                let env_var = config
+                    .api_key_env
+                    .clone()
+                    .unwrap_or_else(|| "API_KEY".to_string());
                 return Err(LlmError::MissingApiKey { env_var });
             }
         }
@@ -287,28 +290,36 @@ impl LlmClient {
         self.generate_internal(query, context, true).await
     }
 
-    async fn generate_internal(&self, query: &str, context: &str, stream: bool) -> Result<String, LlmError> {
+    async fn generate_internal(
+        &self,
+        query: &str,
+        context: &str,
+        stream: bool,
+    ) -> Result<String, LlmError> {
         let system_prompt = self.build_system_prompt();
         let user_prompt = self.build_user_prompt(query, context);
 
         match self.provider.as_str() {
             "openai" | "custom" => {
                 if stream {
-                    self.call_openai_streaming(&system_prompt, &user_prompt).await
+                    self.call_openai_streaming(&system_prompt, &user_prompt)
+                        .await
                 } else {
                     self.call_openai(&system_prompt, &user_prompt).await
                 }
             }
             "anthropic" => {
                 if stream {
-                    self.call_anthropic_streaming(&system_prompt, &user_prompt).await
+                    self.call_anthropic_streaming(&system_prompt, &user_prompt)
+                        .await
                 } else {
                     self.call_anthropic(&system_prompt, &user_prompt).await
                 }
             }
             "ollama" => {
                 if stream {
-                    self.call_ollama_streaming(&system_prompt, &user_prompt).await
+                    self.call_ollama_streaming(&system_prompt, &user_prompt)
+                        .await
                 } else {
                     self.call_ollama(&system_prompt, &user_prompt).await
                 }
@@ -365,11 +376,18 @@ Based on this context, please answer the user's question about their codebase he
     }
 
     /// Call OpenAI-compatible API.
-    async fn call_openai(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError> {
+    async fn call_openai(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LlmError> {
         let url = format!("{}/chat/completions", self.endpoint);
-        let api_key = self.api_key.as_ref().ok_or_else(|| LlmError::MissingApiKey {
-            env_var: "OPENAI_API_KEY".to_string(),
-        })?;
+        let api_key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| LlmError::MissingApiKey {
+                env_var: "OPENAI_API_KEY".to_string(),
+            })?;
 
         // Use max_completion_tokens for newer models, max_tokens for older ones
         // Reasoning models (gpt-5, o1, o3) use tokens for thinking + output, so need more
@@ -440,12 +458,20 @@ Based on this context, please answer the user's question about their codebase he
         })?;
 
         if self.verbose {
-            eprintln!("  {} Raw API response: {}", "DEBUG".yellow(), &response_text[..response_text.len().min(1000)]);
+            eprintln!(
+                "  {} Raw API response: {}",
+                "DEBUG".yellow(),
+                &response_text[..response_text.len().min(1000)]
+            );
         }
 
         let openai_response: OpenAIResponse =
             serde_json::from_str(&response_text).map_err(|e| LlmError::ParseError {
-                message: format!("Failed to parse OpenAI response: {}. Body: {}", e, &response_text[..response_text.len().min(500)]),
+                message: format!(
+                    "Failed to parse OpenAI response: {}. Body: {}",
+                    e,
+                    &response_text[..response_text.len().min(500)]
+                ),
             })?;
 
         let content = openai_response
@@ -454,7 +480,11 @@ Based on this context, please answer the user's question about their codebase he
             .and_then(|c| c.message.content.clone());
 
         if self.verbose {
-            eprintln!("  {} Extracted content: {:?}", "DEBUG".yellow(), content.as_ref().map(|s| &s[..s.len().min(200)]));
+            eprintln!(
+                "  {} Extracted content: {:?}",
+                "DEBUG".yellow(),
+                content.as_ref().map(|s| &s[..s.len().min(200)])
+            );
         }
 
         content.ok_or_else(|| LlmError::ParseError {
@@ -467,11 +497,18 @@ Based on this context, please answer the user's question about their codebase he
     }
 
     /// Call OpenAI-compatible API with streaming.
-    async fn call_openai_streaming(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError> {
+    async fn call_openai_streaming(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LlmError> {
         let url = format!("{}/chat/completions", self.endpoint);
-        let api_key = self.api_key.as_ref().ok_or_else(|| LlmError::MissingApiKey {
-            env_var: "OPENAI_API_KEY".to_string(),
-        })?;
+        let api_key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| LlmError::MissingApiKey {
+                env_var: "OPENAI_API_KEY".to_string(),
+            })?;
 
         let (max_tokens, max_completion_tokens, temperature) =
             if Self::uses_new_token_param(&self.model) {
@@ -539,7 +576,7 @@ Based on this context, please answer the user's question about their codebase he
             })?;
 
             let text = String::from_utf8_lossy(&chunk);
-            
+
             // Parse SSE events (data: {...}\n\n format)
             for line in text.lines() {
                 if line.starts_with("data: ") {
@@ -547,8 +584,10 @@ Based on this context, please answer the user's question about their codebase he
                     if json_str == "[DONE]" {
                         continue;
                     }
-                    
-                    if let Ok(stream_response) = serde_json::from_str::<OpenAIStreamResponse>(json_str) {
+
+                    if let Ok(stream_response) =
+                        serde_json::from_str::<OpenAIStreamResponse>(json_str)
+                    {
                         if let Some(choice) = stream_response.choices.first() {
                             if let Some(content) = &choice.delta.content {
                                 print!("{}", content);
@@ -566,11 +605,18 @@ Based on this context, please answer the user's question about their codebase he
     }
 
     /// Call Anthropic API.
-    async fn call_anthropic(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError> {
+    async fn call_anthropic(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LlmError> {
         let url = format!("{}/messages", self.endpoint);
-        let api_key = self.api_key.as_ref().ok_or_else(|| LlmError::MissingApiKey {
-            env_var: "ANTHROPIC_API_KEY".to_string(),
-        })?;
+        let api_key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| LlmError::MissingApiKey {
+                env_var: "ANTHROPIC_API_KEY".to_string(),
+            })?;
 
         // Combine system and user prompt for Anthropic (system is passed differently)
         let combined_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
@@ -610,11 +656,10 @@ Based on this context, please answer the user's question about their codebase he
             });
         }
 
-        let anthropic_response: AnthropicResponse = response.json().await.map_err(|e| {
-            LlmError::ParseError {
+        let anthropic_response: AnthropicResponse =
+            response.json().await.map_err(|e| LlmError::ParseError {
                 message: e.to_string(),
-            }
-        })?;
+            })?;
 
         anthropic_response
             .content
@@ -626,11 +671,18 @@ Based on this context, please answer the user's question about their codebase he
     }
 
     /// Call Anthropic API with streaming.
-    async fn call_anthropic_streaming(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError> {
+    async fn call_anthropic_streaming(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LlmError> {
         let url = format!("{}/messages", self.endpoint);
-        let api_key = self.api_key.as_ref().ok_or_else(|| LlmError::MissingApiKey {
-            env_var: "ANTHROPIC_API_KEY".to_string(),
-        })?;
+        let api_key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| LlmError::MissingApiKey {
+                env_var: "ANTHROPIC_API_KEY".to_string(),
+            })?;
 
         let combined_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
 
@@ -678,12 +730,12 @@ Based on this context, please answer the user's question about their codebase he
             })?;
 
             let text = String::from_utf8_lossy(&chunk);
-            
+
             // Parse SSE events (event: type\ndata: {...}\n\n format)
             for line in text.lines() {
                 if line.starts_with("data: ") {
                     let json_str = &line[6..];
-                    
+
                     if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(json_str) {
                         if event.event_type == "content_block_delta" {
                             if let Some(delta) = &event.delta {
@@ -704,7 +756,11 @@ Based on this context, please answer the user's question about their codebase he
     }
 
     /// Call Ollama API.
-    async fn call_ollama(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError> {
+    async fn call_ollama(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LlmError> {
         let url = format!("{}/api/chat", self.endpoint);
 
         let request = OllamaRequest {
@@ -742,17 +798,20 @@ Based on this context, please answer the user's question about their codebase he
             });
         }
 
-        let ollama_response: OllamaResponse = response.json().await.map_err(|e| {
-            LlmError::ParseError {
+        let ollama_response: OllamaResponse =
+            response.json().await.map_err(|e| LlmError::ParseError {
                 message: e.to_string(),
-            }
-        })?;
+            })?;
 
         Ok(ollama_response.message.content)
     }
 
     /// Call Ollama API with streaming.
-    async fn call_ollama_streaming(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError> {
+    async fn call_ollama_streaming(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LlmError> {
         let url = format!("{}/api/chat", self.endpoint);
 
         let request = OllamaRequest {
@@ -799,19 +858,19 @@ Based on this context, please answer the user's question about their codebase he
             })?;
 
             let text = String::from_utf8_lossy(&chunk);
-            
+
             // Ollama streams newline-delimited JSON
             for line in text.lines() {
                 if line.is_empty() {
                     continue;
                 }
-                
+
                 // Parse each line as a JSON object
                 #[derive(Deserialize)]
                 struct OllamaStreamChunk {
                     message: Option<OllamaMessageResponse>,
                 }
-                
+
                 if let Ok(chunk) = serde_json::from_str::<OllamaStreamChunk>(line) {
                     if let Some(message) = chunk.message {
                         print!("{}", message.content);

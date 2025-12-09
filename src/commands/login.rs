@@ -21,7 +21,7 @@ use colored::Colorize;
 use std::time::Duration;
 
 use crate::api::ApiClient;
-use crate::config::{default_base_url, Config};
+use crate::config::{Config, default_base_url};
 use crate::exit_codes::*;
 
 /// Execute the login command

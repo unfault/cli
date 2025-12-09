@@ -3,8 +3,8 @@
 //! This module contains the main ApiClient structure and HTTP client functionality
 //! that is shared across all API operations.
 
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use reqwest::Client;
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -77,7 +77,10 @@ pub enum ApiError {
 impl ApiError {
     /// Check if this is an authentication error (401 or 403).
     pub fn is_auth_error(&self) -> bool {
-        matches!(self, ApiError::Unauthorized { .. } | ApiError::Forbidden { .. })
+        matches!(
+            self,
+            ApiError::Unauthorized { .. } | ApiError::Forbidden { .. }
+        )
     }
 
     /// Check if this is a network error.
@@ -137,7 +140,7 @@ impl ApiClient {
     pub fn new(base_url: String) -> Self {
         // Generate a unique trace ID for this CLI session (128-bit hex)
         let trace_id = generate_trace_id();
-        
+
         let mut headers = HeaderMap::new();
 
         // User-Agent header to identify the CLI to the server and WAF
@@ -168,9 +171,13 @@ impl ApiClient {
             .build()
             .unwrap_or_else(|_| Client::new());
 
-        Self { base_url, client, trace_id }
+        Self {
+            base_url,
+            client,
+            trace_id,
+        }
     }
-    
+
     /// Get the trace ID for this client session.
     ///
     /// This can be used to correlate CLI operations with API traces in Cloud Trace.
@@ -196,7 +203,7 @@ mod tests {
         let client = ApiClient::new("https://api.example.com".to_string());
         assert_eq!(client.base_url, "https://api.example.com");
     }
-    
+
     #[test]
     fn test_trace_id_generation() {
         let trace_id = generate_trace_id();
@@ -204,7 +211,7 @@ mod tests {
         // Verify it's valid hex
         assert!(trace_id.chars().all(|c| c.is_ascii_hexdigit()));
     }
-    
+
     #[test]
     fn test_api_client_has_trace_id() {
         let client = ApiClient::new("https://api.example.com".to_string());

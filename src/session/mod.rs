@@ -41,9 +41,13 @@ pub mod workspace_settings;
 
 pub use file_collector::FileCollector;
 pub use runner::SessionRunner;
-pub use workspace::{DetectedFramework, ProgressCallback, ScanProgress, WorkspaceInfo, WorkspaceScanner};
-pub use workspace_id::{
-    compute_workspace_id, get_git_remote, normalize_git_remote, MetaFileInfo, WorkspaceIdResult,
-    WorkspaceIdSource,
+pub use workspace::{
+    DetectedFramework, ProgressCallback, ScanProgress, WorkspaceInfo, WorkspaceScanner,
 };
-pub use workspace_settings::{LoadedSettings, RuleSettings, SettingsSource, WorkspaceSettings, load_settings};
+pub use workspace_id::{
+    MetaFileInfo, WorkspaceIdResult, WorkspaceIdSource, compute_workspace_id, get_git_remote,
+    normalize_git_remote,
+};
+pub use workspace_settings::{
+    LoadedSettings, RuleSettings, SettingsSource, WorkspaceSettings, load_settings,
+};

@@ -4,15 +4,14 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::api::{AdvertisedProfile, MetaFile, ProjectLayout, WorkspaceDescriptor};
 use super::workspace_id::{
-    compute_workspace_id, get_git_remote, MetaFileInfo as WorkspaceIdMetaFile,
-    WorkspaceIdSource,
+    MetaFileInfo as WorkspaceIdMetaFile, WorkspaceIdSource, compute_workspace_id, get_git_remote,
 };
-use super::workspace_settings::{load_settings, LoadedSettings, WorkspaceSettings};
+use super::workspace_settings::{LoadedSettings, WorkspaceSettings, load_settings};
+use crate::api::{AdvertisedProfile, MetaFile, ProjectLayout, WorkspaceDescriptor};
 
 /// Progress update during workspace scanning.
 #[derive(Debug, Clone)]
@@ -117,7 +116,6 @@ pub struct LocalMetaFileInfo {
     pub contents: String,
 }
 
-
 /// Known kinds of meta files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetaFileKind {
@@ -183,7 +181,10 @@ impl WorkspaceInfo {
     pub fn to_workspace_descriptor(&self) -> WorkspaceDescriptor {
         WorkspaceDescriptor {
             id: self.workspace_id.clone(),
-            id_source: self.workspace_id_source.as_ref().map(|s| s.as_str().to_string()),
+            id_source: self
+                .workspace_id_source
+                .as_ref()
+                .map(|s| s.as_str().to_string()),
             label: self.label.clone(),
             git_remote: self.git_remote.clone(),
             profiles: self.build_profiles(),
@@ -266,7 +267,7 @@ impl WorkspaceInfo {
             if !has_framework_profile {
                 let profile_id = match language {
                     Language::Python => "python_generic_backend",
-                    Language::Rust => "rust_axum_service",  // Default to axum as generic Rust profile
+                    Language::Rust => "rust_axum_service", // Default to axum as generic Rust profile
                     Language::Go => "go_generic_service",
                     Language::Java => "java_generic",
                     Language::TypeScript | Language::JavaScript => "typescript_express_backend",
@@ -292,7 +293,10 @@ impl WorkspaceInfo {
 
     /// Get detected language strings for API requests.
     pub fn language_strings(&self) -> Vec<String> {
-        self.languages.keys().map(|l| l.as_str().to_string()).collect()
+        self.languages
+            .keys()
+            .map(|l| l.as_str().to_string())
+            .collect()
     }
 
     /// Get detected framework strings for API requests.
@@ -365,14 +369,14 @@ impl WorkspaceScanner {
         // Phase 1: Parallel directory walk to collect file paths
         // Uses ignore crate for built-in gitignore support and parallel traversal
         let walker = WalkBuilder::new(&self.root)
-            .hidden(true)           // Respect hidden files based on gitignore
-            .git_ignore(true)       // Respect .gitignore (when .git exists)
-            .git_global(true)       // Respect global gitignore
-            .git_exclude(true)      // Respect .git/info/exclude
-            .ignore(true)           // Respect .ignore files
-            .require_git(false)     // Don't require .git directory for gitignore support
-            .add_custom_ignore_filename(".gitignore")  // Always read .gitignore even without .git
-            .add_custom_ignore_filename(".dockerignore")  // Also respect .dockerignore
+            .hidden(true) // Respect hidden files based on gitignore
+            .git_ignore(true) // Respect .gitignore (when .git exists)
+            .git_global(true) // Respect global gitignore
+            .git_exclude(true) // Respect .git/info/exclude
+            .ignore(true) // Respect .ignore files
+            .require_git(false) // Don't require .git directory for gitignore support
+            .add_custom_ignore_filename(".gitignore") // Always read .gitignore even without .git
+            .add_custom_ignore_filename(".dockerignore") // Also respect .dockerignore
             .filter_entry(|entry| {
                 // Additional filtering for common non-source directories
                 if let Some(name) = entry.file_name().to_str() {
@@ -415,10 +419,8 @@ impl WorkspaceScanner {
                 // Check for meta files first
                 let meta_file = if let Some(kind) = MetaFileKind::from_filename(filename) {
                     fs::read_to_string(path).ok().map(|contents| {
-                        let relative_path = path
-                            .strip_prefix(&self.root)
-                            .unwrap_or(path)
-                            .to_path_buf();
+                        let relative_path =
+                            path.strip_prefix(&self.root).unwrap_or(path).to_path_buf();
                         LocalMetaFileInfo {
                             path: relative_path,
                             kind,
@@ -430,24 +432,32 @@ impl WorkspaceScanner {
                 };
 
                 // Check for source files
-                let source_file = path.extension()
+                let source_file = path
+                    .extension()
                     .and_then(|e| e.to_str())
                     .and_then(Language::from_extension)
                     .map(|language| {
                         // Framework detection - only read file if not already detected
                         match language {
                             Language::Python => {
-                                if !has_fastapi.load(Ordering::Relaxed) ||
-                                   !has_flask.load(Ordering::Relaxed) ||
-                                   !has_django.load(Ordering::Relaxed) {
+                                if !has_fastapi.load(Ordering::Relaxed)
+                                    || !has_flask.load(Ordering::Relaxed)
+                                    || !has_django.load(Ordering::Relaxed)
+                                {
                                     if let Ok(contents) = fs::read_to_string(path) {
-                                        if contents.contains("from fastapi") || contents.contains("import fastapi") {
+                                        if contents.contains("from fastapi")
+                                            || contents.contains("import fastapi")
+                                        {
                                             has_fastapi.store(true, Ordering::Relaxed);
                                         }
-                                        if contents.contains("from flask") || contents.contains("import flask") {
+                                        if contents.contains("from flask")
+                                            || contents.contains("import flask")
+                                        {
                                             has_flask.store(true, Ordering::Relaxed);
                                         }
-                                        if contents.contains("from django") || contents.contains("import django") {
+                                        if contents.contains("from django")
+                                            || contents.contains("import django")
+                                        {
                                             has_django.store(true, Ordering::Relaxed);
                                         }
                                     }
@@ -456,10 +466,11 @@ impl WorkspaceScanner {
                             Language::JavaScript | Language::TypeScript => {
                                 if !has_express.load(Ordering::Relaxed) {
                                     if let Ok(contents) = fs::read_to_string(path) {
-                                        if contents.contains("require('express')") ||
-                                           contents.contains("require(\"express\")") ||
-                                           contents.contains("from 'express'") ||
-                                           contents.contains("from \"express\"") {
+                                        if contents.contains("require('express')")
+                                            || contents.contains("require(\"express\")")
+                                            || contents.contains("from 'express'")
+                                            || contents.contains("from \"express\"")
+                                        {
                                             has_express.store(true, Ordering::Relaxed);
                                         }
                                     }
@@ -468,9 +479,10 @@ impl WorkspaceScanner {
                             Language::Go => {
                                 if !has_gin.load(Ordering::Relaxed) {
                                     if let Ok(contents) = fs::read_to_string(path) {
-                                        if contents.contains("github.com/gin-gonic/gin") ||
-                                           contents.contains("gin.Context") ||
-                                           contents.contains("gin.Engine") {
+                                        if contents.contains("github.com/gin-gonic/gin")
+                                            || contents.contains("gin.Context")
+                                            || contents.contains("gin.Engine")
+                                        {
                                             has_gin.store(true, Ordering::Relaxed);
                                         }
                                     }
@@ -481,7 +493,7 @@ impl WorkspaceScanner {
 
                         // Update progress counter
                         let count = file_count.fetch_add(1, Ordering::Relaxed) + 1;
-                        
+
                         // Emit progress callback (every 50 files)
                         if let Some(callback) = progress_callback {
                             let last = last_progress_count.load(Ordering::Relaxed);
@@ -621,22 +633,24 @@ impl WorkspaceScanner {
             .collect();
 
         // Compute workspace_id
-        let (workspace_id, workspace_id_source) =
-            if let Some(result) = compute_workspace_id(
-                git_remote.as_deref(),
-                Some(&workspace_id_meta),
-                Some(&label),
-            ) {
-                (Some(result.id), Some(result.source))
-            } else {
-                (None, None)
-            };
+        let (workspace_id, workspace_id_source) = if let Some(result) = compute_workspace_id(
+            git_remote.as_deref(),
+            Some(&workspace_id_meta),
+            Some(&label),
+        ) {
+            (Some(result.id), Some(result.source))
+        } else {
+            (None, None)
+        };
 
         // Final progress update
         if let Some(ref callback) = self.progress_callback {
             callback(ScanProgress {
                 file_count: source_files.len(),
-                languages: language_counts.keys().map(|l| l.as_str().to_string()).collect(),
+                languages: language_counts
+                    .keys()
+                    .map(|l| l.as_str().to_string())
+                    .collect(),
                 frameworks: Self::build_frameworks_list(
                     has_fastapi.load(Ordering::Relaxed),
                     has_flask.load(Ordering::Relaxed),
@@ -885,10 +899,12 @@ mod tests {
 
         assert!(!descriptor.label.is_empty());
         assert!(!descriptor.profiles.is_empty());
-        assert!(descriptor
-            .profiles
-            .iter()
-            .any(|p| p.id == "python_fastapi_backend"));
+        assert!(
+            descriptor
+                .profiles
+                .iter()
+                .any(|p| p.id == "python_fastapi_backend")
+        );
     }
 
     #[test]
@@ -912,10 +928,12 @@ mod tests {
         let info = scanner.scan().unwrap();
         let descriptor = info.to_workspace_descriptor();
 
-        assert!(descriptor
-            .profiles
-            .iter()
-            .any(|p| p.id == "python_generic_backend"));
+        assert!(
+            descriptor
+                .profiles
+                .iter()
+                .any(|p| p.id == "python_generic_backend")
+        );
     }
 
     #[test]
@@ -966,9 +984,21 @@ mod tests {
 
         // Should only find main.py, not the ignored files
         assert_eq!(info.source_files.len(), 1);
-        assert!(info.source_files.iter().any(|(p, _)| p.ends_with("main.py")));
-        assert!(info.source_files.iter().all(|(p, _)| !p.ends_with("app.log")));
-        assert!(info.source_files.iter().all(|(p, _)| !p.ends_with("secret.py")));
+        assert!(
+            info.source_files
+                .iter()
+                .any(|(p, _)| p.ends_with("main.py"))
+        );
+        assert!(
+            info.source_files
+                .iter()
+                .all(|(p, _)| !p.ends_with("app.log"))
+        );
+        assert!(
+            info.source_files
+                .iter()
+                .all(|(p, _)| !p.ends_with("secret.py"))
+        );
     }
 
     #[test]
@@ -992,7 +1022,15 @@ mod tests {
 
         // Should only find main.py, not the ignored files/dirs
         assert_eq!(info.source_files.len(), 1);
-        assert!(info.source_files.iter().any(|(p, _)| p.ends_with("main.py")));
-        assert!(info.source_files.iter().all(|(p, _)| !p.ends_with("temp.tmp")));
+        assert!(
+            info.source_files
+                .iter()
+                .any(|(p, _)| p.ends_with("main.py"))
+        );
+        assert!(
+            info.source_files
+                .iter()
+                .all(|(p, _)| !p.ends_with("temp.tmp"))
+        );
     }
 }

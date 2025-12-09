@@ -109,7 +109,11 @@ impl<'a> SessionRunner<'a> {
     /// * `client` - API client for making requests
     /// * `api_key` - API key for authentication
     /// * `config` - Runner configuration
-    pub fn with_config(client: &'a ApiClient, api_key: &'a str, config: SessionRunnerConfig) -> Self {
+    pub fn with_config(
+        client: &'a ApiClient,
+        api_key: &'a str,
+        config: SessionRunnerConfig,
+    ) -> Self {
         Self {
             client,
             api_key,

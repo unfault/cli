@@ -146,13 +146,15 @@ pub fn get_git_remote(workspace_root: &Path) -> Option<String> {
 /// Extract project name from pyproject.toml content.
 fn extract_pyproject_name(contents: &str) -> Option<String> {
     // Try [project].name first (PEP 621)
-    let project_section_re = regex::Regex::new(r#"\[project\]\s*\n[^\[]*?name\s*=\s*["\']([^"\']+)["\']"#).ok()?;
+    let project_section_re =
+        regex::Regex::new(r#"\[project\]\s*\n[^\[]*?name\s*=\s*["\']([^"\']+)["\']"#).ok()?;
     if let Some(captures) = project_section_re.captures(contents) {
         return Some(captures.get(1)?.as_str().to_string());
     }
 
     // Try [tool.poetry].name
-    let poetry_section_re = regex::Regex::new(r#"\[tool\.poetry\]\s*\n[^\[]*?name\s*=\s*["\']([^"\']+)["\']"#).ok()?;
+    let poetry_section_re =
+        regex::Regex::new(r#"\[tool\.poetry\]\s*\n[^\[]*?name\s*=\s*["\']([^"\']+)["\']"#).ok()?;
     if let Some(captures) = poetry_section_re.captures(contents) {
         return Some(captures.get(1)?.as_str().to_string());
     }
@@ -168,7 +170,8 @@ fn extract_package_json_name(contents: &str) -> Option<String> {
 
 /// Extract package name from Cargo.toml content.
 fn extract_cargo_toml_name(contents: &str) -> Option<String> {
-    let cargo_section_re = regex::Regex::new(r#"\[package\]\s*\n[^\[]*?name\s*=\s*["\']([^"\']+)["\']"#).ok()?;
+    let cargo_section_re =
+        regex::Regex::new(r#"\[package\]\s*\n[^\[]*?name\s*=\s*["\']([^"\']+)["\']"#).ok()?;
     if let Some(captures) = cargo_section_re.captures(contents) {
         return Some(captures.get(1)?.as_str().to_string());
     }

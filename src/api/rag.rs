@@ -239,11 +239,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let rag_response: RAGQueryResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let rag_response: RAGQueryResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse RAG response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(rag_response)
     }
@@ -319,7 +318,10 @@ mod tests {
         }"#;
         let context: RAGSessionContext = serde_json::from_str(json).unwrap();
         assert_eq!(context.session_id, "550e8400-e29b-41d4-a716-446655440000");
-        assert_eq!(context.workspace_label, Some("payments-service".to_string()));
+        assert_eq!(
+            context.workspace_label,
+            Some("payments-service".to_string())
+        );
         assert_eq!(context.total_findings, 5);
         assert_eq!(context.dimension_counts.get("Stability"), Some(&2));
     }

@@ -216,7 +216,12 @@ async fn run_command(command: Commands) -> i32 {
                 EXIT_CONFIG_ERROR
             }
         },
-        Commands::Review { output, verbose, profile, dimension } => {
+        Commands::Review {
+            output,
+            verbose,
+            profile,
+            dimension,
+        } => {
             // Convert OutputFormat to string for backward compatibility
             let output_format = match output {
                 OutputFormat::Json => "json".to_string(),
@@ -224,7 +229,7 @@ async fn run_command(command: Commands) -> i32 {
                 OutputFormat::Concise => "text".to_string(),
                 OutputFormat::Full => "text".to_string(),
             };
-            
+
             // Determine output mode
             let output_mode = match output {
                 OutputFormat::Basic => "basic".to_string(),
@@ -232,13 +237,17 @@ async fn run_command(command: Commands) -> i32 {
                 OutputFormat::Full => "full".to_string(),
                 OutputFormat::Json => "full".to_string(), // JSON is always full
             };
-            
+
             let args = commands::review::ReviewArgs {
                 output_format,
                 output_mode,
                 verbose,
                 profile,
-                dimensions: if dimension.is_empty() { None } else { Some(dimension) },
+                dimensions: if dimension.is_empty() {
+                    None
+                } else {
+                    Some(dimension)
+                },
             };
             match commands::review::execute(args).await {
                 Ok(exit_code) => exit_code,
@@ -290,12 +299,16 @@ fn run_llm_command(command: LlmCommands) -> i32 {
         LlmCommands::Ollama { endpoint, model } => {
             ConfigLlmArgs::Set(LlmProvider::Ollama { endpoint, model })
         }
-        LlmCommands::Custom { endpoint, model, api_key } => {
-            ConfigLlmArgs::Set(LlmProvider::Custom { endpoint, model, api_key })
-        }
-        LlmCommands::Show { show_secrets } => {
-            ConfigLlmArgs::Show { show_secrets }
-        }
+        LlmCommands::Custom {
+            endpoint,
+            model,
+            api_key,
+        } => ConfigLlmArgs::Set(LlmProvider::Custom {
+            endpoint,
+            model,
+            api_key,
+        }),
+        LlmCommands::Show { show_secrets } => ConfigLlmArgs::Show { show_secrets },
         LlmCommands::Remove => ConfigLlmArgs::Remove,
     };
 

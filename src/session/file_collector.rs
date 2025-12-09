@@ -177,10 +177,9 @@ impl FileCollector {
 
                 // Check include predicates (all must match)
                 if !hint.include.is_empty() {
-                    let all_match = hint
-                        .include
-                        .iter()
-                        .all(|p| self.matches_predicate_with_content(p, &relative_path, language, &contents));
+                    let all_match = hint.include.iter().all(|p| {
+                        self.matches_predicate_with_content(p, &relative_path, language, &contents)
+                    });
 
                     if !all_match {
                         return None;
@@ -188,10 +187,9 @@ impl FileCollector {
                 }
 
                 // Check exclude predicates (any match excludes)
-                let any_exclude = hint
-                    .exclude
-                    .iter()
-                    .any(|p| self.matches_predicate_with_content(p, &relative_path, language, &contents));
+                let any_exclude = hint.exclude.iter().any(|p| {
+                    self.matches_predicate_with_content(p, &relative_path, language, &contents)
+                });
 
                 if any_exclude {
                     return None;
@@ -313,10 +311,7 @@ impl FileCollector {
     ///
     /// * `Ok(CollectedFiles)` - All collected files
     /// * `Err(_)` - Failed to collect files
-    pub fn collect_all(
-        &self,
-        source_files: &[(PathBuf, Language)],
-    ) -> Result<CollectedFiles> {
+    pub fn collect_all(&self, source_files: &[(PathBuf, Language)]) -> Result<CollectedFiles> {
         self.collect(&[], source_files)
     }
 }
@@ -341,10 +336,7 @@ mod tests {
         let path1 = create_test_file(temp_dir.path(), "main.py", "print('hello')");
         let path2 = create_test_file(temp_dir.path(), "lib.py", "def foo(): pass");
 
-        let source_files = vec![
-            (path1, Language::Python),
-            (path2, Language::Python),
-        ];
+        let source_files = vec![(path1, Language::Python), (path2, Language::Python)];
 
         let collector = FileCollector::new(temp_dir.path());
         let result = collector.collect_all(&source_files).unwrap();
@@ -360,10 +352,7 @@ mod tests {
         let py_path = create_test_file(temp_dir.path(), "main.py", "print('hello')");
         let rs_path = create_test_file(temp_dir.path(), "main.rs", "fn main() {}");
 
-        let source_files = vec![
-            (py_path, Language::Python),
-            (rs_path, Language::Rust),
-        ];
+        let source_files = vec![(py_path, Language::Python), (rs_path, Language::Rust)];
 
         let hints = vec![FileQueryHint {
             id: "python_files".to_string(),
@@ -393,10 +382,7 @@ mod tests {
         let main_path = create_test_file(temp_dir.path(), "main.py", "print('hello')");
         let test_path = create_test_file(temp_dir.path(), "test_main.py", "def test(): pass");
 
-        let source_files = vec![
-            (main_path, Language::Python),
-            (test_path, Language::Python),
-        ];
+        let source_files = vec![(main_path, Language::Python), (test_path, Language::Python)];
 
         let hints = vec![FileQueryHint {
             id: "test_files".to_string(),
@@ -425,10 +411,7 @@ mod tests {
         let src_path = create_test_file(temp_dir.path(), "src/main.py", "print('hello')");
         let root_path = create_test_file(temp_dir.path(), "main.py", "print('root')");
 
-        let source_files = vec![
-            (src_path, Language::Python),
-            (root_path, Language::Python),
-        ];
+        let source_files = vec![(src_path, Language::Python), (root_path, Language::Python)];
 
         let hints = vec![FileQueryHint {
             id: "src_files".to_string(),
@@ -475,7 +458,10 @@ mod tests {
                 kind: "text_contains_any".to_string(),
                 value: None,
                 pattern: None,
-                values: Some(vec!["from fastapi".to_string(), "import fastapi".to_string()]),
+                values: Some(vec![
+                    "from fastapi".to_string(),
+                    "import fastapi".to_string(),
+                ]),
             }],
             exclude: vec![],
         }];
@@ -493,10 +479,7 @@ mod tests {
         let main_path = create_test_file(temp_dir.path(), "main.py", "print('hello')");
         let test_path = create_test_file(temp_dir.path(), "test_main.py", "def test(): pass");
 
-        let source_files = vec![
-            (main_path, Language::Python),
-            (test_path, Language::Python),
-        ];
+        let source_files = vec![(main_path, Language::Python), (test_path, Language::Python)];
 
         let hints = vec![FileQueryHint {
             id: "non_test_files".to_string(),
@@ -558,10 +541,7 @@ mod tests {
         let path1 = create_test_file(temp_dir.path(), "small.py", "x=1");
         let path2 = create_test_file(temp_dir.path(), "large.py", "x=1\n".repeat(1000).as_str());
 
-        let source_files = vec![
-            (path1, Language::Python),
-            (path2, Language::Python),
-        ];
+        let source_files = vec![(path1, Language::Python), (path2, Language::Python)];
 
         let hints = vec![FileQueryHint {
             id: "limited".to_string(),
@@ -658,16 +638,9 @@ mod tests {
             "both.py",
             "from fastapi import FastAPI\nfrom pydantic import BaseModel",
         );
-        let one_path = create_test_file(
-            temp_dir.path(),
-            "one.py",
-            "from fastapi import FastAPI",
-        );
+        let one_path = create_test_file(temp_dir.path(), "one.py", "from fastapi import FastAPI");
 
-        let source_files = vec![
-            (both_path, Language::Python),
-            (one_path, Language::Python),
-        ];
+        let source_files = vec![(both_path, Language::Python), (one_path, Language::Python)];
 
         let hints = vec![FileQueryHint {
             id: "fastapi_pydantic".to_string(),
@@ -698,10 +671,7 @@ mod tests {
         let path1 = create_test_file(temp_dir.path(), "a.py", content1);
         let path2 = create_test_file(temp_dir.path(), "b.py", content2);
 
-        let source_files = vec![
-            (path1, Language::Python),
-            (path2, Language::Python),
-        ];
+        let source_files = vec![(path1, Language::Python), (path2, Language::Python)];
 
         let collector = FileCollector::new(temp_dir.path());
         let result = collector.collect_all(&source_files).unwrap();
@@ -717,10 +687,7 @@ mod tests {
         let path1 = create_test_file(temp_dir.path(), "main.rs", "fn main() {}");
         let path2 = create_test_file(temp_dir.path(), "lib.rs", "pub fn helper() {}");
 
-        let source_files = vec![
-            (path1, Language::Rust),
-            (path2, Language::Rust),
-        ];
+        let source_files = vec![(path1, Language::Rust), (path2, Language::Rust)];
 
         // Hints that won't match any files (looking for axum patterns that don't exist)
         let hints = vec![FileQueryHint {

@@ -264,12 +264,12 @@ impl Config {
 
         // Create parent directory if it doesn't exist
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory: {}", parent.display())
+            })?;
         }
 
-        let contents = serde_json::to_string_pretty(self)
-            .context("Failed to serialize config")?;
+        let contents = serde_json::to_string_pretty(self).context("Failed to serialize config")?;
         fs::write(&path, contents)
             .with_context(|| format!("Failed to write config file: {}", path.display()))?;
 
@@ -312,8 +312,7 @@ pub fn default_base_url() -> String {
 /// - macOS: `~/Library/Application Support/unfault/config.json`
 /// - Windows: `%APPDATA%\unfault\config.json`
 fn config_path() -> Result<PathBuf> {
-    let config_dir = dirs_config_dir()
-        .context("Could not determine config directory")?;
+    let config_dir = dirs_config_dir().context("Could not determine config directory")?;
     Ok(config_dir.join("unfault").join("config.json"))
 }
 
@@ -411,7 +410,7 @@ mod tests {
         // Clear env var to test stored URL
         // SAFETY: Test code runs serially with serial_test, no other threads access this env var
         unsafe { env::remove_var(BASE_URL_ENV_VAR) };
-        
+
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join("unfault");
         fs::create_dir_all(&config_dir).unwrap();
@@ -440,12 +439,12 @@ mod tests {
             "sk_live_test123".to_string(),
             "http://stored.example.com".to_string(),
         );
-        
+
         // Set env var - should take precedence
         // SAFETY: Test code runs serially with serial_test, no other threads access this env var
         unsafe { env::set_var(BASE_URL_ENV_VAR, "http://env.example.com") };
         assert_eq!(config.base_url(), "http://env.example.com");
-        
+
         // Clear env var - should fall back to stored URL
         // SAFETY: Test code runs serially with serial_test, no other threads access this env var
         unsafe { env::remove_var(BASE_URL_ENV_VAR) };

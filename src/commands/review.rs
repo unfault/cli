@@ -44,13 +44,13 @@ fn display_subscription_warning(warning: &SubscriptionWarning) {
         "trial_expired" => "⚠",
         _ => "ℹ",
     };
-    
+
     let color = match warning.warning_type.as_str() {
         "trial_ending" => "cyan",
         "trial_expired" => "yellow",
         _ => "white",
     };
-    
+
     eprintln!();
     eprintln!(
         "{} {}",
@@ -312,11 +312,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     }
 
     if args.verbose {
-        eprintln!(
-            "\n{} Trace ID: {}",
-            "DEBUG".yellow(),
-            trace_id.cyan()
-        );
+        eprintln!("\n{} Trace ID: {}", "DEBUG".yellow(), trace_id.cyan());
         eprintln!(
             "\n{} Session created: {}",
             "DEBUG".yellow(),
@@ -387,11 +383,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     }
 
     // Display results
-    let total_findings: usize = run_response
-        .contexts
-        .iter()
-        .map(|c| c.findings.len())
-        .sum();
+    let total_findings: usize = run_response.contexts.iter().map(|c| c.findings.len()).sum();
 
     let _matched_files = workspace_info.source_files.len();
 
@@ -411,7 +403,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     } else {
         // Text output (basic or full)
         println!();
-        
+
         // Display appropriate message based on findings count
         if total_findings == 0 {
             if run_response.is_limited {
@@ -487,7 +479,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
                 // Basic mode: grouped display
                 display_findings_grouped(&all_findings);
             }
-            
+
             // Show limited results notice if applicable
             if run_response.is_limited {
                 if let Some(total) = run_response.total_findings_count {
@@ -495,7 +487,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
                 }
             }
         }
-        
+
         // Display subscription warning from run response if present and not already shown
         // (session response warning takes precedence, but run response may have updated message)
         if let Some(warning) = &run_response.subscription_warning {

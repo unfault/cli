@@ -80,12 +80,18 @@ impl WorkspaceSettings {
     /// - `*.missing_timeout` - Matches this rule in any language
     /// - `python.**` - Matches all rules starting with `python.`
     pub fn is_rule_excluded(&self, rule_id: &str) -> bool {
-        self.rules.exclude.iter().any(|pattern| glob_match(pattern, rule_id))
+        self.rules
+            .exclude
+            .iter()
+            .any(|pattern| glob_match(pattern, rule_id))
     }
 
     /// Check if a rule ID matches any inclusion pattern.
     pub fn is_rule_included(&self, rule_id: &str) -> bool {
-        self.rules.include.iter().any(|pattern| glob_match(pattern, rule_id))
+        self.rules
+            .include
+            .iter()
+            .any(|pattern| glob_match(pattern, rule_id))
     }
 
     /// Get severity override for a rule, if any.
@@ -98,7 +104,11 @@ impl WorkspaceSettings {
     /// Returns a new list with:
     /// - Excluded rules removed
     /// - Included rules added (from the `all_available_rules` set)
-    pub fn filter_rules(&self, profile_rules: &[String], all_available_rules: &[String]) -> Vec<String> {
+    pub fn filter_rules(
+        &self,
+        profile_rules: &[String],
+        all_available_rules: &[String],
+    ) -> Vec<String> {
         let mut result: Vec<String> = profile_rules
             .iter()
             .filter(|rule_id| !self.is_rule_excluded(rule_id))
@@ -131,7 +141,7 @@ fn glob_match(pattern: &str, rule_id: &str) -> bool {
     // Convert glob pattern to regex
     let regex_pattern = pattern
         .replace('.', r"\.")
-        .replace("**", "§DOUBLESTAR§")  // Temporary placeholder
+        .replace("**", "§DOUBLESTAR§") // Temporary placeholder
         .replace('*', r"[^.]*")
         .replace("§DOUBLESTAR§", ".*");
 
@@ -179,7 +189,7 @@ pub struct LoadedSettings {
 /// Returns `None` if no configuration is found.
 pub fn load_settings(project_dir: &Path) -> Option<LoadedSettings> {
     // Try manifest files first (they take precedence)
-    
+
     // 1. pyproject.toml
     let pyproject_path = project_dir.join("pyproject.toml");
     if pyproject_path.exists() {
@@ -235,7 +245,7 @@ pub fn load_settings(project_dir: &Path) -> Option<LoadedSettings> {
 fn parse_pyproject_toml(path: &Path) -> Option<WorkspaceSettings> {
     let contents = fs::read_to_string(path).ok()?;
     let doc: toml::Value = toml::from_str(&contents).ok()?;
-    
+
     let tool_unfault = doc.get("tool")?.get("unfault")?;
     parse_toml_settings(tool_unfault)
 }
@@ -244,7 +254,7 @@ fn parse_pyproject_toml(path: &Path) -> Option<WorkspaceSettings> {
 fn parse_cargo_toml(path: &Path) -> Option<WorkspaceSettings> {
     let contents = fs::read_to_string(path).ok()?;
     let doc: toml::Value = toml::from_str(&contents).ok()?;
-    
+
     let metadata_unfault = doc.get("package")?.get("metadata")?.get("unfault")?;
     parse_toml_settings(metadata_unfault)
 }
@@ -260,7 +270,7 @@ fn parse_unfault_toml(path: &Path) -> Option<WorkspaceSettings> {
 fn parse_package_json(path: &Path) -> Option<WorkspaceSettings> {
     let contents = fs::read_to_string(path).ok()?;
     let doc: serde_json::Value = serde_json::from_str(&contents).ok()?;
-    
+
     let unfault = doc.get("unfault")?;
     let settings: WorkspaceSettings = serde_json::from_value(unfault.clone()).ok()?;
     Some(settings)
@@ -285,8 +295,14 @@ mod tests {
 
     #[test]
     fn test_glob_match_exact() {
-        assert!(glob_match("python.http.missing_timeout", "python.http.missing_timeout"));
-        assert!(!glob_match("python.http.missing_timeout", "python.http.missing_retry"));
+        assert!(glob_match(
+            "python.http.missing_timeout",
+            "python.http.missing_timeout"
+        ));
+        assert!(!glob_match(
+            "python.http.missing_timeout",
+            "python.http.missing_retry"
+        ));
     }
 
     #[test]
@@ -302,7 +318,10 @@ mod tests {
     fn test_glob_match_star_prefix() {
         assert!(glob_match("*.missing_timeout", "python.missing_timeout"));
         assert!(glob_match("*.missing_timeout", "go.missing_timeout"));
-        assert!(!glob_match("*.missing_timeout", "python.http.missing_timeout"));
+        assert!(!glob_match(
+            "*.missing_timeout",
+            "python.http.missing_timeout"
+        ));
     }
 
     #[test]
@@ -337,10 +356,7 @@ mod tests {
     fn test_workspace_settings_is_rule_excluded() {
         let settings = WorkspaceSettings {
             rules: RuleSettings {
-                exclude: vec![
-                    "python.http.*".to_string(),
-                    "go.bare_recover".to_string(),
-                ],
+                exclude: vec!["python.http.*".to_string(), "go.bare_recover".to_string()],
                 ..Default::default()
             },
             ..Default::default()
@@ -379,8 +395,14 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(settings.get_severity_override("python.bare_except"), Some("low"));
-        assert_eq!(settings.get_severity_override("python.http.missing_timeout"), None);
+        assert_eq!(
+            settings.get_severity_override("python.bare_except"),
+            Some("low")
+        );
+        assert_eq!(
+            settings.get_severity_override("python.http.missing_timeout"),
+            None
+        );
     }
 
     #[test]
@@ -455,12 +477,18 @@ mod tests {
         }"#;
 
         let settings: WorkspaceSettings = serde_json::from_str(json).unwrap();
-        
+
         assert_eq!(settings.profile, Some("python_fastapi_backend".to_string()));
-        assert_eq!(settings.dimensions, Some(vec!["stability".to_string(), "correctness".to_string()]));
+        assert_eq!(
+            settings.dimensions,
+            Some(vec!["stability".to_string(), "correctness".to_string()])
+        );
         assert_eq!(settings.rules.exclude, vec!["python.http.*"]);
         assert_eq!(settings.rules.include, vec!["python.security.*"]);
-        assert_eq!(settings.rules.severity.get("python.bare_except"), Some(&"low".to_string()));
+        assert_eq!(
+            settings.rules.severity.get("python.bare_except"),
+            Some(&"low".to_string())
+        );
     }
 
     #[test]
@@ -472,10 +500,13 @@ mod tests {
         }"#;
 
         let settings: WorkspaceSettings = serde_json::from_str(json).unwrap();
-        
+
         assert!(settings.profile.is_none());
         assert!(settings.dimensions.is_none());
-        assert_eq!(settings.rules.exclude, vec!["python.missing_structured_logging"]);
+        assert_eq!(
+            settings.rules.exclude,
+            vec!["python.missing_structured_logging"]
+        );
         assert!(settings.rules.include.is_empty());
     }
 
@@ -487,8 +518,10 @@ mod tests {
     fn test_parse_pyproject_toml() {
         let temp_dir = TempDir::new().unwrap();
         let pyproject_path = temp_dir.path().join("pyproject.toml");
-        
-        fs::write(&pyproject_path, r#"
+
+        fs::write(
+            &pyproject_path,
+            r#"
 [project]
 name = "my-project"
 
@@ -502,29 +535,38 @@ include = ["python.security.*"]
 
 [tool.unfault.rules.severity]
 "python.bare_except" = "low"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let settings = parse_pyproject_toml(&pyproject_path).unwrap();
-        
+
         assert_eq!(settings.profile, Some("python_fastapi_backend".to_string()));
         assert_eq!(settings.dimensions, Some(vec!["stability".to_string()]));
         assert_eq!(settings.rules.exclude, vec!["python.http.*"]);
         assert_eq!(settings.rules.include, vec!["python.security.*"]);
-        assert_eq!(settings.rules.severity.get("python.bare_except"), Some(&"low".to_string()));
+        assert_eq!(
+            settings.rules.severity.get("python.bare_except"),
+            Some(&"low".to_string())
+        );
     }
 
     #[test]
     fn test_parse_pyproject_toml_no_unfault_section() {
         let temp_dir = TempDir::new().unwrap();
         let pyproject_path = temp_dir.path().join("pyproject.toml");
-        
-        fs::write(&pyproject_path, r#"
+
+        fs::write(
+            &pyproject_path,
+            r#"
 [project]
 name = "my-project"
 
 [tool.black]
 line-length = 100
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let settings = parse_pyproject_toml(&pyproject_path);
         assert!(settings.is_none());
@@ -534,8 +576,10 @@ line-length = 100
     fn test_parse_cargo_toml() {
         let temp_dir = TempDir::new().unwrap();
         let cargo_path = temp_dir.path().join("Cargo.toml");
-        
-        fs::write(&cargo_path, r#"
+
+        fs::write(
+            &cargo_path,
+            r#"
 [package]
 name = "my-crate"
 version = "0.1.0"
@@ -549,26 +593,38 @@ exclude = ["rust.println_in_lib"]
 
 [package.metadata.unfault.rules.severity]
 "rust.unsafe_unwrap" = "critical"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let settings = parse_cargo_toml(&cargo_path).unwrap();
-        
+
         assert_eq!(settings.profile, Some("rust_axum_service".to_string()));
-        assert_eq!(settings.dimensions, Some(vec!["stability".to_string(), "correctness".to_string()]));
+        assert_eq!(
+            settings.dimensions,
+            Some(vec!["stability".to_string(), "correctness".to_string()])
+        );
         assert_eq!(settings.rules.exclude, vec!["rust.println_in_lib"]);
-        assert_eq!(settings.rules.severity.get("rust.unsafe_unwrap"), Some(&"critical".to_string()));
+        assert_eq!(
+            settings.rules.severity.get("rust.unsafe_unwrap"),
+            Some(&"critical".to_string())
+        );
     }
 
     #[test]
     fn test_parse_cargo_toml_no_unfault_section() {
         let temp_dir = TempDir::new().unwrap();
         let cargo_path = temp_dir.path().join("Cargo.toml");
-        
-        fs::write(&cargo_path, r#"
+
+        fs::write(
+            &cargo_path,
+            r#"
 [package]
 name = "my-crate"
 version = "0.1.0"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let settings = parse_cargo_toml(&cargo_path);
         assert!(settings.is_none());
@@ -578,8 +634,10 @@ version = "0.1.0"
     fn test_parse_package_json() {
         let temp_dir = TempDir::new().unwrap();
         let package_path = temp_dir.path().join("package.json");
-        
-        fs::write(&package_path, r#"{
+
+        fs::write(
+            &package_path,
+            r#"{
     "name": "my-app",
     "version": "1.0.0",
     "unfault": {
@@ -592,25 +650,43 @@ version = "0.1.0"
             }
         }
     }
-}"#).unwrap();
+}"#,
+        )
+        .unwrap();
 
         let settings = parse_package_json(&package_path).unwrap();
-        
-        assert_eq!(settings.profile, Some("typescript_express_backend".to_string()));
-        assert_eq!(settings.dimensions, Some(vec!["stability".to_string(), "security".to_string()]));
-        assert_eq!(settings.rules.exclude, vec!["typescript.console_in_production"]);
-        assert_eq!(settings.rules.severity.get("typescript.empty_catch"), Some(&"critical".to_string()));
+
+        assert_eq!(
+            settings.profile,
+            Some("typescript_express_backend".to_string())
+        );
+        assert_eq!(
+            settings.dimensions,
+            Some(vec!["stability".to_string(), "security".to_string()])
+        );
+        assert_eq!(
+            settings.rules.exclude,
+            vec!["typescript.console_in_production"]
+        );
+        assert_eq!(
+            settings.rules.severity.get("typescript.empty_catch"),
+            Some(&"critical".to_string())
+        );
     }
 
     #[test]
     fn test_parse_package_json_no_unfault_field() {
         let temp_dir = TempDir::new().unwrap();
         let package_path = temp_dir.path().join("package.json");
-        
-        fs::write(&package_path, r#"{
+
+        fs::write(
+            &package_path,
+            r#"{
     "name": "my-app",
     "version": "1.0.0"
-}"#).unwrap();
+}"#,
+        )
+        .unwrap();
 
         let settings = parse_package_json(&package_path);
         assert!(settings.is_none());
@@ -620,8 +696,10 @@ version = "0.1.0"
     fn test_parse_unfault_toml() {
         let temp_dir = TempDir::new().unwrap();
         let unfault_path = temp_dir.path().join("unfault.toml");
-        
-        fs::write(&unfault_path, r#"
+
+        fs::write(
+            &unfault_path,
+            r#"
 profile = "go_gin_service"
 dimensions = ["stability", "performance"]
 
@@ -631,15 +709,26 @@ include = ["go.security.*"]
 
 [rules.severity]
 "go.unchecked_error" = "critical"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let settings = parse_unfault_toml(&unfault_path).unwrap();
-        
+
         assert_eq!(settings.profile, Some("go_gin_service".to_string()));
-        assert_eq!(settings.dimensions, Some(vec!["stability".to_string(), "performance".to_string()]));
-        assert_eq!(settings.rules.exclude, vec!["go.missing_structured_logging"]);
+        assert_eq!(
+            settings.dimensions,
+            Some(vec!["stability".to_string(), "performance".to_string()])
+        );
+        assert_eq!(
+            settings.rules.exclude,
+            vec!["go.missing_structured_logging"]
+        );
         assert_eq!(settings.rules.include, vec!["go.security.*"]);
-        assert_eq!(settings.rules.severity.get("go.unchecked_error"), Some(&"critical".to_string()));
+        assert_eq!(
+            settings.rules.severity.get("go.unchecked_error"),
+            Some(&"critical".to_string())
+        );
     }
 
     // =============================================================================
@@ -649,34 +738,49 @@ include = ["go.security.*"]
     #[test]
     fn test_load_settings_priority_pyproject_wins() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create both pyproject.toml and unfault.toml
-        fs::write(temp_dir.path().join("pyproject.toml"), r#"
+        fs::write(
+            temp_dir.path().join("pyproject.toml"),
+            r#"
 [tool.unfault]
 profile = "python_from_pyproject"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
-        fs::write(temp_dir.path().join("unfault.toml"), r#"
+        fs::write(
+            temp_dir.path().join("unfault.toml"),
+            r#"
 profile = "from_unfault_toml"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let loaded = load_settings(temp_dir.path()).unwrap();
-        
+
         assert_eq!(loaded.source, SettingsSource::PyprojectToml);
-        assert_eq!(loaded.settings.profile, Some("python_from_pyproject".to_string()));
+        assert_eq!(
+            loaded.settings.profile,
+            Some("python_from_pyproject".to_string())
+        );
     }
 
     #[test]
     fn test_load_settings_fallback_to_unfault_toml() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create only unfault.toml
-        fs::write(temp_dir.path().join("unfault.toml"), r#"
+        fs::write(
+            temp_dir.path().join("unfault.toml"),
+            r#"
 profile = "go_gin_service"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let loaded = load_settings(temp_dir.path()).unwrap();
-        
+
         assert_eq!(loaded.source, SettingsSource::UnfaultToml);
         assert_eq!(loaded.settings.profile, Some("go_gin_service".to_string()));
     }
@@ -684,7 +788,7 @@ profile = "go_gin_service"
     #[test]
     fn test_load_settings_none_when_no_config() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         let loaded = load_settings(temp_dir.path());
         assert!(loaded.is_none());
     }
@@ -692,20 +796,28 @@ profile = "go_gin_service"
     #[test]
     fn test_load_settings_skip_invalid_pyproject() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create pyproject.toml without [tool.unfault]
-        fs::write(temp_dir.path().join("pyproject.toml"), r#"
+        fs::write(
+            temp_dir.path().join("pyproject.toml"),
+            r#"
 [project]
 name = "test"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         // Create valid unfault.toml as fallback
-        fs::write(temp_dir.path().join("unfault.toml"), r#"
+        fs::write(
+            temp_dir.path().join("unfault.toml"),
+            r#"
 profile = "fallback"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let loaded = load_settings(temp_dir.path()).unwrap();
-        
+
         // Should fall through to unfault.toml since pyproject.toml has no [tool.unfault]
         assert_eq!(loaded.source, SettingsSource::UnfaultToml);
         assert_eq!(loaded.settings.profile, Some("fallback".to_string()));

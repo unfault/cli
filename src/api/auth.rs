@@ -219,7 +219,7 @@ mod tests {
             "verification_uri": "https://app.unfault.dev/device",
             "expires_in": 900
         }"#;
-        
+
         let response: DeviceCodeResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.device_code, "xyz789");
         assert_eq!(response.user_code, "EFGH5678");
@@ -246,10 +246,10 @@ mod tests {
         let original = PollResponse::Complete {
             api_key: "uf_live_test_key_12345".to_string(),
         };
-        
+
         let json = serde_json::to_string(&original).unwrap();
         let parsed: PollResponse = serde_json::from_str(&json).unwrap();
-        
+
         match parsed {
             PollResponse::Complete { api_key } => {
                 assert_eq!(api_key, "uf_live_test_key_12345");
@@ -300,7 +300,7 @@ mod tests {
             "verification_uri": "https://unfault.dev/auth",
             "expires_in": 3600
         }"#;
-        
+
         let response: DeviceCodeResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.expires_in, 3600);
     }
@@ -313,7 +313,7 @@ mod tests {
             "verification_uri": "https://example.com/auth",
             "expires_in": 60
         }"#;
-        
+
         let response: DeviceCodeResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.expires_in, 60);
     }
@@ -325,11 +325,11 @@ mod tests {
             "uf_live_abcdefghijklmnopqrstuvwxyz123456", // 40 chars
             "uf_live_98765432109876543210987654321098", // 40 chars
         ];
-        
+
         for key in test_cases {
             let json = format!(r#"{{"status":"complete","api_key":"{}"}}"#, key);
             let response: PollResponse = serde_json::from_str(&json).unwrap();
-            
+
             match response {
                 PollResponse::Complete { api_key } => {
                     assert_eq!(api_key, key);
@@ -348,7 +348,7 @@ mod tests {
             "verification_uri": "https://测试.com/auth",
             "expires_in": 300
         }"#;
-        
+
         let response: DeviceCodeResponse = serde_json::from_str(json).unwrap();
         assert!(response.device_code.contains("测试"));
         assert!(response.verification_uri.contains("测试"));
