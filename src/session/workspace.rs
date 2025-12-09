@@ -483,7 +483,7 @@ impl WorkspaceScanner {
                         let count = file_count.fetch_add(1, Ordering::Relaxed) + 1;
                         
                         // Emit progress callback (every 50 files)
-                        if let Some(ref callback) = progress_callback {
+                        if let Some(callback) = progress_callback {
                             let last = last_progress_count.load(Ordering::Relaxed);
                             if count >= last + 50 || count == 1 {
                                 last_progress_count.store(count, Ordering::Relaxed);

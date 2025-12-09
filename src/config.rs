@@ -347,7 +347,8 @@ mod tests {
     #[test]
     fn test_config_new_with_url() {
         // Clear env var to test stored URL
-        env::remove_var(BASE_URL_ENV_VAR);
+        // SAFETY: Test code runs serially with serial_test, no other threads access this env var
+        unsafe { env::remove_var(BASE_URL_ENV_VAR) };
         let config = Config::new_with_url(
             "sk_live_test123".to_string(),
             "http://localhost:8000".to_string(),
@@ -370,7 +371,8 @@ mod tests {
     #[test]
     fn test_config_deserialization() {
         // Clear env var to test stored URL
-        env::remove_var(BASE_URL_ENV_VAR);
+        // SAFETY: Test code runs serially with serial_test, no other threads access this env var
+        unsafe { env::remove_var(BASE_URL_ENV_VAR) };
         let json = r#"{"api_key":"sk_live_test123","stored_base_url":"https://api.example.com"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.api_key, "sk_live_test123");
@@ -388,23 +390,27 @@ mod tests {
     #[test]
     fn test_default_base_url_without_env() {
         // Clear the env var if set
-        env::remove_var(BASE_URL_ENV_VAR);
+        // SAFETY: Test code runs serially with serial_test, no other threads access this env var
+        unsafe { env::remove_var(BASE_URL_ENV_VAR) };
         let url = default_base_url();
         assert_eq!(url, DEFAULT_BASE_URL);
     }
 
     #[test]
     fn test_default_base_url_with_env() {
-        env::set_var(BASE_URL_ENV_VAR, "http://localhost:9000");
+        // SAFETY: Test code runs serially with serial_test, no other threads access this env var
+        unsafe { env::set_var(BASE_URL_ENV_VAR, "http://localhost:9000") };
         let url = default_base_url();
         assert_eq!(url, "http://localhost:9000");
-        env::remove_var(BASE_URL_ENV_VAR);
+        // SAFETY: Test code runs serially with serial_test, no other threads access this env var
+        unsafe { env::remove_var(BASE_URL_ENV_VAR) };
     }
 
     #[test]
     fn test_config_save_and_load() {
         // Clear env var to test stored URL
-        env::remove_var(BASE_URL_ENV_VAR);
+        // SAFETY: Test code runs serially with serial_test, no other threads access this env var
+        unsafe { env::remove_var(BASE_URL_ENV_VAR) };
         
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join("unfault");
@@ -436,11 +442,13 @@ mod tests {
         );
         
         // Set env var - should take precedence
-        env::set_var(BASE_URL_ENV_VAR, "http://env.example.com");
+        // SAFETY: Test code runs serially with serial_test, no other threads access this env var
+        unsafe { env::set_var(BASE_URL_ENV_VAR, "http://env.example.com") };
         assert_eq!(config.base_url(), "http://env.example.com");
         
         // Clear env var - should fall back to stored URL
-        env::remove_var(BASE_URL_ENV_VAR);
+        // SAFETY: Test code runs serially with serial_test, no other threads access this env var
+        unsafe { env::remove_var(BASE_URL_ENV_VAR) };
         assert_eq!(config.base_url(), "http://stored.example.com");
     }
 
