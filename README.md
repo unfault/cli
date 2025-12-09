@@ -37,7 +37,11 @@ That's it. Unfault scans your codebase, detects frameworks and languages, and re
 
 ## Installation
 
-### From crates.io (Recommended)
+### From Releases (Recommended)
+
+Download the latest binary from [Releases](https://github.com/unfault/cli/releases) and add it to your PATH.
+
+### From crates.io
 
 ```bash
 cargo install unfault
