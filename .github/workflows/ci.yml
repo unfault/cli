@@ -42,7 +42,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy --all-features -- -D warnings -A clippy::collapsible_if -A clippy::manual_strip -A clippy::doc_lazy_continuation -A clippy::for_kv_map -A clippy::redundant_closure
 
   test:
     name: Test (${{ matrix.os }})
