@@ -278,6 +278,24 @@ pub struct SessionNewResponse {
     pub subscription_warning: Option<SubscriptionWarning>,
 }
 
+/// Source location for a finding
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FindingLocation {
+    /// File path relative to workspace root
+    pub file: String,
+    /// Starting line number (1-indexed)
+    pub start_line: u32,
+    /// Ending line number (1-indexed, optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    /// Starting column (1-indexed, optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_column: Option<u32>,
+    /// Ending column (1-indexed, optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<u32>,
+}
+
 /// Finding from analysis
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Finding {
@@ -297,6 +315,9 @@ pub struct Finding {
     pub confidence: f64,
     /// Dimension this finding relates to
     pub dimension: String,
+    /// Source location (file, line range)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<FindingLocation>,
     /// Unified diff for auto-fix
     pub diff: Option<String>,
     /// Preview of the fix

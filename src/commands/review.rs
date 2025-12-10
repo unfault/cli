@@ -18,6 +18,7 @@
 //! unfault review
 //! unfault review --output full
 //! unfault review --output json
+//! unfault review --output sarif
 //! ```
 
 use anyhow::{Context, Result};
@@ -110,7 +111,7 @@ fn handle_api_error(error: ApiError) -> i32 {
 
 /// Arguments for the review command
 pub struct ReviewArgs {
-    /// Output format (text or json)
+    /// Output format (text, json, or sarif)
     pub output_format: String,
     /// Output mode (concise or full)
     pub output_mode: String,
@@ -387,7 +388,11 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
 
     let _matched_files = workspace_info.source_files.len();
 
-    if args.output_format == "json" {
+    if args.output_format == "sarif" {
+        // SARIF output for GitHub Code Scanning / IDE integration
+        let sarif = generate_sarif_output(&run_response, &workspace_label);
+        println!("{}", serde_json::to_string_pretty(&sarif).unwrap());
+    } else if args.output_format == "json" {
         // JSON output - include subscription and limited info
         let output = serde_json::json!({
             "session_id": run_response.session_id,
@@ -648,6 +653,191 @@ fn display_finding(finding: &crate::api::Finding) {
     println!();
 }
 
+/// Generate SARIF 2.1.0 output for GitHub Code Scanning and IDE integration
+fn generate_sarif_output(
+    run_response: &crate::api::SessionRunResponse,
+    workspace_label: &str,
+) -> serde_json::Value {
+    use std::collections::HashMap;
+
+    // Collect all findings and build rule registry
+    let all_findings: Vec<&crate::api::Finding> = run_response
+        .contexts
+        .iter()
+        .flat_map(|c| c.findings.iter())
+        .collect();
+
+    // Build unique rules map
+    let mut rules_map: HashMap<String, &crate::api::Finding> = HashMap::new();
+    for finding in &all_findings {
+        rules_map.entry(finding.rule_id.clone()).or_insert(finding);
+    }
+
+    // Build SARIF rules array
+    let rules: Vec<serde_json::Value> = rules_map
+        .iter()
+        .map(|(rule_id, finding)| {
+            let mut rule = serde_json::json!({
+                "id": rule_id,
+                "shortDescription": {
+                    "text": finding.title
+                },
+                "fullDescription": {
+                    "text": finding.description
+                },
+                "defaultConfiguration": {
+                    "level": severity_to_sarif_level(&finding.severity)
+                },
+                "properties": {
+                    "tags": [finding.dimension.to_lowercase()],
+                    "precision": "high"
+                }
+            });
+
+            // Add help URL if we have a rule ID pattern
+            if let Some(obj) = rule.as_object_mut() {
+                obj.insert(
+                    "helpUri".to_string(),
+                    serde_json::json!(format!(
+                        "https://docs.unfault.dev/rules/{}",
+                        rule_id.replace('.', "/")
+                    )),
+                );
+            }
+
+            rule
+        })
+        .collect();
+
+    // Build SARIF results array
+    let results: Vec<serde_json::Value> = all_findings
+        .iter()
+        .map(|finding| {
+            let mut result = serde_json::json!({
+                "ruleId": finding.rule_id,
+                "level": severity_to_sarif_level(&finding.severity),
+                "message": {
+                    "text": finding.description
+                },
+                "properties": {
+                    "confidence": finding.confidence,
+                    "dimension": finding.dimension,
+                    "kind": finding.kind
+                }
+            });
+
+            // Add location if available
+            if let Some(location) = &finding.location {
+                let mut region = serde_json::json!({
+                    "startLine": location.start_line
+                });
+
+                if let Some(end_line) = location.end_line {
+                    region["endLine"] = serde_json::json!(end_line);
+                }
+                if let Some(start_col) = location.start_column {
+                    region["startColumn"] = serde_json::json!(start_col);
+                }
+                if let Some(end_col) = location.end_column {
+                    region["endColumn"] = serde_json::json!(end_col);
+                }
+
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert(
+                        "locations".to_string(),
+                        serde_json::json!([{
+                            "physicalLocation": {
+                                "artifactLocation": {
+                                    "uri": location.file,
+                                    "uriBaseId": "%SRCROOT%"
+                                },
+                                "region": region
+                            }
+                        }]),
+                    );
+                }
+            }
+
+            // Add fix if diff is available
+            if let Some(diff) = &finding.diff {
+                if let Some(location) = &finding.location {
+                    if let Some(obj) = result.as_object_mut() {
+                        obj.insert(
+                            "fixes".to_string(),
+                            serde_json::json!([{
+                                "description": {
+                                    "text": "Apply suggested fix"
+                                },
+                                "artifactChanges": [{
+                                    "artifactLocation": {
+                                        "uri": location.file,
+                                        "uriBaseId": "%SRCROOT%"
+                                    },
+                                    "replacements": [{
+                                        "deletedRegion": {
+                                            "startLine": location.start_line,
+                                            "endLine": location.end_line.unwrap_or(location.start_line)
+                                        },
+                                        "insertedContent": {
+                                            "text": extract_fix_from_diff(diff)
+                                        }
+                                    }]
+                                }]
+                            }]),
+                        );
+                    }
+                }
+            }
+
+            result
+        })
+        .collect();
+
+    // Build complete SARIF document
+    serde_json::json!({
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "unfault",
+                    "informationUri": "https://unfault.dev",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "rules": rules
+                }
+            },
+            "results": results,
+            "originalUriBaseIds": {
+                "%SRCROOT%": {
+                    "uri": format!("file://{}/", workspace_label),
+                    "description": {
+                        "text": "The root directory of the analyzed workspace"
+                    }
+                }
+            }
+        }]
+    })
+}
+
+/// Convert Unfault severity to SARIF level
+fn severity_to_sarif_level(severity: &str) -> &'static str {
+    match severity {
+        "Critical" | "High" => "error",
+        "Medium" => "warning",
+        "Low" | "Info" => "note",
+        _ => "warning",
+    }
+}
+
+/// Extract the replacement text from a unified diff
+fn extract_fix_from_diff(diff: &str) -> String {
+    diff.lines()
+        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+        .map(|line| &line[1..]) // Remove the leading '+'
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,6 +886,7 @@ mod tests {
             severity: "Medium".to_string(),
             confidence: 0.85,
             dimension: "Stability".to_string(),
+            location: None,
             diff: None,
             fix_preview: None,
         };
@@ -714,6 +905,7 @@ mod tests {
                 severity: "High".to_string(),
                 confidence: 0.9,
                 dimension: "Stability".to_string(),
+                location: None,
                 diff: None,
                 fix_preview: None,
             },
@@ -726,6 +918,7 @@ mod tests {
                 severity: "High".to_string(),
                 confidence: 0.9,
                 dimension: "Stability".to_string(),
+                location: None,
                 diff: None,
                 fix_preview: None,
             },
@@ -738,6 +931,7 @@ mod tests {
                 severity: "Medium".to_string(),
                 confidence: 0.85,
                 dimension: "Correctness".to_string(),
+                location: None,
                 diff: None,
                 fix_preview: None,
             },
@@ -750,12 +944,99 @@ mod tests {
                 severity: "Critical".to_string(),
                 confidence: 0.95,
                 dimension: "Stability".to_string(),
+                location: None,
                 diff: None,
                 fix_preview: None,
             },
         ];
         let refs: Vec<&crate::api::Finding> = findings.iter().collect();
         display_findings_grouped(&refs);
+    }
+
+    #[test]
+    fn test_sarif_output_generation() {
+        let run_response = crate::api::SessionRunResponse {
+            session_id: "test_session".to_string(),
+            status: "completed".to_string(),
+            meta: serde_json::json!({}),
+            contexts: vec![crate::api::ContextResult {
+                context_id: "ctx_1".to_string(),
+                label: "Test".to_string(),
+                findings: vec![crate::api::Finding {
+                    id: "finding_001".to_string(),
+                    rule_id: "python.http.missing_timeout".to_string(),
+                    kind: "BehaviorThreat".to_string(),
+                    title: "Missing HTTP timeout".to_string(),
+                    description: "HTTP request without timeout".to_string(),
+                    severity: "High".to_string(),
+                    confidence: 0.9,
+                    dimension: "Stability".to_string(),
+                    location: Some(crate::api::FindingLocation {
+                        file: "src/main.py".to_string(),
+                        start_line: 10,
+                        end_line: Some(12),
+                        start_column: Some(5),
+                        end_column: Some(40),
+                    }),
+                    diff: Some("--- a/src/main.py\n+++ b/src/main.py\n@@ -10,1 +10,1 @@\n-requests.get(url)\n+requests.get(url, timeout=30)".to_string()),
+                    fix_preview: None,
+                }],
+            }],
+            elapsed_ms: 100,
+            error_message: None,
+            subscription_warning: None,
+            is_limited: false,
+            total_findings_count: None,
+        };
+
+        let sarif = generate_sarif_output(&run_response, "test-workspace");
+
+        // Verify SARIF structure
+        assert_eq!(sarif["version"], "2.1.0");
+        assert!(
+            sarif["$schema"]
+                .as_str()
+                .unwrap()
+                .contains("sarif-schema-2.1.0")
+        );
+
+        // Verify tool info
+        let tool = &sarif["runs"][0]["tool"]["driver"];
+        assert_eq!(tool["name"], "unfault");
+
+        // Verify rules
+        let rules = tool["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["id"], "python.http.missing_timeout");
+
+        // Verify results
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["ruleId"], "python.http.missing_timeout");
+        assert_eq!(results[0]["level"], "error"); // High severity -> error
+
+        // Verify location
+        let location = &results[0]["locations"][0]["physicalLocation"];
+        assert_eq!(location["artifactLocation"]["uri"], "src/main.py");
+        assert_eq!(location["region"]["startLine"], 10);
+        assert_eq!(location["region"]["endLine"], 12);
+    }
+
+    #[test]
+    fn test_severity_to_sarif_level() {
+        assert_eq!(severity_to_sarif_level("Critical"), "error");
+        assert_eq!(severity_to_sarif_level("High"), "error");
+        assert_eq!(severity_to_sarif_level("Medium"), "warning");
+        assert_eq!(severity_to_sarif_level("Low"), "note");
+        assert_eq!(severity_to_sarif_level("Info"), "note");
+        assert_eq!(severity_to_sarif_level("Unknown"), "warning");
+    }
+
+    #[test]
+    fn test_extract_fix_from_diff() {
+        let diff = "--- a/src/main.py\n+++ b/src/main.py\n@@ -10,1 +10,1 @@\n-old_line\n+new_line\n+another_new_line";
+        let fix = extract_fix_from_diff(diff);
+        assert_eq!(fix, "new_line\nanother_new_line");
     }
 
     #[test]

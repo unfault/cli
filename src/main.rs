@@ -32,6 +32,8 @@ pub enum OutputFormat {
     Full,
     /// JSON output format
     Json,
+    /// SARIF output format for GitHub Code Scanning / IDE integration
+    Sarif,
 }
 
 /// Main CLI structure
@@ -225,6 +227,7 @@ async fn run_command(command: Commands) -> i32 {
             // Convert OutputFormat to string for backward compatibility
             let output_format = match output {
                 OutputFormat::Json => "json".to_string(),
+                OutputFormat::Sarif => "sarif".to_string(),
                 OutputFormat::Basic => "text".to_string(),
                 OutputFormat::Concise => "text".to_string(),
                 OutputFormat::Full => "text".to_string(),
@@ -236,6 +239,7 @@ async fn run_command(command: Commands) -> i32 {
                 OutputFormat::Concise => "concise".to_string(),
                 OutputFormat::Full => "full".to_string(),
                 OutputFormat::Json => "full".to_string(), // JSON is always full
+                OutputFormat::Sarif => "full".to_string(), // SARIF is always full
             };
 
             let args = commands::review::ReviewArgs {

@@ -92,6 +92,7 @@ unfault review --dimension stability --dimension performance
 | `concise` | Summary statistics only |
 | `full` | Detailed findings with diffs |
 | `json` | Machine-readable output |
+| `sarif` | SARIF 2.1.0 for GitHub Code Scanning / IDE integration |
 
 ### `unfault ask`
 
@@ -152,7 +153,18 @@ unfault config llm remove
 Unfault is designed for CI pipelines. Use exit codes to gate deployments:
 
 ```yaml
-# GitHub Actions
+# GitHub Actions with Code Scanning (SARIF)
+- name: Run Unfault Analysis
+  run: unfault review --output sarif > results.sarif
+
+- name: Upload SARIF to GitHub
+  uses: github/codeql-action/upload-sarif@v2
+  with:
+    sarif_file: results.sarif
+```
+
+```yaml
+# GitHub Actions (simple)
 - name: Production Readiness Check
   run: unfault review
   continue-on-error: false
