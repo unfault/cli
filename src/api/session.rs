@@ -75,7 +75,7 @@ pub struct ApiRuleSettings {
 ///
 /// These settings control which profile, rules, and dimensions are used
 /// during analysis. Settings are typically read from the project's manifest
-/// file (pyproject.toml, Cargo.toml, package.json) or unfault.toml.
+/// file (pyproject.toml, Cargo.toml, package.json) or .unfault.toml.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiWorkspaceSettings {
     /// Override the auto-detected profile.

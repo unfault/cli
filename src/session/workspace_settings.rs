@@ -6,11 +6,11 @@
 //! - `pyproject.toml` → `[tool.unfault]`
 //! - `Cargo.toml` → `[package.metadata.unfault]`
 //! - `package.json` → `"unfault": {...}`
-//! - `unfault.toml` → Root level (standalone fallback)
+//! - `.unfault.toml` → Root level (standalone fallback)
 //!
 //! ## Priority
 //!
-//! Manifest file configuration takes precedence over standalone `unfault.toml`.
+//! Manifest file configuration takes precedence over standalone `.unfault.toml`.
 //! Only one source is used per project (no merging).
 
 use regex::Regex;
@@ -23,7 +23,7 @@ use std::path::Path;
 ///
 /// These settings control which profile, rules, and dimensions are used
 /// during analysis. Settings are read from the project's manifest file
-/// or a standalone `unfault.toml`.
+/// or a standalone `.unfault.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct WorkspaceSettings {
     /// Override the auto-detected profile.
@@ -163,7 +163,7 @@ pub enum SettingsSource {
     CargoToml,
     /// From package.json "unfault" field
     PackageJson,
-    /// From standalone unfault.toml
+    /// From standalone .unfault.toml
     UnfaultToml,
 }
 
@@ -184,7 +184,7 @@ pub struct LoadedSettings {
 /// 1. `pyproject.toml` [tool.unfault]
 /// 2. `Cargo.toml` [package.metadata.unfault]
 /// 3. `package.json` "unfault" field
-/// 4. `unfault.toml` (standalone fallback)
+/// 4. `.unfault.toml` (standalone fallback)
 ///
 /// Returns `None` if no configuration is found.
 pub fn load_settings(project_dir: &Path) -> Option<LoadedSettings> {
@@ -226,8 +226,8 @@ pub fn load_settings(project_dir: &Path) -> Option<LoadedSettings> {
         }
     }
 
-    // 4. unfault.toml (standalone fallback)
-    let unfault_toml_path = project_dir.join("unfault.toml");
+    // 4. .unfault.toml (standalone fallback)
+    let unfault_toml_path = project_dir.join(".unfault.toml");
     if unfault_toml_path.exists() {
         if let Some(settings) = parse_unfault_toml(&unfault_toml_path) {
             return Some(LoadedSettings {
@@ -259,7 +259,7 @@ fn parse_cargo_toml(path: &Path) -> Option<WorkspaceSettings> {
     parse_toml_settings(metadata_unfault)
 }
 
-/// Parse standalone unfault.toml.
+/// Parse standalone .unfault.toml.
 fn parse_unfault_toml(path: &Path) -> Option<WorkspaceSettings> {
     let contents = fs::read_to_string(path).ok()?;
     let settings: WorkspaceSettings = toml::from_str(&contents).ok()?;
@@ -695,7 +695,7 @@ version = "0.1.0"
     #[test]
     fn test_parse_unfault_toml() {
         let temp_dir = TempDir::new().unwrap();
-        let unfault_path = temp_dir.path().join("unfault.toml");
+        let unfault_path = temp_dir.path().join(".unfault.toml");
 
         fs::write(
             &unfault_path,
@@ -739,7 +739,7 @@ include = ["go.security.*"]
     fn test_load_settings_priority_pyproject_wins() {
         let temp_dir = TempDir::new().unwrap();
 
-        // Create both pyproject.toml and unfault.toml
+        // Create both pyproject.toml and .unfault.toml
         fs::write(
             temp_dir.path().join("pyproject.toml"),
             r#"
@@ -750,7 +750,7 @@ profile = "python_from_pyproject"
         .unwrap();
 
         fs::write(
-            temp_dir.path().join("unfault.toml"),
+            temp_dir.path().join(".unfault.toml"),
             r#"
 profile = "from_unfault_toml"
 "#,
@@ -770,9 +770,9 @@ profile = "from_unfault_toml"
     fn test_load_settings_fallback_to_unfault_toml() {
         let temp_dir = TempDir::new().unwrap();
 
-        // Create only unfault.toml
+        // Create only .unfault.toml
         fs::write(
-            temp_dir.path().join("unfault.toml"),
+            temp_dir.path().join(".unfault.toml"),
             r#"
 profile = "go_gin_service"
 "#,
@@ -807,9 +807,9 @@ name = "test"
         )
         .unwrap();
 
-        // Create valid unfault.toml as fallback
+        // Create valid .unfault.toml as fallback
         fs::write(
-            temp_dir.path().join("unfault.toml"),
+            temp_dir.path().join(".unfault.toml"),
             r#"
 profile = "fallback"
 "#,
@@ -818,7 +818,7 @@ profile = "fallback"
 
         let loaded = load_settings(temp_dir.path()).unwrap();
 
-        // Should fall through to unfault.toml since pyproject.toml has no [tool.unfault]
+        // Should fall through to .unfault.toml since pyproject.toml has no [tool.unfault]
         assert_eq!(loaded.source, SettingsSource::UnfaultToml);
         assert_eq!(loaded.settings.profile, Some("fallback".to_string()));
     }
