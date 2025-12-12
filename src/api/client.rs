@@ -53,13 +53,22 @@ pub enum ApiError {
         message: String,
     },
 
-    /// Client error (4xx status codes other than 401/402/403)
+    /// Client error (4xx status codes other than 401/402/403/422)
     ///
     /// The request was malformed or invalid.
     #[error("Request error: {message}")]
     ClientError {
         /// HTTP status code
         status: u16,
+        /// Human-readable error message
+        message: String,
+    },
+
+    /// Validation error (422 Unprocessable Entity)
+    ///
+    /// The request data failed validation (e.g., invalid dimension names).
+    #[error("Validation error: {message}")]
+    ValidationError {
         /// Human-readable error message
         message: String,
     },

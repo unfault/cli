@@ -97,6 +97,20 @@ pub fn display_service_error(message: &str) {
     );
 }
 
+/// Display a validation error with helpful suggestions
+///
+/// # Arguments
+///
+/// * `message` - The error message to display
+pub fn display_validation_error(message: &str) {
+    eprintln!("{} Invalid request: {}", "✗".red().bold(), message);
+    eprintln!();
+    eprintln!(
+        "{} Check the command options and try again.",
+        "Tip:".cyan().bold()
+    );
+}
+
 /// Display a generic error
 ///
 /// # Arguments

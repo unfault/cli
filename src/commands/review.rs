@@ -28,10 +28,11 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::api::{ApiClient, ApiError, SubscriptionWarning};
+use crate::api::{ApiClient, ApiError, SessionContextInput, SubscriptionWarning};
 use crate::config::Config;
 use crate::errors::{
     display_auth_error, display_config_error, display_network_error, display_service_error,
+    display_validation_error,
 };
 use crate::exit_codes::*;
 use crate::session::{FileCollector, ScanProgress, SessionRunner, WorkspaceScanner};
@@ -101,6 +102,10 @@ fn handle_api_error(error: ApiError) -> i32 {
         ApiError::ClientError { status, message } => {
             display_network_error(&format!("HTTP {} - {}", status, message));
             EXIT_NETWORK_ERROR
+        }
+        ApiError::ValidationError { message } => {
+            display_validation_error(&message);
+            EXIT_CONFIG_ERROR
         }
         ApiError::ParseError { message } => {
             display_network_error(&message);
@@ -339,17 +344,22 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     }
 
     // Step 4: Run analysis
-    // Use a single context - the engine runs all rules from the profile
-    // The dimension is metadata for findings, not a filter
+    // Build contexts for each dimension the user requested
     pb.set_message("Running analysis...");
 
+    // Build contexts for each dimension
+    let contexts: Vec<SessionContextInput> = dimensions
+        .iter()
+        .map(|dim| SessionContextInput {
+            id: format!("ctx_{}", dim),
+            label: dim.clone(),
+            dimension: dim.clone(),
+            files: collected_files.files.clone(),
+        })
+        .collect();
+
     let run_response = match runner
-        .run_analysis(
-            &session_response.session_id,
-            &workspace_info,
-            &collected_files,
-            "all", // Single context covering all dimensions
-        )
+        .run_analysis_with_contexts(&session_response.session_id, &workspace_info, contexts)
         .await
     {
         Ok(response) => response,

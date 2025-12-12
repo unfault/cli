@@ -434,6 +434,9 @@ fn to_http_error(status: reqwest::StatusCode, error_text: String) -> ApiError {
                 error_text
             },
         },
+        422 => ApiError::ValidationError {
+            message: parse_validation_error(&error_text),
+        },
         500..=599 => ApiError::Server {
             status: status_code,
             message: if error_text.is_empty() {
@@ -450,6 +453,44 @@ fn to_http_error(status: reqwest::StatusCode, error_text: String) -> ApiError {
                 error_text
             },
         },
+    }
+}
+
+/// Parse a 422 validation error response and extract a user-friendly message.
+///
+/// FastAPI/Pydantic returns validation errors in this format:
+/// ```json
+/// {"detail":[{"type":"value_error","loc":["body","field"],"msg":"Value error, ...","input":...}]}
+/// ```
+fn parse_validation_error(error_text: &str) -> String {
+    // Try to parse as JSON
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(error_text) {
+        // Extract detail array
+        if let Some(detail) = json.get("detail").and_then(|d| d.as_array()) {
+            // Collect all error messages
+            let messages: Vec<String> = detail
+                .iter()
+                .filter_map(|item| {
+                    item.get("msg").and_then(|m| m.as_str()).map(|msg| {
+                        // Clean up the message - remove "Value error, " prefix if present
+                        msg.strip_prefix("Value error, ")
+                            .unwrap_or(msg)
+                            .to_string()
+                    })
+                })
+                .collect();
+
+            if !messages.is_empty() {
+                return messages.join("; ");
+            }
+        }
+    }
+
+    // Fallback to raw error text if parsing fails
+    if error_text.is_empty() {
+        "Invalid request data".to_string()
+    } else {
+        error_text.to_string()
     }
 }
 
@@ -923,5 +964,41 @@ mod tests {
         assert_eq!(response.session_embeddings_created, 0);
         assert_eq!(response.finding_embeddings_created, 0);
         assert!(response.already_exists);
+    }
+
+    #[test]
+    fn test_parse_validation_error_fastapi_format() {
+        let error_text = r#"{"detail":[{"type":"value_error","loc":["body","meta","requested_dimensions"],"msg":"Value error, Invalid dimension(s): all. Allowed values: correctness, maintainability, observability, performance, reliability, scalability, security, stability","input":["all"],"ctx":{"error":{}}}]}"#;
+        let message = parse_validation_error(error_text);
+        assert_eq!(
+            message,
+            "Invalid dimension(s): all. Allowed values: correctness, maintainability, observability, performance, reliability, scalability, security, stability"
+        );
+    }
+
+    #[test]
+    fn test_parse_validation_error_multiple_errors() {
+        let error_text = r#"{"detail":[{"msg":"Value error, Invalid field A"},{"msg":"Value error, Invalid field B"}]}"#;
+        let message = parse_validation_error(error_text);
+        assert_eq!(message, "Invalid field A; Invalid field B");
+    }
+
+    #[test]
+    fn test_parse_validation_error_no_prefix() {
+        let error_text = r#"{"detail":[{"msg":"Something is wrong"}]}"#;
+        let message = parse_validation_error(error_text);
+        assert_eq!(message, "Something is wrong");
+    }
+
+    #[test]
+    fn test_parse_validation_error_empty() {
+        let message = parse_validation_error("");
+        assert_eq!(message, "Invalid request data");
+    }
+
+    #[test]
+    fn test_parse_validation_error_invalid_json() {
+        let message = parse_validation_error("not json at all");
+        assert_eq!(message, "not json at all");
     }
 }
