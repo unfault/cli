@@ -473,9 +473,7 @@ fn parse_validation_error(error_text: &str) -> String {
                 .filter_map(|item| {
                     item.get("msg").and_then(|m| m.as_str()).map(|msg| {
                         // Clean up the message - remove "Value error, " prefix if present
-                        msg.strip_prefix("Value error, ")
-                            .unwrap_or(msg)
-                            .to_string()
+                        msg.strip_prefix("Value error, ").unwrap_or(msg).to_string()
                     })
                 })
                 .collect();
