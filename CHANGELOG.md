@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2025-12-21
+
+### Fixed
+
+- Fixed LSP server advertising pull diagnostics capability which caused "Method not found" errors
+- Added hidden `--stdio` flag for compatibility with vscode-languageclient
+- LSP now uses push diagnostics model via `publishDiagnostics` notifications
+
+## [0.5.0] - 2025-12-21
+
+### Added
+
+- **LSP Server**: New `unfault lsp` command that starts a Language Server Protocol server for IDE integration
+  - Provides real-time diagnostics as you code
+  - Supports code actions with quick fixes from patches
+  - Custom `unfault/fileCentrality` notification for status bar file importance display
+  - Client-side parsing using tree-sitter (via unfault-core) for privacy and performance
+  - Supports `--verbose` flag for debug logging
+- New dependencies: `tower-lsp`, `dashmap`, `async-trait` for LSP implementation
+- New `unfault graph refresh` command to build/refresh the code graph on-demand
+- Graph building is now decoupled from review sessions for faster performance
+- Improved hint messages in `unfault ask` when no graph data is available
+
+### Changed
+
+- Graph building no longer happens automatically during `unfault review`
+- Users must now run `unfault graph refresh` before using graph-based features
+
 ## [0.4.0] - 2025-12-12
 
 ### Fixed
@@ -38,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
+[0.5.1]: https://github.com/unfault/cli/releases/tag/v0.5.1
+[0.5.0]: https://github.com/unfault/cli/releases/tag/v0.5.0
 [0.4.0]: https://github.com/unfault/cli/releases/tag/v0.4.0
 [0.3.0]: https://github.com/unfault/cli/releases/tag/v0.3.0
 [0.2.0]: https://github.com/unfault/cli/releases/tag/v0.2.0
