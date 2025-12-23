@@ -14,7 +14,7 @@ use unfault_core::parse::ast::FileId;
 use unfault_core::parse::{python, go, rust as rust_parse, typescript};
 use unfault_core::semantics::python::model::PyFileSemantics;
 use unfault_core::semantics::go::model::GoFileSemantics;
-use unfault_core::semantics::rust::model::RustFileSemantics;
+use unfault_core::semantics::rust::{build_rust_semantics, model::RustFileSemantics};
 use unfault_core::semantics::typescript::model::TsFileSemantics;
 use unfault_core::semantics::SourceSemantics;
 use unfault_core::types::context::{Language, SourceFile};
@@ -183,7 +183,11 @@ pub fn build_local_graph(
                     Ok(p) => p,
                     Err(_) => continue,
                 };
-                let sem = RustFileSemantics::from_parsed(&parsed);
+                // Use build_rust_semantics to fully analyze the file (collect functions, etc.)
+                let sem = match build_rust_semantics(&parsed) {
+                    Ok(s) => s,
+                    Err(_) => RustFileSemantics::from_parsed(&parsed),
+                };
                 Arc::new(SourceSemantics::Rust(sem))
             }
             Language::Typescript => {
