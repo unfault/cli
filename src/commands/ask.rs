@@ -17,6 +17,7 @@
 
 use anyhow::Result;
 use colored::Colorize;
+use std::path::Path;
 use termimad::MadSkin;
 
 use crate::api::ApiClient;
@@ -24,6 +25,7 @@ use crate::api::llm::{LlmClient, build_llm_context};
 use crate::api::rag::{RAGFlowContext, RAGFlowPathNode, RAGQueryRequest, RAGQueryResponse};
 use crate::config::Config;
 use crate::exit_codes::*;
+use crate::session::{compute_workspace_id, get_git_remote, MetaFileInfo};
 
 /// Arguments for the ask command
 #[derive(Debug)]
@@ -46,6 +48,92 @@ pub struct AskArgs {
     pub no_llm: bool,
     /// Verbose output
     pub verbose: bool,
+}
+
+/// Auto-detect workspace ID from a directory.
+///
+/// Uses git remote, manifest files (pyproject.toml, package.json, Cargo.toml, go.mod),
+/// or folder name to compute a stable workspace identifier.
+fn detect_workspace_id(workspace_path: &Path, verbose: bool) -> Option<String> {
+    // Try git remote first
+    let git_remote = get_git_remote(workspace_path);
+
+    // Try to find manifest files
+    let mut meta_files = Vec::new();
+
+    // Check pyproject.toml
+    let pyproject_path = workspace_path.join("pyproject.toml");
+    if pyproject_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&pyproject_path) {
+            meta_files.push(MetaFileInfo {
+                kind: "pyproject",
+                contents,
+            });
+        }
+    }
+
+    // Check package.json
+    let package_json_path = workspace_path.join("package.json");
+    if package_json_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&package_json_path) {
+            meta_files.push(MetaFileInfo {
+                kind: "package_json",
+                contents,
+            });
+        }
+    }
+
+    // Check Cargo.toml
+    let cargo_toml_path = workspace_path.join("Cargo.toml");
+    if cargo_toml_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&cargo_toml_path) {
+            meta_files.push(MetaFileInfo {
+                kind: "cargo_toml",
+                contents,
+            });
+        }
+    }
+
+    // Check go.mod
+    let go_mod_path = workspace_path.join("go.mod");
+    if go_mod_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&go_mod_path) {
+            meta_files.push(MetaFileInfo {
+                kind: "go_mod",
+                contents,
+            });
+        }
+    }
+
+    // Use workspace folder name as fallback label
+    let label = workspace_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string());
+
+    // Compute workspace ID
+    let result = compute_workspace_id(
+        git_remote.as_deref(),
+        if meta_files.is_empty() {
+            None
+        } else {
+            Some(&meta_files)
+        },
+        label.as_deref(),
+    );
+
+    if let Some(ref wks) = result {
+        if verbose {
+            eprintln!(
+                "  {} Workspace ID: {} (source: {:?})",
+                "→".dimmed(),
+                wks.id,
+                wks.source
+            );
+        }
+    }
+
+    result.map(|r| r.id)
 }
 
 /// Execute the ask command
@@ -82,10 +170,38 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
     // Create API client
     let api_client = ApiClient::new(config.base_url());
 
+    // Resolve workspace ID: use explicit ID if provided, otherwise auto-detect
+    let workspace_id = if let Some(ref ws_id) = args.workspace_id {
+        Some(ws_id.clone())
+    } else {
+        // Auto-detect from workspace_path or current directory
+        let path = match args.workspace_path.as_ref() {
+            Some(p) => std::path::PathBuf::from(p),
+            None => std::env::current_dir().map_err(|e| {
+                eprintln!(
+                    "{} Failed to get current directory: {}",
+                    "Error:".red().bold(),
+                    e
+                );
+                anyhow::anyhow!("Failed to get current directory")
+            })?,
+        };
+
+        if args.verbose {
+            eprintln!(
+                "{} Auto-detecting workspace from: {}",
+                "→".cyan(),
+                path.display()
+            );
+        }
+
+        detect_workspace_id(&path, args.verbose)
+    };
+
     // Build request
     let request = RAGQueryRequest {
         query: args.query.clone(),
-        workspace_id: args.workspace_id.clone(),
+        workspace_id: workspace_id.clone(),
         max_sessions: args.max_sessions,
         max_findings: args.max_findings,
         similarity_threshold: args.similarity_threshold,
@@ -93,7 +209,7 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
 
     if args.verbose {
         eprintln!("{} Querying: {}", "→".cyan(), args.query);
-        if let Some(ref ws) = args.workspace_id {
+        if let Some(ref ws) = workspace_id {
             eprintln!("{} Workspace: {}", "→".cyan(), ws);
         }
     }
