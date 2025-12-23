@@ -198,7 +198,7 @@ impl ScanDisplayState {
 
         // Header line with workspace name
         eprintln!(
-            "{} Analyzing {}…",
+            "{} Analyzing {}...",
             "→".cyan().bold(),
             self.workspace_label.bright_blue()
         );
@@ -225,17 +225,17 @@ impl ScanDisplayState {
         // Dimensions line
         eprintln!(
             "  Dimensions: {}",
-            format_list_dimmed(dimensions, " · ").cyan()
+            format_list_dimmed(dimensions, ", ").cyan()
         );
         lines += 1;
 
         // File count line (always show, even if 0)
-        let file_label = if self.file_count == 1 {
-            "1 file".to_string()
-        } else {
-            format!("{} files", self.file_count)
-        };
-        eprintln!("  Files: {} scanned", file_label.bright_green());
+        let file_word = if self.file_count == 1 { "file" } else { "files" };
+        eprintln!(
+            "  Found {} matching source {}",
+            self.file_count.to_string().bright_green(),
+            file_word
+        );
         lines += 1;
 
         self.lines_printed = lines;
@@ -411,7 +411,7 @@ async fn execute_client_parse(
             return Ok(EXIT_CONFIG_ERROR);
         }
     };
-    let parse_ms = parse_start.elapsed().as_millis() as u64;
+    let _parse_ms = parse_start.elapsed().as_millis() as u64;
 
     let ir = build_result.ir;
     let cache_stats = build_result.cache_stats;
@@ -425,7 +425,7 @@ async fn execute_client_parse(
             stats.file_count,
             stats.function_count,
             stats.import_edge_count,
-            parse_ms
+            _parse_ms
         );
         eprintln!(
             "{} Cache: {} hits, {} misses ({:.1}% hit rate)",
@@ -515,22 +515,14 @@ async fn execute_client_parse(
             return Ok(handle_api_error(e));
         }
     };
-    let api_ms = api_start.elapsed().as_millis() as u64;
+    let _api_ms = api_start.elapsed().as_millis() as u64;
 
     pb.finish_and_clear();
 
     // Calculate elapsed time
     let elapsed = session_start.elapsed();
     let elapsed_ms = elapsed.as_millis() as u64;
-    let engine_ms = response.elapsed_ms as u64;
-
-    // Get cache hit rate for display context
-    let cache_hit_rate = cache_stats.hit_rate();
-    let cache_rate_opt = if cache_stats.hits > 0 || cache_stats.misses > 0 {
-        Some(cache_hit_rate)
-    } else {
-        None
-    };
+    let _engine_ms = response.elapsed_ms as u64;
 
     let finding_count = response.findings.len();
 
@@ -558,10 +550,6 @@ async fn execute_client_parse(
         dimensions: dimensions.to_vec(),
         file_count,
         elapsed_ms,
-        parse_ms,
-        api_ms,
-        engine_ms,
-        cache_hit_rate: cache_rate_opt,
         trace_id: trace_id.chars().take(8).collect(),
         profile: args.profile.clone(),
     };
@@ -630,7 +618,7 @@ fn apply_ir_patches(
     Ok(stats.applied)
 }
 
-/// Display findings from IR analysis.
+/// Display context for IR analysis output.
 struct ReviewOutputContext {
     workspace_label: String,
     languages: Vec<String>,
@@ -638,30 +626,13 @@ struct ReviewOutputContext {
     dimensions: Vec<String>,
     file_count: usize,
     elapsed_ms: u64,
-    parse_ms: u64,
-    api_ms: u64,
-    engine_ms: u64,
-    cache_hit_rate: Option<f64>,
     trace_id: String,
     profile: Option<String>,
 }
 
-struct SeveritySummary {
-    critical: usize,
-    high: usize,
-    medium: usize,
-    low: usize,
-}
-
-impl SeveritySummary {
-    fn total_tracked(&self) -> usize {
-        self.critical + self.high + self.medium + self.low
-    }
-}
-
 fn render_session_overview(context: &ReviewOutputContext) {
     println!(
-        "{} Analyzing {}…",
+        "{} Analyzing {}...",
         "→".cyan().bold(),
         context.workspace_label.bright_blue()
     );
@@ -680,33 +651,27 @@ fn render_session_overview(context: &ReviewOutputContext) {
     );
     println!(
         "  Dimensions: {}",
-        format_list(&context.dimensions, " · ").cyan()
+        format_list(&context.dimensions, ", ").cyan()
     );
 
-    let file_label = if context.file_count == 1 {
-        "1 file".to_string()
+    // "Found X matching source files" format (like landing page)
+    let file_word = if context.file_count == 1 {
+        "file"
     } else {
-        format!("{} files", context.file_count)
+        "files"
     };
-    println!("  Files: {}", file_label.bright_green());
-
-    let mut timing_parts = vec![
-        format!("parse: {}ms", context.parse_ms.to_string().dimmed()),
-        format!("api: {}ms", context.api_ms.to_string().dimmed()),
-        format!("engine: {}ms", context.engine_ms.to_string().dimmed()),
-    ];
-
-    if let Some(cache) = context.cache_hit_rate {
-        timing_parts.push(format!("cache: {:.0}%", cache).dimmed().to_string());
-    }
-
     println!(
-        "  Duration: {}ms total ({}) (trace: {})",
+        "  Found {} matching source {}",
+        context.file_count.to_string().bright_green(),
+        file_word
+    );
+
+    // Simple "Reviewed in Xms (trace: ...)" format (like landing page)
+    println!(
+        "  Reviewed in {}ms (trace: {})",
         context.elapsed_ms.to_string().bright_cyan(),
-        timing_parts.join(", "),
         context.trace_id.dimmed()
     );
-    println!();
 }
 
 fn format_list(values: &[String], separator: &str) -> String {
@@ -715,70 +680,6 @@ fn format_list(values: &[String], separator: &str) -> String {
     } else {
         values.join(separator)
     }
-}
-
-fn compute_severity_summary(findings: &[IrFinding]) -> SeveritySummary {
-    let mut summary = SeveritySummary {
-        critical: 0,
-        high: 0,
-        medium: 0,
-        low: 0,
-    };
-
-    for finding in findings {
-        match finding.severity.to_lowercase().as_str() {
-            "critical" => summary.critical += 1,
-            "high" => summary.high += 1,
-            "medium" => summary.medium += 1,
-            "low" => summary.low += 1,
-            _ => {}
-        }
-    }
-
-    summary
-}
-
-fn format_severity_breakdown(summary: &SeveritySummary) -> String {
-    let mut parts: Vec<String> = Vec::new();
-
-    if summary.critical > 0 {
-        parts.push(format!(
-            "{} critical",
-            summary.critical.to_string().bright_red()
-        ));
-    }
-    if summary.high > 0 {
-        parts.push(format!("{} high", summary.high.to_string().bright_red()));
-    }
-    if summary.medium > 0 {
-        parts.push(format!(
-            "{} medium",
-            summary.medium.to_string().bright_yellow()
-        ));
-    }
-    if summary.low > 0 {
-        parts.push(format!("{} low", summary.low.to_string().bright_blue()));
-    }
-
-    if parts.is_empty() {
-        "—".into()
-    } else {
-        parts.join(&format!(" {} ", "·".dimmed()))
-    }
-}
-
-fn first_meaningful_line(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('#') || trimmed.starts_with("//") || trimmed.starts_with("```") {
-            continue;
-        }
-        return Some(trimmed.to_string());
-    }
-    None
 }
 
 fn display_ir_findings(
@@ -812,20 +713,15 @@ fn display_ir_findings(
         return;
     }
 
+    // Blank line before the summary (matches landing page)
+    println!();
+
     println!(
         "{} Found {} issue{}",
         "⚠".yellow().bold(),
         total_findings.to_string().bright_yellow(),
         if total_findings == 1 { "" } else { "s" }
     );
-
-    let severity_summary = compute_severity_summary(findings);
-    if severity_summary.total_tracked() > 0 {
-        println!(
-            "  Breakdown: {}",
-            format_severity_breakdown(&severity_summary)
-        );
-    }
 
     if applied_patches > 0 {
         let verb = if args.dry_run {
@@ -853,7 +749,7 @@ fn display_ir_findings(
             display_ir_finding(finding);
         }
     } else {
-        // Basic mode: grouped display
+        // Basic mode: grouped display (matches landing page style)
         display_ir_findings_grouped(findings);
     }
 }
@@ -908,6 +804,7 @@ fn display_ir_finding(finding: &IrFinding) {
 }
 
 /// Display IR findings grouped by severity and rule_id (basic mode).
+/// Format matches the landing page TerminalDemo.
 fn display_ir_findings_grouped(findings: &[IrFinding]) {
     use std::collections::BTreeMap;
 
@@ -972,8 +869,8 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
             if severity_count == 1 { "" } else { "s" }
         );
 
+        // Display each rule as: [rule_id] title (matches landing page)
         for (rule_id, rule_findings) in rules_by_id {
-            let count = rule_findings.len();
             let sample = rule_findings[0];
             let title = if !sample.title.is_empty() {
                 sample.title.clone()
@@ -984,25 +881,10 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
             };
 
             println!(
-                "   [{}] {} ({}x)",
-                rule_id.dimmed(),
-                title,
-                count.to_string().color("yellow")
+                "   [{}] {}",
+                rule_id.cyan(),
+                title.dimmed()
             );
-
-            if let Some(detail) = first_meaningful_line(sample.message.as_str())
-                .or_else(|| first_meaningful_line(sample.description.as_str()))
-            {
-                println!("      {}", detail.dimmed());
-            }
-
-            if let Some(fix_line) = sample
-                .fix_preview
-                .as_deref()
-                .and_then(first_meaningful_line)
-            {
-                println!("      {} {}", "→".green(), fix_line);
-            }
         }
     }
 }
