@@ -411,7 +411,7 @@ async fn execute_client_parse(
             return Ok(EXIT_CONFIG_ERROR);
         }
     };
-    let _parse_ms = parse_start.elapsed().as_millis() as u64;
+    let parse_ms = parse_start.elapsed().as_millis() as u64;
 
     let ir = build_result.ir;
     let cache_stats = build_result.cache_stats;
@@ -425,7 +425,7 @@ async fn execute_client_parse(
             stats.file_count,
             stats.function_count,
             stats.import_edge_count,
-            _parse_ms
+            parse_ms
         );
         eprintln!(
             "{} Cache: {} hits, {} misses ({:.1}% hit rate)",
@@ -515,14 +515,22 @@ async fn execute_client_parse(
             return Ok(handle_api_error(e));
         }
     };
-    let _api_ms = api_start.elapsed().as_millis() as u64;
+    let _api_ms = api_start.elapsed().as_millis();
 
     pb.finish_and_clear();
 
     // Calculate elapsed time
     let elapsed = session_start.elapsed();
     let elapsed_ms = elapsed.as_millis() as u64;
-    let _engine_ms = response.elapsed_ms as u64;
+    let engine_ms = response.elapsed_ms as u64;
+
+    // Get cache hit rate for display context
+    let cache_hit_rate = cache_stats.hit_rate();
+    let cache_rate_opt = if cache_stats.hits > 0 || cache_stats.misses > 0 {
+        Some(cache_hit_rate)
+    } else {
+        None
+    };
 
     let finding_count = response.findings.len();
 
@@ -550,6 +558,9 @@ async fn execute_client_parse(
         dimensions: dimensions.to_vec(),
         file_count,
         elapsed_ms,
+        parse_ms,
+        engine_ms,
+        cache_hit_rate: cache_rate_opt,
         trace_id: trace_id.chars().take(8).collect(),
         profile: args.profile.clone(),
     };
@@ -626,50 +637,121 @@ struct ReviewOutputContext {
     dimensions: Vec<String>,
     file_count: usize,
     elapsed_ms: u64,
+    parse_ms: u64,
+    engine_ms: u64,
+    cache_hit_rate: Option<f64>,
     trace_id: String,
     profile: Option<String>,
 }
 
+/// Severity breakdown for the summary line.
+struct SeveritySummary {
+    critical: usize,
+    high: usize,
+    medium: usize,
+    low: usize,
+}
+
+fn compute_severity_summary(findings: &[IrFinding]) -> SeveritySummary {
+    let mut summary = SeveritySummary {
+        critical: 0,
+        high: 0,
+        medium: 0,
+        low: 0,
+    };
+
+    for finding in findings {
+        match finding.severity.to_lowercase().as_str() {
+            "critical" => summary.critical += 1,
+            "high" => summary.high += 1,
+            "medium" => summary.medium += 1,
+            "low" => summary.low += 1,
+            _ => {}
+        }
+    }
+
+    summary
+}
+
+fn format_severity_breakdown(summary: &SeveritySummary) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if summary.critical > 0 {
+        parts.push(format!(
+            "{} critical",
+            summary.critical.to_string().bright_red()
+        ));
+    }
+    if summary.high > 0 {
+        parts.push(format!("{} high", summary.high.to_string().bright_red()));
+    }
+    if summary.medium > 0 {
+        parts.push(format!(
+            "{} medium",
+            summary.medium.to_string().bright_yellow()
+        ));
+    }
+    if summary.low > 0 {
+        parts.push(format!("{} low", summary.low.to_string().bright_blue()));
+    }
+
+    if parts.is_empty() {
+        "—".into()
+    } else {
+        parts.join(&format!(" {} ", "·".dimmed()))
+    }
+}
+
 fn render_session_overview(context: &ReviewOutputContext) {
+    // Line 1: Header with workspace name and total time
     println!(
-        "{} Analyzing {}...",
+        "{} {} {}",
         "→".cyan().bold(),
-        context.workspace_label.bright_blue()
+        format!("Analyzing {}...", context.workspace_label).bright_white(),
+        format!("{}ms", context.elapsed_ms).dimmed()
     );
 
     if let Some(profile) = &context.profile {
-        println!("  Profile: {}", profile.cyan());
+        println!(
+            "  {} {}",
+            "PROFILE".dimmed(),
+            profile.cyan()
+        );
     }
 
+    // Line 2: LANGUAGES and FRAMEWORKS columns
     println!(
-        "  Languages: {}",
-        format_list(&context.languages, ", ").cyan()
-    );
-    println!(
-        "  Frameworks: {}",
+        "  {} {:24} {} {}",
+        "LANGUAGES".dimmed(),
+        format_list(&context.languages, ", ").cyan(),
+        "FRAMEWORKS".dimmed(),
         format_list(&context.frameworks, ", ").cyan()
     );
+
+    // Line 3: DIMENSIONS and FILES REVIEWED
+    let file_word = if context.file_count == 1 { "file" } else { "files" };
+    let files_reviewed = format!(
+        "{} {} · parse {}ms · engine {}ms",
+        context.file_count, file_word, context.parse_ms, context.engine_ms
+    );
     println!(
-        "  Dimensions: {}",
-        format_list(&context.dimensions, ", ").cyan()
+        "  {} {:24} {} {}",
+        "DIMENSIONS".dimmed(),
+        format_list(&context.dimensions, " · ").cyan(),
+        "FILES REVIEWED".dimmed(),
+        files_reviewed.cyan()
     );
 
-    // "Found X matching source files" format (like landing page)
-    let file_word = if context.file_count == 1 {
-        "file"
-    } else {
-        "files"
+    // Line 4: cache and trace
+    let cache_str = match context.cache_hit_rate {
+        Some(rate) => format!("cache: {:.0}%", rate),
+        None => "cache: —".to_string(),
     };
     println!(
-        "  Found {} matching source {}",
-        context.file_count.to_string().bright_green(),
-        file_word
-    );
-
-    // Simple "Reviewed in Xms (trace: ...)" format (like landing page)
-    println!(
-        "  Reviewed in {}ms (trace: {})",
-        context.elapsed_ms.to_string().bright_cyan(),
+        "  {} {:48} {} {}",
+        cache_str.dimmed(),
+        "",
+        "trace:".dimmed(),
         context.trace_id.dimmed()
     );
 }
@@ -716,12 +798,45 @@ fn display_ir_findings(
     // Blank line before the summary (matches landing page)
     println!();
 
-    println!(
+    // Summary line with issue count and fix hint on the right
+    let fix_hint = if !args.fix && !args.dry_run {
+        format!("{}", "run with --fix to apply patches".dimmed())
+    } else {
+        String::new()
+    };
+    
+    // Find terminal width for right-alignment (default to 80)
+    let found_text = format!(
         "{} Found {} issue{}",
-        "⚠".yellow().bold(),
-        total_findings.to_string().bright_yellow(),
+        "⚠",
+        total_findings,
         if total_findings == 1 { "" } else { "s" }
     );
+    
+    if fix_hint.is_empty() {
+        println!(
+            "{} Found {} issue{}",
+            "⚠".yellow().bold(),
+            total_findings.to_string().bright_yellow(),
+            if total_findings == 1 { "" } else { "s" }
+        );
+    } else {
+        // Print summary with fix hint on the right
+        let padding = 50_usize.saturating_sub(found_text.len());
+        println!(
+            "{} Found {} issue{}{:>width$}{}",
+            "⚠".yellow().bold(),
+            total_findings.to_string().bright_yellow(),
+            if total_findings == 1 { "" } else { "s" },
+            "",
+            fix_hint,
+            width = padding
+        );
+    }
+    
+    // Severity breakdown line (like landing page: "4 high · 10 medium · 5 low")
+    let summary = compute_severity_summary(findings);
+    println!("{}", format_severity_breakdown(&summary));
 
     if applied_patches > 0 {
         let verb = if args.dry_run {
