@@ -11,6 +11,35 @@ use std::collections::HashMap;
 // Request Types
 // =============================================================================
 
+/// Graph data for privacy-preserving local analysis.
+///
+/// This enables the API to analyze call flows without needing server-side stored graph data.
+/// The graph is built locally by the CLI and only the graph structure (not source code) is sent.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ClientGraphData {
+    /// File nodes with paths and languages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<HashMap<String, serde_json::Value>>,
+    /// Function nodes with names and metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub functions: Vec<HashMap<String, serde_json::Value>>,
+    /// Call edges between functions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<HashMap<String, serde_json::Value>>,
+    /// Import edges between files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<HashMap<String, serde_json::Value>>,
+    /// Contains edges (file → function/class).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contains: Vec<HashMap<String, serde_json::Value>>,
+    /// External library usage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_usage: Vec<HashMap<String, serde_json::Value>>,
+    /// Graph statistics.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub stats: HashMap<String, i32>,
+}
+
 /// Request to query project health via RAG
 ///
 /// # Example
@@ -24,6 +53,7 @@ use std::collections::HashMap;
 ///     max_sessions: Some(5),
 ///     max_findings: Some(10),
 ///     similarity_threshold: Some(0.5),
+///     graph_data: None,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize)]
@@ -42,6 +72,9 @@ pub struct RAGQueryRequest {
     /// Minimum similarity score for retrieval (0.0-1.0).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub similarity_threshold: Option<f64>,
+    /// Optional graph data from CLI for local analysis (privacy-preserving).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_data: Option<ClientGraphData>,
 }
 
 impl Default for RAGQueryRequest {
@@ -52,6 +85,7 @@ impl Default for RAGQueryRequest {
             max_sessions: Some(5),
             max_findings: Some(10),
             similarity_threshold: Some(0.5),
+            graph_data: None,
         }
     }
 }

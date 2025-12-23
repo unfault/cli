@@ -17,15 +17,121 @@
 
 use anyhow::Result;
 use colored::Colorize;
+use std::collections::HashMap;
 use std::path::Path;
 use termimad::MadSkin;
 
 use crate::api::ApiClient;
 use crate::api::llm::{LlmClient, build_llm_context};
-use crate::api::rag::{RAGFlowContext, RAGFlowPathNode, RAGQueryRequest, RAGQueryResponse};
+use crate::api::rag::{ClientGraphData, RAGFlowContext, RAGFlowPathNode, RAGQueryRequest, RAGQueryResponse};
 use crate::config::Config;
 use crate::exit_codes::*;
-use crate::session::{compute_workspace_id, get_git_remote, MetaFileInfo};
+use crate::session::{build_local_graph, compute_workspace_id, get_git_remote, MetaFileInfo, SerializableGraph};
+
+/// Convert SerializableGraph to ClientGraphData for API consumption.
+fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
+    // Convert files
+    let files: Vec<HashMap<String, serde_json::Value>> = graph
+        .files
+        .iter()
+        .map(|f| {
+            let mut map = HashMap::new();
+            map.insert("path".to_string(), serde_json::json!(f.path));
+            map.insert("language".to_string(), serde_json::json!(f.language));
+            map
+        })
+        .collect();
+
+    // Convert functions with HTTP metadata
+    let functions: Vec<HashMap<String, serde_json::Value>> = graph
+        .functions
+        .iter()
+        .map(|f| {
+            let mut map = HashMap::new();
+            map.insert("name".to_string(), serde_json::json!(f.name));
+            map.insert("qualified_name".to_string(), serde_json::json!(f.qualified_name));
+            map.insert("file_path".to_string(), serde_json::json!(f.file_path));
+            map.insert("is_async".to_string(), serde_json::json!(f.is_async));
+            map.insert("is_handler".to_string(), serde_json::json!(f.is_handler));
+            if let Some(ref method) = f.http_method {
+                map.insert("http_method".to_string(), serde_json::json!(method));
+            }
+            if let Some(ref path) = f.http_path {
+                map.insert("http_path".to_string(), serde_json::json!(path));
+            }
+            map
+        })
+        .collect();
+
+    // Convert calls
+    let calls: Vec<HashMap<String, serde_json::Value>> = graph
+        .calls
+        .iter()
+        .map(|c| {
+            let mut map = HashMap::new();
+            map.insert("caller".to_string(), serde_json::json!(c.caller));
+            map.insert("callee".to_string(), serde_json::json!(c.callee));
+            map.insert("caller_file".to_string(), serde_json::json!(c.caller_file));
+            map
+        })
+        .collect();
+
+    // Convert imports
+    let imports: Vec<HashMap<String, serde_json::Value>> = graph
+        .imports
+        .iter()
+        .map(|i| {
+            let mut map = HashMap::new();
+            map.insert("from_file".to_string(), serde_json::json!(i.from_file));
+            map.insert("to_file".to_string(), serde_json::json!(i.to_file));
+            map.insert("items".to_string(), serde_json::json!(i.items));
+            map
+        })
+        .collect();
+
+    // Convert contains
+    let contains: Vec<HashMap<String, serde_json::Value>> = graph
+        .contains
+        .iter()
+        .map(|c| {
+            let mut map = HashMap::new();
+            map.insert("file_path".to_string(), serde_json::json!(c.file_path));
+            map.insert("item_name".to_string(), serde_json::json!(c.item_name));
+            map.insert("item_type".to_string(), serde_json::json!(c.item_type));
+            map
+        })
+        .collect();
+
+    // Convert library usage
+    let library_usage: Vec<HashMap<String, serde_json::Value>> = graph
+        .library_usage
+        .iter()
+        .map(|l| {
+            let mut map = HashMap::new();
+            map.insert("file_path".to_string(), serde_json::json!(l.file_path));
+            map.insert("library".to_string(), serde_json::json!(l.library));
+            map
+        })
+        .collect();
+
+    // Convert stats
+    let mut stats = HashMap::new();
+    stats.insert("file_count".to_string(), graph.stats.file_count as i32);
+    stats.insert("function_count".to_string(), graph.stats.function_count as i32);
+    stats.insert("class_count".to_string(), graph.stats.class_count as i32);
+    stats.insert("import_edge_count".to_string(), graph.stats.import_edge_count as i32);
+    stats.insert("calls_edge_count".to_string(), graph.stats.calls_edge_count as i32);
+
+    ClientGraphData {
+        files,
+        functions,
+        calls,
+        imports,
+        contains,
+        library_usage,
+        stats,
+    }
+}
 
 /// Arguments for the ask command
 #[derive(Debug)]
@@ -170,32 +276,58 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
     // Create API client
     let api_client = ApiClient::new(config.base_url());
 
+    // Resolve workspace path: explicit or current directory
+    let workspace_path = match args.workspace_path.as_ref() {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::current_dir().map_err(|e| {
+            eprintln!(
+                "{} Failed to get current directory: {}",
+                "Error:".red().bold(),
+                e
+            );
+            anyhow::anyhow!("Failed to get current directory")
+        })?,
+    };
+
     // Resolve workspace ID: use explicit ID if provided, otherwise auto-detect
     let workspace_id = if let Some(ref ws_id) = args.workspace_id {
         Some(ws_id.clone())
     } else {
-        // Auto-detect from workspace_path or current directory
-        let path = match args.workspace_path.as_ref() {
-            Some(p) => std::path::PathBuf::from(p),
-            None => std::env::current_dir().map_err(|e| {
-                eprintln!(
-                    "{} Failed to get current directory: {}",
-                    "Error:".red().bold(),
-                    e
-                );
-                anyhow::anyhow!("Failed to get current directory")
-            })?,
-        };
-
         if args.verbose {
             eprintln!(
                 "{} Auto-detecting workspace from: {}",
                 "→".cyan(),
-                path.display()
+                workspace_path.display()
             );
         }
 
-        detect_workspace_id(&path, args.verbose)
+        detect_workspace_id(&workspace_path, args.verbose)
+    };
+
+    // Build local graph for flow analysis
+    let graph_data = if args.verbose {
+        eprintln!("{} Building local code graph...", "→".cyan());
+    
+        match build_local_graph(&workspace_path, None, false) {
+            Ok(graph) => {
+                eprintln!(
+                    "  Built graph: {} files, {} functions, {} calls",
+                    graph.stats.file_count,
+                    graph.stats.function_count,
+                    graph.stats.calls_edge_count
+                );
+                Some(graph_to_client_data(&graph))
+            }
+            Err(e) => {
+                eprintln!("  {} Failed to build graph: {}", "⚠".yellow(), e);
+                None
+            }
+        }
+    } else {
+        // Build silently in non-verbose mode
+        build_local_graph(&workspace_path, None, false)
+            .ok()
+            .map(|graph| graph_to_client_data(&graph))
     };
 
     // Build request
@@ -205,6 +337,7 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
         max_sessions: args.max_sessions,
         max_findings: args.max_findings,
         similarity_threshold: args.similarity_threshold,
+        graph_data,
     };
 
     if args.verbose {
