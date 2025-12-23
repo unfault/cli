@@ -436,6 +436,15 @@ async fn execute_client_parse(
             serialize_ms
         );
     }
+    
+    // Debug: dump IR to file if UNFAULT_DUMP_IR is set
+    if let Ok(dump_path) = std::env::var("UNFAULT_DUMP_IR") {
+        if let Err(e) = std::fs::write(&dump_path, &ir_json) {
+            eprintln!("{} Failed to dump IR to {}: {}", "DEBUG".yellow(), dump_path, e);
+        } else {
+            eprintln!("{} Dumped IR to {}", "DEBUG".yellow(), dump_path);
+        }
+    }
 
     // Step 3: Compute workspace ID
     let git_remote = get_git_remote(current_dir);
