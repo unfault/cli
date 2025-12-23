@@ -23,10 +23,15 @@ use termimad::MadSkin;
 
 use crate::api::ApiClient;
 use crate::api::llm::{LlmClient, build_llm_context};
-use crate::api::rag::{ClientGraphData, RAGFlowContext, RAGFlowPathNode, RAGQueryRequest, RAGQueryResponse};
+use crate::api::rag::{
+    ClientGraphData, RAGFlowContext, RAGFlowPathNode, RAGGraphContext, RAGQueryRequest,
+    RAGQueryResponse,
+};
 use crate::config::Config;
 use crate::exit_codes::*;
-use crate::session::{build_local_graph, compute_workspace_id, get_git_remote, MetaFileInfo, SerializableGraph};
+use crate::session::{
+    MetaFileInfo, SerializableGraph, build_local_graph, compute_workspace_id, get_git_remote,
+};
 
 /// Convert SerializableGraph to ClientGraphData for API consumption.
 fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
@@ -49,7 +54,10 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
         .map(|f| {
             let mut map = HashMap::new();
             map.insert("name".to_string(), serde_json::json!(f.name));
-            map.insert("qualified_name".to_string(), serde_json::json!(f.qualified_name));
+            map.insert(
+                "qualified_name".to_string(),
+                serde_json::json!(f.qualified_name),
+            );
             map.insert("file_path".to_string(), serde_json::json!(f.file_path));
             map.insert("is_async".to_string(), serde_json::json!(f.is_async));
             map.insert("is_handler".to_string(), serde_json::json!(f.is_handler));
@@ -117,10 +125,19 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
     // Convert stats
     let mut stats = HashMap::new();
     stats.insert("file_count".to_string(), graph.stats.file_count as i32);
-    stats.insert("function_count".to_string(), graph.stats.function_count as i32);
+    stats.insert(
+        "function_count".to_string(),
+        graph.stats.function_count as i32,
+    );
     stats.insert("class_count".to_string(), graph.stats.class_count as i32);
-    stats.insert("import_edge_count".to_string(), graph.stats.import_edge_count as i32);
-    stats.insert("calls_edge_count".to_string(), graph.stats.calls_edge_count as i32);
+    stats.insert(
+        "import_edge_count".to_string(),
+        graph.stats.import_edge_count as i32,
+    );
+    stats.insert(
+        "calls_edge_count".to_string(),
+        graph.stats.calls_edge_count as i32,
+    );
 
     ClientGraphData {
         files,
@@ -307,7 +324,7 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
     // Build local graph for flow analysis
     let graph_data = if args.verbose {
         eprintln!("{} Building local code graph...", "→".cyan());
-    
+
         match build_local_graph(&workspace_path, None, false) {
             Ok(graph) => {
                 eprintln!(
@@ -557,12 +574,7 @@ fn format_flow_node(node: &RAGFlowPathNode, indent: usize) -> String {
                     path.bright_white()
                 )
             } else {
-                format!(
-                    "{}{}calls {}()",
-                    indent_str,
-                    prefix,
-                    node.name.yellow()
-                )
+                format!("{}{}calls {}()", indent_str, prefix, node.name.yellow())
             }
         }
         "function" => {
@@ -570,12 +582,7 @@ fn format_flow_node(node: &RAGFlowPathNode, indent: usize) -> String {
             if indent == 0 {
                 format!("{}calls {}()", indent_str, node.name.yellow())
             } else {
-                format!(
-                    "{}{}calls {}()",
-                    indent_str,
-                    prefix,
-                    node.name.yellow()
-                )
+                format!("{}{}calls {}()", indent_str, prefix, node.name.yellow())
             }
         }
         "external_library" => {
@@ -674,7 +681,7 @@ fn insert_path_into_tree(parent: &mut TreeNode, remaining_path: &[RAGFlowPathNod
     }
 
     let current = &remaining_path[0];
-    
+
     // Find or create child node
     let child_idx = parent
         .children
@@ -801,6 +808,92 @@ fn render_flow_context(flow_context: &RAGFlowContext, verbose: bool) {
     }
 }
 
+fn graph_context_has_data(ctx: &RAGGraphContext) -> bool {
+    !ctx.affected_files.is_empty() || !ctx.library_users.is_empty() || !ctx.dependencies.is_empty()
+}
+
+fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
+    let title = match ctx.query_type.as_str() {
+        "impact" => "Impact analysis",
+        "library" => "Library usage",
+        "dependencies" => "External dependencies",
+        other => other,
+    };
+
+    println!("{} {}", "📈".cyan(), title.bold());
+
+    if ctx.query_type == "impact" {
+        let target = ctx.target_file.as_deref().unwrap_or("target");
+        if ctx.affected_files.is_empty() {
+            println!("  {} No callers found for {}", "ℹ".blue(), target.cyan());
+        } else {
+            println!(
+                "  {} Functions/files that depend on {}:",
+                "→".cyan(),
+                target.cyan()
+            );
+            for (idx, rel) in ctx.affected_files.iter().enumerate() {
+                let path = rel.path.as_deref().unwrap_or("<unknown>");
+                let function = rel
+                    .function
+                    .as_deref()
+                    .map(|f| format!(" :: {}", f.yellow()))
+                    .unwrap_or_default();
+                let depth = rel.depth.unwrap_or(0);
+                let hops = if depth == 1 { "hop" } else { "hops" };
+                println!(
+                    "  {} {}{} ({} {} away)",
+                    format!("{}.", idx + 1).bright_white(),
+                    path.cyan(),
+                    function,
+                    depth,
+                    hops
+                );
+
+                if verbose {
+                    if let Some(session) = rel.session_id.as_deref() {
+                        println!("     {} Session: {}", "".dimmed(), session);
+                    }
+                }
+            }
+        }
+    }
+
+    if ctx.query_type == "library" && !ctx.library_users.is_empty() {
+        println!();
+        println!("  {} Files using target library:", "→".cyan());
+        for (idx, rel) in ctx.library_users.iter().enumerate() {
+            let path = rel.path.as_deref().unwrap_or("<unknown>");
+            let relationship = rel.relationship.as_deref().unwrap_or("imports");
+            println!(
+                "  {} {} ({} {} )",
+                format!("{}.", idx + 1).bright_white(),
+                path.cyan(),
+                relationship,
+                rel.usage.as_deref().unwrap_or("")
+            );
+        }
+    }
+
+    if ctx.query_type == "dependencies" && !ctx.dependencies.is_empty() {
+        println!();
+        println!("  {} External dependencies:", "→".cyan());
+        for dep in &ctx.dependencies {
+            let name = dep.name.as_deref().unwrap_or("dependency");
+            let category = dep.category.as_deref().unwrap_or("library");
+            println!("  • {} ({})", name.green(), category.dimmed());
+        }
+    }
+
+    if verbose {
+        println!();
+        println!(
+            "{} target: {}",
+            "Target".dimmed(),
+            ctx.target_file.as_deref().unwrap_or("n/a").dimmed()
+        );
+    }
+}
 
 fn output_formatted(
     response: &RAGQueryResponse,
@@ -814,6 +907,13 @@ fn output_formatted(
         .flow_context
         .as_ref()
         .is_some_and(|fc| !fc.paths.is_empty() || !fc.root_nodes.is_empty());
+
+    let has_graph_context = response
+        .graph_context
+        .as_ref()
+        .is_some_and(|gc| graph_context_has_data(gc));
+
+    let has_structured_context = has_flow_context || has_graph_context;
 
     // Print LLM response if available (this is the main answer)
     // If streamed=true, the response was already printed in real-time
@@ -840,7 +940,7 @@ fn output_formatted(
         }
     } else if !has_llm {
         // No LLM configured - show hint at top, but AFTER flow context if present
-        if !has_flow_context {
+        if !has_structured_context {
             println!();
             println!(
                 "{} {} Configure an LLM for AI-powered answers: {}",
@@ -869,8 +969,15 @@ fn output_formatted(
         }
     }
 
+    if let Some(graph_context) = &response.graph_context {
+        if graph_context_has_data(graph_context) {
+            render_graph_context(graph_context, verbose);
+            println!();
+        }
+    }
+
     // Print context summary (only in verbose mode when flow context is shown, or when no flow context)
-    let show_summary = if has_flow_context {
+    let show_summary = if has_structured_context {
         verbose // Only show in verbose when we have flow context
     } else {
         llm_response.is_none() || verbose
@@ -884,7 +991,7 @@ fn output_formatted(
     }
 
     // Print sessions if any (in verbose mode, or when no LLM answer and no flow context)
-    let show_sessions = if has_flow_context {
+    let show_sessions = if has_structured_context {
         verbose
     } else {
         (llm_response.is_none() || verbose) && !response.sessions.is_empty()
@@ -936,7 +1043,7 @@ fn output_formatted(
     }
 
     // Print findings if any (in verbose mode, or when no LLM answer and no flow context)
-    let show_findings = if has_flow_context {
+    let show_findings = if has_structured_context {
         verbose
     } else {
         (llm_response.is_none() || verbose) && !response.findings.is_empty()
@@ -983,7 +1090,7 @@ fn output_formatted(
 
     // If nothing found (only show when no LLM answer AND no flow context)
     if llm_response.is_none()
-        && !has_flow_context
+        && !has_structured_context
         && response.sessions.is_empty()
         && response.findings.is_empty()
     {

@@ -204,10 +204,54 @@ pub struct RAGQueryResponse {
     pub context_summary: String,
     /// Semantic topic label for the query.
     pub topic_label: Option<String>,
+    /// Graph-aware context for impact/dependency queries.
+    #[serde(default)]
+    pub graph_context: Option<RAGGraphContext>,
     /// Flow-based context for call path tracing queries.
     pub flow_context: Option<RAGFlowContext>,
     /// Actionable hint when the query cannot be fully answered.
     pub hint: Option<String>,
+}
+
+/// Graph context for impact/dependency queries.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGGraphContext {
+    /// Type of graph query: impact, dependency, general, etc.
+    pub query_type: String,
+    /// Target file/function the query is about.
+    pub target_file: Option<String>,
+    /// Files/functions affected by the target (impact queries).
+    #[serde(default)]
+    pub affected_files: Vec<RAGGraphFileRelation>,
+    /// External dependencies used by the target.
+    #[serde(default)]
+    pub dependencies: Vec<RAGGraphDependency>,
+    /// Files using a specific library / symbol.
+    #[serde(default)]
+    pub library_users: Vec<RAGGraphFileRelation>,
+}
+
+/// A relationship between a file/function and the target.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGGraphFileRelation {
+    pub path: Option<String>,
+    pub function: Option<String>,
+    pub depth: Option<i32>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub usage: Option<String>,
+    #[serde(default)]
+    pub relationship: Option<String>,
+}
+
+/// External dependency entry in graph context.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGGraphDependency {
+    pub name: Option<String>,
+    pub category: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 // =============================================================================
