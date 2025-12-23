@@ -115,6 +115,46 @@ pub struct RAGFindingContext {
     pub similarity: f64,
 }
 
+/// A node in a call flow path.
+///
+/// Represents a function, class, API route, middleware, or external library
+/// in a call chain or dependency graph.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGFlowPathNode {
+    /// Unique identifier of the node.
+    pub node_id: String,
+    /// Human-readable name (e.g., function name).
+    pub name: String,
+    /// File path where the node is defined.
+    pub path: Option<String>,
+    /// Type of node (function, class, file, api_route, middleware, external_library).
+    pub node_type: String,
+    /// Position in the call chain (0 = start).
+    pub depth: i32,
+    /// HTTP method for api_route nodes (e.g., POST, GET).
+    pub http_method: Option<String>,
+    /// HTTP path for api_route nodes (e.g., /login, /users/{id}).
+    pub http_path: Option<String>,
+    /// Description of what this node does.
+    pub description: Option<String>,
+    /// Library category for external_library nodes.
+    pub category: Option<String>,
+}
+
+/// Flow context for call path tracing in RAG responses.
+///
+/// Provides call flow information when the query asks about how code works,
+/// e.g., "how does auth work?" or "explain the login flow".
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGFlowContext {
+    /// Query used to find starting points.
+    pub query: Option<String>,
+    /// Starting point nodes that matched the query.
+    pub root_nodes: Vec<RAGFlowPathNode>,
+    /// Call paths, each is a list of nodes in call order.
+    pub paths: Vec<Vec<RAGFlowPathNode>>,
+}
+
 /// Response from RAG query.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RAGQueryResponse {
@@ -128,6 +168,12 @@ pub struct RAGQueryResponse {
     pub sources: Vec<RAGSource>,
     /// Brief summary of retrieved context for LLM consumption.
     pub context_summary: String,
+    /// Semantic topic label for the query.
+    pub topic_label: Option<String>,
+    /// Flow-based context for call path tracing queries.
+    pub flow_context: Option<RAGFlowContext>,
+    /// Actionable hint when the query cannot be fully answered.
+    pub hint: Option<String>,
 }
 
 // =============================================================================

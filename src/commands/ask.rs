@@ -21,7 +21,7 @@ use termimad::MadSkin;
 
 use crate::api::ApiClient;
 use crate::api::llm::{LlmClient, build_llm_context};
-use crate::api::rag::{RAGQueryRequest, RAGQueryResponse};
+use crate::api::rag::{RAGFlowContext, RAGFlowPathNode, RAGQueryRequest, RAGQueryResponse};
 use crate::config::Config;
 use crate::exit_codes::*;
 
@@ -32,6 +32,8 @@ pub struct AskArgs {
     pub query: String,
     /// Optional workspace ID to scope the query
     pub workspace_id: Option<String>,
+    /// Optional workspace path to auto-detect workspace_id from
+    pub workspace_path: Option<String>,
     /// Maximum sessions to retrieve
     pub max_sessions: Option<i32>,
     /// Maximum findings to retrieve
@@ -273,6 +275,227 @@ fn render_markdown(text: &str) {
     print!("{}", fmt_text);
 }
 
+/// Format a flow path node for display
+fn format_flow_node(node: &RAGFlowPathNode, indent: usize) -> String {
+    let prefix = if indent == 0 { "" } else { "└─ " };
+    let indent_str = "   ".repeat(indent);
+
+    // Check if this function has HTTP route metadata - treat it as an API route
+    let has_http_route = node.http_method.is_some() && node.http_path.is_some();
+
+    match node.node_type.as_str() {
+        "api_route" | "fastapi_route" => {
+            // HTTP route node: show method and path
+            let method = node.http_method.as_deref().unwrap_or("?");
+            let path = node.http_path.as_deref().unwrap_or("?");
+            format!(
+                "{}{}Request hits {} {}",
+                indent_str,
+                prefix,
+                method.bright_cyan().bold(),
+                path.bright_white()
+            )
+        }
+        "function" if has_http_route => {
+            // Function with HTTP metadata - show as API route when at root level
+            let method = node.http_method.as_deref().unwrap_or("?");
+            let path = node.http_path.as_deref().unwrap_or("?");
+            if indent == 0 {
+                format!(
+                    "{}Request hits {} {}",
+                    indent_str,
+                    method.bright_cyan().bold(),
+                    path.bright_white()
+                )
+            } else {
+                format!(
+                    "{}{}calls {}()",
+                    indent_str,
+                    prefix,
+                    node.name.yellow()
+                )
+            }
+        }
+        "function" => {
+            // Regular function node: show as "calls function_name()"
+            if indent == 0 {
+                format!("{}calls {}()", indent_str, node.name.yellow())
+            } else {
+                format!(
+                    "{}{}calls {}()",
+                    indent_str,
+                    prefix,
+                    node.name.yellow()
+                )
+            }
+        }
+        "external_library" => {
+            // External library: show "uses library (category)"
+            let category = node.category.as_deref().unwrap_or("external");
+            format!(
+                "{}{}uses {} ({})",
+                indent_str,
+                prefix,
+                node.name.green().bold(),
+                category.dimmed()
+            )
+        }
+        "middleware" | "fastapi_middleware" => {
+            // Middleware node
+            format!(
+                "{}{}Middleware {} intercepts requests",
+                indent_str,
+                prefix,
+                node.name.magenta()
+            )
+        }
+        _ => {
+            // Generic fallback
+            format!(
+                "{}{}[{}] {}",
+                indent_str,
+                prefix,
+                node.node_type.dimmed(),
+                node.name
+            )
+        }
+    }
+}
+
+/// Merge paths that share the same root node into a tree structure
+/// Returns a list of (root_node, children) tuples where children are unique leaf nodes
+fn merge_paths_by_root(
+    paths: &[Vec<RAGFlowPathNode>],
+) -> Vec<(RAGFlowPathNode, Vec<RAGFlowPathNode>)> {
+    use std::collections::HashMap;
+
+    // Group paths by root node_id
+    let mut grouped: HashMap<String, (RAGFlowPathNode, Vec<RAGFlowPathNode>)> = HashMap::new();
+
+    for path in paths {
+        if path.is_empty() {
+            continue;
+        }
+
+        let root = &path[0];
+        let root_id = root.node_id.clone();
+
+        // Get children (all nodes after the root)
+        let children: Vec<RAGFlowPathNode> = path.iter().skip(1).cloned().collect();
+
+        if let Some((_, existing_children)) = grouped.get_mut(&root_id) {
+            // Add children that aren't already in the list (by node_id)
+            for child in children {
+                if !existing_children.iter().any(|c| c.node_id == child.node_id) {
+                    existing_children.push(child);
+                }
+            }
+        } else {
+            grouped.insert(root_id, (root.clone(), children));
+        }
+    }
+
+    grouped.into_values().collect()
+}
+
+/// Render flow context showing call paths
+fn render_flow_context(flow_context: &RAGFlowContext, verbose: bool) {
+    println!("Analyzing code graph...");
+    println!(
+        "{} Found {} related modules",
+        "→".cyan(),
+        flow_context.root_nodes.len()
+    );
+    println!("{} Tracing call paths from API routes...", "→".cyan());
+    println!();
+
+    if flow_context.paths.is_empty() && flow_context.root_nodes.is_empty() {
+        println!("{} No call paths found", "⚠".yellow());
+        return;
+    }
+
+    // Determine topic from root nodes or query
+    // Prefer the first root node's name, capitalize it properly
+    let topic = if let Some(first_root) = flow_context.root_nodes.first() {
+        // Extract just the function/class name and capitalize
+        let name = &first_root.name;
+        // For names like "get_user", extract "user" and capitalize
+        let topic = if name.starts_with("get_") || name.starts_with("set_") {
+            &name[4..]
+        } else if name.starts_with("handle_") {
+            &name[7..]
+        } else if name.starts_with("create_") {
+            &name[7..]
+        } else if name.starts_with("delete_") {
+            &name[7..]
+        } else if name.starts_with("update_") {
+            &name[7..]
+        } else {
+            name.as_str()
+        };
+        // Capitalize first letter
+        let mut chars = topic.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().to_string() + chars.as_str(),
+            None => "Flow".to_string(),
+        }
+    } else if let Some(q) = &flow_context.query {
+        // Fallback: capitalize the query target
+        let mut chars = q.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().to_string() + chars.as_str(),
+            None => "Flow".to_string(),
+        }
+    } else {
+        "Flow".to_string()
+    };
+
+    println!("{} flow identified:", topic.bright_white().bold());
+    println!();
+
+    // Merge paths by root node to create a tree view
+    let merged_trees = merge_paths_by_root(&flow_context.paths);
+
+    // Track unique nodes and edges for stats
+    let mut total_nodes = 0;
+    let mut total_edges = 0;
+
+    // Render each merged tree
+    for (i, (root, children)) in merged_trees.iter().enumerate() {
+        println!("{}. {}", i + 1, format_flow_node(root, 0));
+        total_nodes += 1;
+
+        for child in children {
+            println!("{}", format_flow_node(child, 1));
+            total_nodes += 1;
+            total_edges += 1;
+        }
+
+        if i < merged_trees.len() - 1 {
+            println!();
+        }
+    }
+
+    println!();
+    println!(
+        "Graph context: {} nodes, {} edges traversed",
+        total_nodes.to_string().cyan(),
+        total_edges.to_string().cyan()
+    );
+
+    if verbose {
+        println!();
+        println!("{}", "─".repeat(50).dimmed());
+        println!(
+            "{} {} root node(s), {} call path(s)",
+            "📊".cyan(),
+            flow_context.root_nodes.len(),
+            flow_context.paths.len()
+        );
+    }
+}
+
+
 fn output_formatted(
     response: &RAGQueryResponse,
     llm_response: Option<&str>,
@@ -280,6 +503,12 @@ fn output_formatted(
     has_llm: bool,
     streamed: bool,
 ) {
+    // Check if we have flow context (indicates a "how does X work?" type query)
+    let has_flow_context = response
+        .flow_context
+        .as_ref()
+        .is_some_and(|fc| !fc.paths.is_empty() || !fc.root_nodes.is_empty());
+
     // Print LLM response if available (this is the main answer)
     // If streamed=true, the response was already printed in real-time
     if llm_response.is_some() {
@@ -304,26 +533,58 @@ fn output_formatted(
             println!("{}", "Raw Context (verbose mode)".dimmed());
         }
     } else if !has_llm {
-        // No LLM configured - show hint at top
-        println!();
-        println!(
-            "{} {} Configure an LLM for AI-powered answers: {}",
-            "💡".yellow(),
-            "Tip:".yellow().bold(),
-            "unfault config llm openai".cyan()
-        );
+        // No LLM configured - show hint at top, but AFTER flow context if present
+        if !has_flow_context {
+            println!();
+            println!(
+                "{} {} Configure an LLM for AI-powered answers: {}",
+                "💡".yellow(),
+                "Tip:".yellow().bold(),
+                "unfault config llm openai".cyan()
+            );
+        }
     }
 
-    // Print context summary (always in verbose, or when no LLM answer)
-    if llm_response.is_none() || verbose {
+    // If we have flow context, render it prominently (this is the "semantic" answer)
+    if let Some(flow_context) = &response.flow_context {
+        if !flow_context.paths.is_empty() || !flow_context.root_nodes.is_empty() {
+            render_flow_context(flow_context, verbose);
+            println!();
+
+            // Show LLM hint after flow context (when no LLM configured)
+            if llm_response.is_none() && !has_llm {
+                println!(
+                    "{} {} Configure an LLM for AI-powered answers: {}",
+                    "💡".yellow(),
+                    "Tip:".yellow().bold(),
+                    "unfault config llm openai".cyan()
+                );
+            }
+        }
+    }
+
+    // Print context summary (only in verbose mode when flow context is shown, or when no flow context)
+    let show_summary = if has_flow_context {
+        verbose // Only show in verbose when we have flow context
+    } else {
+        llm_response.is_none() || verbose
+    };
+
+    if show_summary {
         println!();
         println!("{}", "Context Summary".bold().underline());
         println!("{}", response.context_summary);
         println!();
     }
 
-    // Print sessions if any (in verbose mode, or when no LLM answer)
-    if (llm_response.is_none() || verbose) && !response.sessions.is_empty() {
+    // Print sessions if any (in verbose mode, or when no LLM answer and no flow context)
+    let show_sessions = if has_flow_context {
+        verbose
+    } else {
+        (llm_response.is_none() || verbose) && !response.sessions.is_empty()
+    };
+
+    if show_sessions && !response.sessions.is_empty() {
         println!("{}", "Related Sessions".bold());
         println!("{}", "─".repeat(50).dimmed());
 
@@ -368,8 +629,14 @@ fn output_formatted(
         println!();
     }
 
-    // Print findings if any (in verbose mode, or when no LLM answer)
-    if (llm_response.is_none() || verbose) && !response.findings.is_empty() {
+    // Print findings if any (in verbose mode, or when no LLM answer and no flow context)
+    let show_findings = if has_flow_context {
+        verbose
+    } else {
+        (llm_response.is_none() || verbose) && !response.findings.is_empty()
+    };
+
+    if show_findings && !response.findings.is_empty() {
         println!("{}", "Related Findings".bold());
         println!("{}", "─".repeat(50).dimmed());
 
@@ -408,8 +675,12 @@ fn output_formatted(
         println!();
     }
 
-    // If nothing found (only show when no LLM answer)
-    if llm_response.is_none() && response.sessions.is_empty() && response.findings.is_empty() {
+    // If nothing found (only show when no LLM answer AND no flow context)
+    if llm_response.is_none()
+        && !has_flow_context
+        && response.sessions.is_empty()
+        && response.findings.is_empty()
+    {
         println!("{} No relevant context found for your query.", "ℹ".blue());
         println!("  Try running `unfault review` first to analyze your code.");
         println!();
@@ -425,6 +696,7 @@ mod tests {
         let args = AskArgs {
             query: "test query".to_string(),
             workspace_id: None,
+            workspace_path: None,
             max_sessions: None,
             max_findings: None,
             similarity_threshold: None,
@@ -434,6 +706,7 @@ mod tests {
         };
         assert_eq!(args.query, "test query");
         assert!(args.workspace_id.is_none());
+        assert!(args.workspace_path.is_none());
         assert!(!args.json);
         assert!(!args.no_llm);
         assert!(!args.verbose);
@@ -444,6 +717,7 @@ mod tests {
         let args = AskArgs {
             query: "How is my service?".to_string(),
             workspace_id: Some("wks_abc123".to_string()),
+            workspace_path: Some("/path/to/project".to_string()),
             max_sessions: Some(10),
             max_findings: Some(20),
             similarity_threshold: Some(0.7),
@@ -453,6 +727,7 @@ mod tests {
         };
         assert_eq!(args.query, "How is my service?");
         assert_eq!(args.workspace_id, Some("wks_abc123".to_string()));
+        assert_eq!(args.workspace_path, Some("/path/to/project".to_string()));
         assert_eq!(args.max_sessions, Some(10));
         assert!(args.json);
         assert!(args.verbose);
