@@ -129,6 +129,20 @@ pub struct SourceFile {
     pub contents: String,
 }
 
+/// File header for graph building.
+///
+/// Contains only the import section of a file, used to build a complete
+/// dependency graph without sending entire file contents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiFileHeader {
+    /// File path relative to workspace root
+    pub path: String,
+    /// Programming language (e.g., "python", "rust", "go")
+    pub language: String,
+    /// Extracted header content (import statements only)
+    pub header: String,
+}
+
 /// Context containing files to analyze
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionContextInput {
@@ -201,6 +215,13 @@ pub struct SessionRunRequest {
     pub meta: ReviewSessionMeta,
     /// Analysis contexts with files
     pub contexts: Vec<SessionContextInput>,
+    /// File headers for complete graph building (optional).
+    ///
+    /// Contains import sections from ALL source files in the workspace,
+    /// not just those matching rule predicates. This enables complete
+    /// dependency graph construction for accurate impact analysis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_headers: Option<Vec<ApiFileHeader>>,
 }
 
 // =============================================================================
@@ -360,6 +381,9 @@ pub struct SessionRunResponse {
     /// Total findings count (only set when is_limited=true)
     #[serde(default)]
     pub total_findings_count: Option<i32>,
+    /// Warning if code graph persistence failed (RAG features won't work)
+    #[serde(default)]
+    pub graph_warning: Option<String>,
 }
 
 /// Response for session status queries

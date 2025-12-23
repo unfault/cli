@@ -216,6 +216,86 @@ struct OllamaResponse {
 }
 
 // =============================================================================
+// Streaming Line Wrapper
+// =============================================================================
+
+/// Maximum width for terminal output
+const MAX_LINE_WIDTH: usize = 80;
+
+/// A streaming line wrapper that buffers text and prints with line wrapping.
+///
+/// This handles streaming tokens (which may be partial words) by buffering
+/// until whitespace is encountered, then wrapping appropriately.
+struct StreamingLineWrapper {
+    /// Current column position (0-indexed)
+    column: usize,
+    /// Buffer for the current word (tokens until whitespace)
+    word_buffer: String,
+}
+
+impl StreamingLineWrapper {
+    fn new() -> Self {
+        Self {
+            column: 0,
+            word_buffer: String::new(),
+        }
+    }
+
+    /// Process incoming text chunk and print with line wrapping
+    fn write(&mut self, text: &str) {
+        for ch in text.chars() {
+            if ch == '\n' {
+                // Flush current word buffer and print newline
+                self.flush_word();
+                println!();
+                self.column = 0;
+            } else if ch.is_whitespace() {
+                // Flush word buffer, then handle the space
+                self.flush_word();
+                // Only print space if we're not at the start of a line
+                if self.column > 0 && self.column < MAX_LINE_WIDTH {
+                    print!(" ");
+                    self.column += 1;
+                }
+            } else {
+                // Accumulate non-whitespace characters
+                self.word_buffer.push(ch);
+            }
+        }
+        let _ = io::stdout().flush();
+    }
+
+    /// Flush the word buffer, wrapping to a new line if needed
+    fn flush_word(&mut self) {
+        if self.word_buffer.is_empty() {
+            return;
+        }
+
+        let word_len = self.word_buffer.chars().count();
+
+        // Check if we need to wrap
+        if self.column > 0 && self.column + word_len > MAX_LINE_WIDTH {
+            // Wrap to the next line
+            println!();
+            self.column = 0;
+        }
+
+        // Print the word
+        print!("{}", self.word_buffer);
+        self.column += word_len;
+        self.word_buffer.clear();
+    }
+
+    /// Finish streaming and flush any remaining content
+    fn finish(&mut self) {
+        self.flush_word();
+        // Print final newline
+        println!();
+        let _ = io::stdout().flush();
+    }
+}
+
+// =============================================================================
 // LLM Client
 // =============================================================================
 
@@ -569,6 +649,7 @@ Based on this context, please answer the user's question about their codebase he
 
         let mut full_content = String::new();
         let mut stream = response.bytes_stream();
+        let mut wrapper = StreamingLineWrapper::new();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| LlmError::Network {
@@ -590,8 +671,7 @@ Based on this context, please answer the user's question about their codebase he
                     {
                         if let Some(choice) = stream_response.choices.first() {
                             if let Some(content) = &choice.delta.content {
-                                print!("{}", content);
-                                let _ = io::stdout().flush();
+                                wrapper.write(content);
                                 full_content.push_str(content);
                             }
                         }
@@ -600,7 +680,7 @@ Based on this context, please answer the user's question about their codebase he
             }
         }
 
-        println!(); // Final newline after streaming
+        wrapper.finish();
         Ok(full_content)
     }
 
@@ -723,6 +803,7 @@ Based on this context, please answer the user's question about their codebase he
 
         let mut full_content = String::new();
         let mut stream = response.bytes_stream();
+        let mut wrapper = StreamingLineWrapper::new();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| LlmError::Network {
@@ -740,8 +821,7 @@ Based on this context, please answer the user's question about their codebase he
                         if event.event_type == "content_block_delta" {
                             if let Some(delta) = &event.delta {
                                 if let Some(text) = &delta.text {
-                                    print!("{}", text);
-                                    let _ = io::stdout().flush();
+                                    wrapper.write(text);
                                     full_content.push_str(text);
                                 }
                             }
@@ -751,7 +831,7 @@ Based on this context, please answer the user's question about their codebase he
             }
         }
 
-        println!(); // Final newline after streaming
+        wrapper.finish();
         Ok(full_content)
     }
 
@@ -851,6 +931,7 @@ Based on this context, please answer the user's question about their codebase he
 
         let mut full_content = String::new();
         let mut stream = response.bytes_stream();
+        let mut wrapper = StreamingLineWrapper::new();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| LlmError::Network {
@@ -873,15 +954,14 @@ Based on this context, please answer the user's question about their codebase he
 
                 if let Ok(chunk) = serde_json::from_str::<OllamaStreamChunk>(line) {
                     if let Some(message) = chunk.message {
-                        print!("{}", message.content);
-                        let _ = io::stdout().flush();
+                        wrapper.write(&message.content);
                         full_content.push_str(&message.content);
                     }
                 }
             }
         }
 
-        println!(); // Final newline after streaming
+        wrapper.finish();
         Ok(full_content)
     }
 }

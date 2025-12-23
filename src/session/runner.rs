@@ -7,11 +7,12 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::api::{
-    ApiClient, ApiError, ApiRuleSettings, ApiWorkspaceSettings, ReviewSessionMeta,
+    ApiClient, ApiError, ApiFileHeader, ApiRuleSettings, ApiWorkspaceSettings, ReviewSessionMeta,
     SessionContextInput, SessionEmbedResponse, SessionNewRequest, SessionNewResponse,
     SessionRunRequest, SessionRunResponse, SessionStatusResponse,
 };
 use crate::session::file_collector::CollectedFiles;
+use crate::session::header_extractor::{FileHeader, HeaderExtractor};
 use crate::session::workspace::WorkspaceInfo;
 use crate::session::workspace_settings::WorkspaceSettings;
 
@@ -171,6 +172,42 @@ impl<'a> SessionRunner<'a> {
         collected_files: &CollectedFiles,
         dimension: &str,
     ) -> Result<SessionRunResponse, ApiError> {
+        self.run_analysis_with_headers(
+            session_id,
+            workspace_info,
+            collected_files,
+            dimension,
+            None,
+        )
+        .await
+    }
+
+    /// Run analysis on a session with file headers for complete graph building.
+    ///
+    /// This method allows sending file headers (import sections) from ALL source
+    /// files in the workspace, enabling complete dependency graph construction
+    /// even for files that don't match rule predicates.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - Session identifier
+    /// * `workspace_info` - Information about the workspace
+    /// * `collected_files` - Files to analyze (full contents for rule matching)
+    /// * `dimension` - Dimension for analysis context
+    /// * `file_headers` - Optional headers from all source files for graph building
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SessionRunResponse)` - Analysis completed
+    /// * `Err(ApiError)` - Failed to run analysis
+    pub async fn run_analysis_with_headers(
+        &self,
+        session_id: &str,
+        workspace_info: &WorkspaceInfo,
+        collected_files: &CollectedFiles,
+        dimension: &str,
+        file_headers: Option<Vec<FileHeader>>,
+    ) -> Result<SessionRunResponse, ApiError> {
         let meta = ReviewSessionMeta {
             label: workspace_info.label.clone(),
             languages: workspace_info.language_strings(),
@@ -187,7 +224,23 @@ impl<'a> SessionRunner<'a> {
             files: collected_files.files.clone(),
         }];
 
-        let request = SessionRunRequest { meta, contexts };
+        // Convert FileHeader to ApiFileHeader
+        let api_file_headers = file_headers.map(|headers| {
+            headers
+                .into_iter()
+                .map(|h| ApiFileHeader {
+                    path: h.path,
+                    language: h.language,
+                    header: h.header,
+                })
+                .collect()
+        });
+
+        let request = SessionRunRequest {
+            meta,
+            contexts,
+            file_headers: api_file_headers,
+        };
 
         self.client
             .run_analysis(self.api_key, session_id, &request)
@@ -212,6 +265,30 @@ impl<'a> SessionRunner<'a> {
         workspace_info: &WorkspaceInfo,
         contexts: Vec<SessionContextInput>,
     ) -> Result<SessionRunResponse, ApiError> {
+        self.run_analysis_with_contexts_and_headers(session_id, workspace_info, contexts, None)
+            .await
+    }
+
+    /// Run analysis with multiple contexts and file headers.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - Session identifier
+    /// * `workspace_info` - Information about the workspace
+    /// * `contexts` - Analysis contexts with files
+    /// * `file_headers` - Optional headers from all source files for graph building
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SessionRunResponse)` - Analysis completed
+    /// * `Err(ApiError)` - Failed to run analysis
+    pub async fn run_analysis_with_contexts_and_headers(
+        &self,
+        session_id: &str,
+        workspace_info: &WorkspaceInfo,
+        contexts: Vec<SessionContextInput>,
+        file_headers: Option<Vec<FileHeader>>,
+    ) -> Result<SessionRunResponse, ApiError> {
         let dimensions: Vec<String> = contexts.iter().map(|c| c.dimension.clone()).collect();
 
         let meta = ReviewSessionMeta {
@@ -223,7 +300,23 @@ impl<'a> SessionRunner<'a> {
             requested_dimensions: dimensions,
         };
 
-        let request = SessionRunRequest { meta, contexts };
+        // Convert FileHeader to ApiFileHeader
+        let api_file_headers = file_headers.map(|headers| {
+            headers
+                .into_iter()
+                .map(|h| ApiFileHeader {
+                    path: h.path,
+                    language: h.language,
+                    header: h.header,
+                })
+                .collect()
+        });
+
+        let request = SessionRunRequest {
+            meta,
+            contexts,
+            file_headers: api_file_headers,
+        };
 
         self.client
             .run_analysis(self.api_key, session_id, &request)
@@ -365,6 +458,35 @@ impl<'a> SessionRunner<'a> {
         collected_files: &CollectedFiles,
         dimensions: &[&str],
     ) -> Result<SessionResult, ApiError> {
+        self.execute_with_dimensions_and_graph(workspace_info, collected_files, dimensions, false)
+            .await
+    }
+
+    /// Execute analysis with custom dimensions and complete graph building.
+    ///
+    /// When `include_graph_headers` is true, this method extracts import headers
+    /// from ALL source files in the workspace and sends them along with the
+    /// analysis request. This enables complete dependency graph construction
+    /// for accurate impact analysis, even for files that don't match rule predicates.
+    ///
+    /// # Arguments
+    ///
+    /// * `workspace_info` - Information about the workspace
+    /// * `collected_files` - Files to analyze
+    /// * `dimensions` - Dimensions to analyze
+    /// * `include_graph_headers` - Whether to extract and send file headers
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SessionResult)` - Complete session result
+    /// * `Err(ApiError)` - Failed at any step
+    pub async fn execute_with_dimensions_and_graph(
+        &self,
+        workspace_info: &WorkspaceInfo,
+        collected_files: &CollectedFiles,
+        dimensions: &[&str],
+        include_graph_headers: bool,
+    ) -> Result<SessionResult, ApiError> {
         // Step 1: Create session with requested dimensions
         let requested_dimensions = Some(dimensions.iter().map(|s| s.to_string()).collect());
         let session_response = self
@@ -372,7 +494,20 @@ impl<'a> SessionRunner<'a> {
             .await?;
         let session_id = session_response.session_id.clone();
 
-        // Step 2: Build contexts for each dimension
+        // Step 2: Extract file headers if requested
+        let file_headers = if include_graph_headers {
+            let extractor = HeaderExtractor::new(&workspace_info.root);
+            let headers = extractor.extract_all(&workspace_info.source_files);
+            if !headers.is_empty() {
+                Some(headers)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Step 3: Build contexts for each dimension
         let contexts: Vec<SessionContextInput> = dimensions
             .iter()
             .map(|dim| SessionContextInput {
@@ -383,9 +518,14 @@ impl<'a> SessionRunner<'a> {
             })
             .collect();
 
-        // Step 3: Run analysis
+        // Step 4: Run analysis with optional headers
         let run_response = self
-            .run_analysis_with_contexts(&session_id, workspace_info, contexts)
+            .run_analysis_with_contexts_and_headers(
+                &session_id,
+                workspace_info,
+                contexts,
+                file_headers,
+            )
             .await?;
 
         let status = SessionStatus::from(run_response.status.as_str());
@@ -396,6 +536,42 @@ impl<'a> SessionRunner<'a> {
             response: Some(run_response),
             error_message: None,
         })
+    }
+
+    /// Execute a complete analysis workflow with graph headers.
+    ///
+    /// This is a convenience method that:
+    /// 1. Creates a session
+    /// 2. Extracts import headers from all source files
+    /// 3. Runs analysis with headers for complete graph building
+    /// 4. Returns the result
+    ///
+    /// The graph headers enable complete dependency graph construction,
+    /// improving the accuracy of impact analysis and centrality metrics.
+    ///
+    /// # Arguments
+    ///
+    /// * `workspace_info` - Information about the workspace
+    /// * `collected_files` - Files to analyze (full contents for rule matching)
+    /// * `dimension` - Dimension for analysis
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SessionResult)` - Complete session result
+    /// * `Err(ApiError)` - Failed at any step
+    pub async fn execute_with_graph(
+        &self,
+        workspace_info: &WorkspaceInfo,
+        collected_files: &CollectedFiles,
+        dimension: &str,
+    ) -> Result<SessionResult, ApiError> {
+        self.execute_with_dimensions_and_graph(
+            workspace_info,
+            collected_files,
+            &[dimension],
+            true,
+        )
+        .await
     }
 }
 

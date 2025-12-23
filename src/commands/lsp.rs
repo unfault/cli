@@ -13,10 +13,24 @@
 //! 3. Send IR to the Unfault API for analysis
 //! 4. Convert findings to LSP diagnostics with code actions
 //!
+//! ## Project Root Detection
+//!
+//! When analyzing a file, the LSP server detects the appropriate project root
+//! by walking up from the file's directory looking for project markers:
+//! - `pyproject.toml`, `requirements.txt`, `setup.py` (Python)
+//! - `package.json` (JavaScript/TypeScript)
+//! - `Cargo.toml` (Rust)
+//! - `go.mod` (Go)
+//! - `pom.xml`, `build.gradle` (Java)
+//! - `.git` directory (fallback)
+//!
+//! This allows proper analysis even when the IDE workspace is a monorepo.
+//!
 //! ## Custom Extensions
 //!
 //! The server supports custom LSP notifications:
 //! - `unfault/fileCentrality`: Get file importance metrics for status bar display
+//! - `unfault/fileDependencies`: Get list of files that depend on the current file
 //!
 //! ## Usage
 //!
@@ -28,7 +42,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -37,11 +51,14 @@ use tower_lsp::jsonrpc::Result as RpcResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use crate::api::graph::{CentralityRequest, FileCentrality, IrFinding};
+use crate::api::graph::{CentralityRequest, FileCentrality, FunctionImpactRequest, FunctionInfo, ImpactAnalysisRequest, IrFinding};
 use crate::api::ApiClient;
 use crate::config::Config;
 use crate::exit_codes::*;
 use crate::session::{build_ir_cached, compute_workspace_id, get_git_remote, WorkspaceScanner};
+
+// Import patch types from unfault-core for parsing patch_json
+use unfault_core::types::{FilePatch, PatchRange};
 
 /// Arguments for the LSP command
 pub struct LspArgs {
@@ -76,6 +93,21 @@ pub struct FileCentralityNotification {
     pub label: String,
 }
 
+/// File dependencies notification - list of files that depend on the current file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDependenciesNotification {
+    /// File path being analyzed (relative to workspace)
+    pub path: String,
+    /// List of files that directly import this file
+    pub direct_dependents: Vec<String>,
+    /// List of all files affected (including transitive dependents)
+    pub all_dependents: Vec<String>,
+    /// Total count of affected files
+    pub total_count: i32,
+    /// Human-readable summary message
+    pub summary: String,
+}
+
 /// The Unfault LSP backend
 struct UnfaultLsp {
     /// LSP client for sending notifications
@@ -90,6 +122,12 @@ struct UnfaultLsp {
     workspace_id: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Cached findings for code actions, keyed by document URI
     findings_cache: DashMap<Url, Vec<CachedFinding>>,
+    /// Cached document content for code actions, keyed by document URI
+    /// Used to convert byte offsets to line/column positions when generating edits
+    document_cache: scc::HashMap<Url, String>,
+    /// Cached function info (name and range) for hover, keyed by document URI
+    #[allow(dead_code)]
+    function_cache: DashMap<Url, Vec<FunctionInfo>>,
     /// Cached file centrality data for the workspace
     centrality_cache: Arc<tokio::sync::RwLock<Option<Vec<FileCentrality>>>>,
     /// Enable verbose logging
@@ -98,18 +136,31 @@ struct UnfaultLsp {
 
 impl UnfaultLsp {
     fn new(client: Client, verbose: bool) -> Self {
-        let api_client = ApiClient::new(
-            std::env::var("UNFAULT_API_URL")
-                .unwrap_or_else(|_| "https://api.unfault.dev".to_string()),
-        );
+        // Use the same base URL resolution as the rest of the CLI:
+        // 1. UNFAULT_BASE_URL env var (if set)
+        // 2. Config file's stored_base_url (if authenticated)
+        // 3. Default production URL
+        let config = crate::config::Config::load().ok();
+        let api_url = config.as_ref()
+            .map(|c| c.base_url())
+            .unwrap_or_else(crate::config::default_base_url);
+
+        if verbose {
+            eprintln!("[unfault-lsp] API URL: {}", api_url);
+            eprintln!("[unfault-lsp] Config loaded: {}", config.is_some());
+        }
+
+        let api_client = ApiClient::new(api_url);
 
         Self {
             client,
             api_client: Arc::new(api_client),
-            config: Config::load().ok(),
+            config,
             workspace_root: Arc::new(tokio::sync::RwLock::new(None)),
             workspace_id: Arc::new(tokio::sync::RwLock::new(None)),
             findings_cache: DashMap::new(),
+            document_cache: scc::HashMap::new(),
+            function_cache: DashMap::new(),
             centrality_cache: Arc::new(tokio::sync::RwLock::new(None)),
             verbose,
         }
@@ -126,17 +177,33 @@ impl UnfaultLsp {
     async fn analyze_document(&self, uri: &Url, text: &str, version: i32) {
         self.log_debug(&format!("Analyzing document: {}", uri));
 
-        // Get workspace root
-        let workspace_root = {
-            let root = self.workspace_root.read().await;
-            match root.as_ref() {
-                Some(r) => r.clone(),
-                None => {
-                    self.log_debug("No workspace root set, skipping analysis");
-                    return;
-                }
+        // Get file path from URI
+        let file_path = match uri.to_file_path() {
+            Ok(path) => path,
+            Err(_) => {
+                self.log_debug("Could not convert URI to file path, skipping analysis");
+                return;
             }
         };
+
+        // Get IDE workspace root as fallback
+        let ide_workspace_root = {
+            let root = self.workspace_root.read().await;
+            root.clone()
+        };
+
+        // Find the project root for this file by looking for project markers
+        // This handles monorepo scenarios where the IDE workspace might be the monorepo root
+        // but the file is in a subdirectory with its own project config
+        let project_root = find_project_root(&file_path, ide_workspace_root.as_ref())
+            .unwrap_or_else(|| {
+                // Fall back to IDE workspace root if no project marker found
+                ide_workspace_root.clone().unwrap_or_else(|| {
+                    file_path.parent().unwrap_or(&file_path).to_path_buf()
+                })
+            });
+
+        self.log_debug(&format!("Using project root: {:?}", project_root));
 
         // Get API key
         let api_key = match &self.config {
@@ -151,42 +218,78 @@ impl UnfaultLsp {
             }
         };
 
-        // Build IR for the workspace (cached)
-        let build_result = match build_ir_cached(&workspace_root, None, self.verbose) {
+        // Build IR for the project (cached)
+        let build_result = match build_ir_cached(&project_root, None, self.verbose) {
             Ok(result) => result,
             Err(e) => {
-                self.log_debug(&format!("Failed to build IR: {}", e));
+                let msg = format!("Failed to build IR: {}", e);
+                self.log_debug(&msg);
+                self.client
+                    .show_message(MessageType::WARNING, msg)
+                    .await;
                 return;
             }
         };
+
+        // Check if IR is too large (warn at 5MB, fail at 10MB)
+        let ir_size = build_result.ir.semantics.len();
+        if ir_size > 500 {
+            self.log_debug(&format!("Large project: {} files", ir_size));
+        }
 
         // Serialize IR
         let ir_json = match serde_json::to_string(&build_result.ir) {
             Ok(json) => json,
             Err(e) => {
-                self.log_debug(&format!("Failed to serialize IR: {}", e));
+                let msg = format!("Failed to serialize IR: {}", e);
+                self.log_debug(&msg);
+                self.client
+                    .show_message(MessageType::WARNING, msg)
+                    .await;
                 return;
             }
         };
 
-        // Get workspace ID
-        let workspace_id = {
-            let id = self.workspace_id.read().await;
-            match id.as_ref() {
-                Some(id) => id.clone(),
-                None => {
-                    self.log_debug("No workspace ID, skipping analysis");
-                    return;
-                }
-            }
-        };
+        // Check payload size and warn if too large
+        let payload_size_mb = ir_json.len() as f64 / (1024.0 * 1024.0);
+        if payload_size_mb > 5.0 {
+            let msg = format!(
+                "Project is large ({:.1}MB). Analysis may be slow or fail. Consider using a smaller workspace.",
+                payload_size_mb
+            );
+            self.log_debug(&msg);
+            self.client
+                .show_message(MessageType::WARNING, msg)
+                .await;
+        }
 
-        // Detect profiles from workspace
-        let mut scanner = WorkspaceScanner::new(&workspace_root);
+        // Compute workspace ID for this project
+        let git_remote = get_git_remote(&project_root);
+        let workspace_label = project_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+
+        let workspace_id = compute_workspace_id(
+            git_remote.as_deref(),
+            None,
+            workspace_label.as_deref(),
+        )
+            .map(|r| r.id)
+            .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
+
+        self.log_debug(&format!("Project workspace ID: {}", workspace_id));
+
+        // Detect profiles from project
+        let mut scanner = WorkspaceScanner::new(&project_root);
         let workspace_info = match scanner.scan() {
             Ok(info) => info,
             Err(e) => {
-                self.log_debug(&format!("Failed to scan workspace: {}", e));
+                let msg = format!("Failed to scan project: {}", e);
+                self.log_debug(&msg);
+                self.client
+                    .show_message(MessageType::WARNING, msg)
+                    .await;
                 return;
             }
         };
@@ -199,19 +302,38 @@ impl UnfaultLsp {
             .collect();
 
         // Call API
-        let workspace_label = workspace_root
+        let workspace_label_str = project_root
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("workspace");
+            .unwrap_or("project");
 
         let response = match self
             .api_client
-            .analyze_ir(&api_key, &workspace_id, Some(workspace_label), &profiles, ir_json)
+            .analyze_ir(&api_key, &workspace_id, Some(workspace_label_str), &profiles, ir_json)
             .await
         {
             Ok(response) => response,
             Err(e) => {
+                // Provide user-friendly error message
+                let user_msg = match &e {
+                    crate::api::ApiError::Network { message } if message.contains("parse") => {
+                        format!(
+                            "Analysis failed: project may be too large ({} files). Try opening a smaller directory.",
+                            ir_size
+                        )
+                    }
+                    crate::api::ApiError::Unauthorized { .. } => {
+                        "Analysis failed: Invalid or expired API key. Run 'unfault login' to re-authenticate.".to_string()
+                    }
+                    crate::api::ApiError::Server { status, .. } => {
+                        format!("Analysis failed: Server error ({}). Please try again later.", status)
+                    }
+                    _ => format!("Analysis failed: {:?}", e),
+                };
                 self.log_debug(&format!("API error: {:?}", e));
+                self.client
+                    .show_message(MessageType::WARNING, user_msg)
+                    .await;
                 return;
             }
         };
@@ -221,22 +343,26 @@ impl UnfaultLsp {
             response.findings.len()
         ));
 
-        // Convert file path from URI to relative path
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path
-                .strip_prefix(&workspace_root)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| path.to_string_lossy().to_string()),
-            Err(_) => uri.path().to_string(),
-        };
+        // Convert file path from absolute to relative to project root
+        let relative_file_path = file_path
+            .strip_prefix(&project_root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
 
         // Filter findings for this document and convert to diagnostics
         let mut diagnostics = Vec::new();
         let mut cached_findings = Vec::new();
 
+        self.log_debug(&format!(
+            "Looking for findings matching file: {}",
+            relative_file_path
+        ));
+
         for finding in &response.findings {
             // Check if this finding is for the current file
-            if !finding.file_path.ends_with(&file_path) && !file_path.ends_with(&finding.file_path)
+            // Compare using relative paths from the project root
+            if !finding.file_path.ends_with(&relative_file_path)
+                && !relative_file_path.ends_with(&finding.file_path)
             {
                 continue;
             }
@@ -390,29 +516,39 @@ impl UnfaultLsp {
                 }
             }
 
-            // Also check patch_json (newer format)
+            // Also check patch_json (newer format with structured hunks)
             if let Some(patch_json) = &finding.patch_json {
-                // Try to parse patch_json and create workspace edit
-                if let Ok(_patch_data) = serde_json::from_str::<serde_json::Value>(patch_json) {
-                    // Handle the patch_json format if available
-                    if let Some(preview) = &finding.fix_preview {
-                        // Use fix_preview for the edit
-                        let edit = self.create_edit_from_preview(uri, finding, preview, source_text);
-                        if let Some(edit) = edit {
-                            let action = CodeAction {
-                                title: format!("Fix: {}", finding.title),
-                                kind: Some(CodeActionKind::QUICKFIX),
-                                diagnostics: Some(vec![
-                                    self.finding_to_diagnostic(finding, source_text)
-                                ]),
-                                edit: Some(edit),
-                                command: None,
-                                is_preferred: Some(true),
-                                disabled: None,
-                                data: None,
-                            };
-                            actions.push(action);
-                        }
+                // Use the structured patch for proper multi-hunk edits
+                if let Some(edit) = self.create_edit_from_patch_json(uri, patch_json, source_text) {
+                    let action = CodeAction {
+                        title: format!("Fix: {}", finding.title),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        diagnostics: Some(vec![
+                            self.finding_to_diagnostic(finding, source_text)
+                        ]),
+                        edit: Some(edit),
+                        command: None,
+                        is_preferred: Some(true),
+                        disabled: None,
+                        data: None,
+                    };
+                    actions.push(action);
+                } else if let Some(preview) = &finding.fix_preview {
+                    // Fallback to fix_preview if patch_json parsing fails
+                    if let Some(edit) = self.create_edit_from_preview(uri, finding, preview, source_text) {
+                        let action = CodeAction {
+                            title: format!("Fix: {}", finding.title),
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            diagnostics: Some(vec![
+                                self.finding_to_diagnostic(finding, source_text)
+                            ]),
+                            edit: Some(edit),
+                            command: None,
+                            is_preferred: Some(true),
+                            disabled: None,
+                            data: None,
+                        };
+                        actions.push(action);
                     }
                 }
             }
@@ -485,7 +621,154 @@ impl UnfaultLsp {
         })
     }
 
-    /// Create a workspace edit from a fix preview
+    /// Create a workspace edit from patch_json (structured patch with multiple hunks)
+    ///
+    /// The patch_json contains a FilePatch with hunks that specify exact locations
+    /// for each edit (e.g., import insertion at one line, middleware at another).
+    fn create_edit_from_patch_json(
+        &self,
+        uri: &Url,
+        patch_json: &str,
+        source_text: &str,
+    ) -> Option<WorkspaceEdit> {
+        // Parse the FilePatch from JSON
+        let patch: FilePatch = match serde_json::from_str(patch_json) {
+            Ok(p) => p,
+            Err(e) => {
+                self.log_debug(&format!("Failed to parse patch_json: {}", e));
+                return None;
+            }
+        };
+
+        if patch.hunks.is_empty() {
+            return None;
+        }
+
+        // Precompute line start byte offsets (needed for InsertAfterLine)
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(
+                source_text
+                    .char_indices()
+                    .filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }),
+            )
+            .chain(std::iter::once(source_text.len()))
+            .collect();
+
+        let source_lines: Vec<&str> = source_text.lines().collect();
+        let mut text_edits = Vec::new();
+
+        for hunk in &patch.hunks {
+            match &hunk.range {
+                PatchRange::InsertAfterLine { line } => {
+                    // line is 1-based; line == 0 means insert at the very beginning
+                    if *line == 0 {
+                        // Insert at the very beginning of the file
+                        let edit = TextEdit {
+                            range: Range {
+                                start: Position { line: 0, character: 0 },
+                                end: Position { line: 0, character: 0 },
+                            },
+                            new_text: hunk.replacement.clone(),
+                        };
+                        text_edits.push(edit);
+                    } else {
+                        // Insert after the specified line
+                        // LSP lines are 0-indexed, so line N (1-indexed) becomes line N-1 (0-indexed)
+                        // We want to insert at the START of the next line (line N 0-indexed)
+                        let target_line = *line as u32;
+                        let edit = TextEdit {
+                            range: Range {
+                                start: Position {
+                                    line: target_line,
+                                    character: 0,
+                                },
+                                end: Position {
+                                    line: target_line,
+                                    character: 0,
+                                },
+                            },
+                            new_text: hunk.replacement.clone(),
+                        };
+                        text_edits.push(edit);
+                    }
+                }
+                PatchRange::InsertBeforeLine { line } => {
+                    // line is 1-based; insert before line N means insert at start of line N-1 (0-indexed)
+                    let target_line = line.saturating_sub(1) as u32;
+                    let edit = TextEdit {
+                        range: Range {
+                            start: Position {
+                                line: target_line,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: target_line,
+                                character: 0,
+                            },
+                        },
+                        new_text: hunk.replacement.clone(),
+                    };
+                    text_edits.push(edit);
+                }
+                PatchRange::InsertAt { byte_offset } => {
+                    // Convert byte offset to line/column
+                    if let Some((line, col)) = byte_offset_to_position(&line_starts, &source_lines, *byte_offset) {
+                        let edit = TextEdit {
+                            range: Range {
+                                start: Position {
+                                    line: line as u32,
+                                    character: col as u32,
+                                },
+                                end: Position {
+                                    line: line as u32,
+                                    character: col as u32,
+                                },
+                            },
+                            new_text: hunk.replacement.clone(),
+                        };
+                        text_edits.push(edit);
+                    }
+                }
+                PatchRange::ReplaceBytes { start, end } => {
+                    // Convert byte range to line/column positions
+                    if let (Some((start_line, start_col)), Some((end_line, end_col))) = (
+                        byte_offset_to_position(&line_starts, &source_lines, *start),
+                        byte_offset_to_position(&line_starts, &source_lines, *end),
+                    ) {
+                        let edit = TextEdit {
+                            range: Range {
+                                start: Position {
+                                    line: start_line as u32,
+                                    character: start_col as u32,
+                                },
+                                end: Position {
+                                    line: end_line as u32,
+                                    character: end_col as u32,
+                                },
+                            },
+                            new_text: hunk.replacement.clone(),
+                        };
+                        text_edits.push(edit);
+                    }
+                }
+            }
+        }
+
+        if text_edits.is_empty() {
+            return None;
+        }
+
+        let mut changes = HashMap::new();
+        changes.insert(uri.clone(), text_edits);
+
+        Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        })
+    }
+
+    /// Create a workspace edit from a fix preview (fallback when no patch_json)
     fn create_edit_from_preview(
         &self,
         uri: &Url,
@@ -599,6 +882,147 @@ impl UnfaultLsp {
             label,
         }
     }
+
+    /// Get files that depend on a given file using the impact analysis API
+    async fn get_file_dependencies(&self, file_path: &str) -> Option<FileDependenciesNotification> {
+        let api_key = self.config.as_ref()?.api_key.clone();
+        let workspace_id = self.workspace_id.read().await.clone()?;
+
+        self.log_debug(&format!("Fetching dependencies for: {}", file_path));
+
+        // Call impact analysis API
+        let request = ImpactAnalysisRequest {
+            session_id: None,
+            workspace_id: Some(workspace_id),
+            file_path: file_path.to_string(),
+            max_depth: 3,  // Limit depth for performance
+        };
+
+        let response = match self.api_client.graph_impact(&api_key, &request).await {
+            Ok(r) => r,
+            Err(e) => {
+                self.log_debug(&format!("Failed to fetch dependencies: {:?}", e));
+                return None;
+            }
+        };
+
+        let direct_count = response.direct_importers.len();
+        let total_count = response.total_affected;
+
+        // Generate human-readable summary
+        let summary = if total_count == 0 {
+            "No other files depend on this file".to_string()
+        } else if direct_count == 1 && total_count == 1 {
+            format!("1 file depends on this file: {}", response.direct_importers[0].path)
+        } else if direct_count == total_count as usize {
+            format!("{} files depend on this file", total_count)
+        } else {
+            format!(
+                "{} files directly import this file ({} total affected)",
+                direct_count, total_count
+            )
+        };
+
+        Some(FileDependenciesNotification {
+            path: file_path.to_string(),
+            direct_dependents: response.direct_importers.iter().map(|f| f.path.clone()).collect(),
+            all_dependents: response.transitive_importers.iter().map(|f| f.path.clone()).collect(),
+            total_count,
+            summary,
+        })
+    }
+
+    #[allow(dead_code)]
+    async fn get_function_at_position(&self, uri: &Url, position: Position) -> Option<String> {
+        // Get cached functions for this document
+        let functions = match self.function_cache.get(uri) {
+            Some(f) => f.clone(),
+            None => return None,
+        };
+
+        // Find the function whose range contains the position
+        for func in functions.iter() {
+            if position.line >= func.range.start.line
+                && position.line <= func.range.end.line
+                && (position.line > func.range.start.line || position.character >= func.range.start.character)
+                && (position.line < func.range.end.line || position.character <= func.range.end.character)
+            {
+                return Some(func.name.clone());
+            }
+        }
+
+        None
+    }
+
+    #[allow(dead_code)]
+    async fn get_function_impact(&self, file_path: &str, function_name: &str) -> Option<String> {
+        let api_key = self.config.as_ref()?.api_key.clone();
+        let workspace_id = self.workspace_id.read().await.clone()?;
+
+        self.log_debug(&format!("Fetching impact for function: {} in {}", function_name, file_path));
+
+        // Call function impact API
+        let request = FunctionImpactRequest {
+            session_id: None,
+            workspace_id: Some(workspace_id),
+            file_path: file_path.to_string(),
+            function_name: function_name.to_string(),
+            max_depth: 5,
+        };
+
+        let response = match self.api_client.graph_function_impact(&api_key, &request).await {
+            Ok(r) => r,
+            Err(e) => {
+                self.log_debug(&format!("Failed to fetch function impact: {:?}", e));
+                return None;
+            }
+        };
+
+        // Format as markdown
+        let mut markdown = String::new();
+        markdown.push_str(&format!("**Function Impact:** {}\n\n", response.function));
+        markdown.push_str(&format!("Total affected functions: {}\n\n", response.total_affected));
+
+        if !response.direct_callers.is_empty() {
+            markdown.push_str("**Direct Callers:**\n");
+            for caller in &response.direct_callers {
+                let unknown = "unknown".to_string();
+                let path = caller.get("path").unwrap_or(&unknown);
+                let func = caller.get("function").unwrap_or(&unknown);
+                markdown.push_str(&format!("- {} ({})\n", func, path));
+            }
+            markdown.push('\n');
+        }
+
+        Some(markdown)
+    }
+}
+
+/// Convert a byte offset to (line, column) tuple
+/// Returns None if the offset is out of bounds
+fn byte_offset_to_position(line_starts: &[usize], source_lines: &[&str], offset: usize) -> Option<(usize, usize)> {
+    // Find the line containing this offset using binary search
+    let line_idx = match line_starts.binary_search(&offset) {
+        Ok(idx) => idx, // Exact match - start of a line
+        Err(idx) => idx.saturating_sub(1), // In the middle of a line
+    };
+
+    if line_idx >= source_lines.len() {
+        // Handle offset at or past EOF
+        if offset >= *line_starts.last().unwrap_or(&0) {
+            return Some((source_lines.len().saturating_sub(1), source_lines.last().map(|l| l.len()).unwrap_or(0)));
+        }
+        return None;
+    }
+
+    let line_start = line_starts[line_idx];
+    let col = offset.saturating_sub(line_start);
+    
+    // Validate column is within line bounds
+    let line_len = source_lines.get(line_idx).map(|l| l.len()).unwrap_or(0);
+    let col = col.min(line_len);
+    
+    Some((line_idx, col))
 }
 
 /// Check if two ranges overlap
@@ -607,6 +1031,80 @@ fn ranges_overlap(a: &Range, b: &Range) -> bool {
         || (a.end.line == b.start.line && a.end.character < b.start.character)
         || b.end.line < a.start.line
         || (b.end.line == a.start.line && b.end.character < a.start.character))
+}
+
+/// Project marker files that indicate a project root
+const PROJECT_MARKERS: &[&str] = &[
+    // Python
+    "pyproject.toml",
+    "setup.py",
+    "requirements.txt",
+    // JavaScript/TypeScript
+    "package.json",
+    // Rust
+    "Cargo.toml",
+    // Go
+    "go.mod",
+    // Java
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    // Unfault config
+    ".unfault.toml",
+    "unfault.toml",
+];
+
+/// Find the project root for a given file by walking up the directory tree
+/// looking for project marker files.
+///
+/// This handles monorepo scenarios where the IDE workspace might be the monorepo root
+/// but files are in subdirectories with their own project configuration.
+///
+/// # Arguments
+///
+/// * `file_path` - The path to the file being analyzed
+/// * `ide_workspace_root` - The IDE workspace root (used as an upper bound for the search)
+///
+/// # Returns
+///
+/// The project root if found, or None if no project marker was found.
+fn find_project_root(file_path: &Path, ide_workspace_root: Option<&PathBuf>) -> Option<PathBuf> {
+    // Start from the file's parent directory
+    let mut current = file_path.parent()?;
+    
+    // Don't search beyond the IDE workspace root if provided
+    let stop_at = ide_workspace_root.map(|p| p.as_path());
+    
+    loop {
+        // Check if this directory contains any project marker
+        for marker in PROJECT_MARKERS {
+            let marker_path = current.join(marker);
+            if marker_path.exists() {
+                return Some(current.to_path_buf());
+            }
+        }
+        
+        // Also check for .git as a fallback project boundary
+        let git_path = current.join(".git");
+        if git_path.exists() {
+            return Some(current.to_path_buf());
+        }
+        
+        // Stop if we've reached the IDE workspace root
+        if let Some(stop) = stop_at {
+            if current == stop {
+                break;
+            }
+        }
+        
+        // Move up to the parent directory
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    
+    None
 }
 
 /// Parsed hunk header information
@@ -719,6 +1217,7 @@ impl LanguageServer for UnfaultLsp {
                     TextDocumentSyncKind::FULL,
                 )),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -754,6 +1253,12 @@ impl LanguageServer for UnfaultLsp {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         self.log_debug(&format!("Document opened: {}", params.text_document.uri));
 
+        // Cache the document content for code actions
+        let _ = self.document_cache.insert_async(
+            params.text_document.uri.clone(),
+            params.text_document.text.clone(),
+        ).await;
+
         self.analyze_document(
             &params.text_document.uri,
             &params.text_document.text,
@@ -761,15 +1266,40 @@ impl LanguageServer for UnfaultLsp {
         )
         .await;
 
-        // Send file centrality notification
-        if let Ok(path) = params.text_document.uri.to_file_path() {
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if let Some(centrality) = self.get_file_centrality(file_name).await {
-                // Send custom notification
+        // Get workspace root to compute relative file path
+        let workspace_root = {
+            let root = self.workspace_root.read().await;
+            root.clone()
+        };
+
+        // Send file centrality and dependencies notifications
+        if let Ok(abs_path) = params.text_document.uri.to_file_path() {
+            // Compute relative path for API calls
+            let relative_path = workspace_root
+                .as_ref()
+                .and_then(|root| abs_path.strip_prefix(root).ok())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| {
+                    abs_path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string()
+                });
+
+            // Send file centrality notification
+            if let Some(centrality) = self.get_file_centrality(&relative_path).await {
                 let _ = self
                     .client
                     .send_notification::<FileCentralityNotificationType>(centrality)
                     .await;
+            }
+
+            // Send file dependencies notification (what files depend on this file?)
+            if let Some(dependencies) = self.get_file_dependencies(&relative_path).await {
+                // Only send if there are dependents (avoid spam for leaf files)
+                if dependencies.total_count > 0 {
+                    let _ = self
+                        .client
+                        .send_notification::<FileDependenciesNotificationType>(dependencies)
+                        .await;
+                }
             }
         }
     }
@@ -778,7 +1308,14 @@ impl LanguageServer for UnfaultLsp {
         self.log_debug(&format!("Document changed: {}", params.text_document.uri));
 
         // Get the full text from the last change event (since we use FULL sync)
+        // This fires on every edit including Ctrl-Z (undo), keeping the cache current
         if let Some(change) = params.content_changes.last() {
+            // Update the document cache with the new content
+            let _ = self.document_cache.insert_async(
+                params.text_document.uri.clone(),
+                change.text.clone(),
+            ).await;
+
             self.analyze_document(
                 &params.text_document.uri,
                 &change.text,
@@ -803,6 +1340,9 @@ impl LanguageServer for UnfaultLsp {
         // Clear cached findings
         self.findings_cache.remove(&params.text_document.uri);
 
+        // Clear cached document content
+        let _ = self.document_cache.remove_async(&params.text_document.uri).await;
+
         // Clear diagnostics
         self.client
             .publish_diagnostics(params.text_document.uri, vec![], None)
@@ -812,12 +1352,18 @@ impl LanguageServer for UnfaultLsp {
     async fn code_action(&self, params: CodeActionParams) -> RpcResult<Option<CodeActionResponse>> {
         self.log_debug(&format!("Code action requested for: {}", params.text_document.uri));
 
-        // We need the document text to generate edits
-        // Since we don't store it, we'll use the diagnostics range
+        // Retrieve document content from cache for accurate edit position calculations
+        let source_text = self
+            .document_cache
+            .get_async(&params.text_document.uri)
+            .await
+            .map(|entry| entry.get().clone())
+            .unwrap_or_default();
+
         let actions = self.get_code_actions_for_range(
             &params.text_document.uri,
             &params.range,
-            "", // We'll need to handle this properly with document storage
+            &source_text,
         );
 
         if actions.is_empty() {
@@ -834,6 +1380,14 @@ struct FileCentralityNotificationType;
 impl tower_lsp::lsp_types::notification::Notification for FileCentralityNotificationType {
     type Params = FileCentralityNotification;
     const METHOD: &'static str = "unfault/fileCentrality";
+}
+
+/// Custom notification type for file dependencies
+struct FileDependenciesNotificationType;
+
+impl tower_lsp::lsp_types::notification::Notification for FileDependenciesNotificationType {
+    type Params = FileDependenciesNotification;
+    const METHOD: &'static str = "unfault/fileDependencies";
 }
 
 /// Execute the LSP command
@@ -861,4 +1415,260 @@ pub async fn execute(args: LspArgs) -> anyhow::Result<i32> {
     Server::new(stdin, stdout, socket).serve(service).await;
 
     Ok(EXIT_SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_find_project_root_with_pyproject() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path().join("myproject");
+        fs::create_dir_all(&project_dir).unwrap();
+        
+        // Create pyproject.toml in project directory
+        fs::write(project_dir.join("pyproject.toml"), "[project]\nname = \"test\"").unwrap();
+        
+        // Create a nested source file
+        let src_dir = project_dir.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let file_path = src_dir.join("main.py");
+        fs::write(&file_path, "print('hello')").unwrap();
+        
+        // Find project root from the source file
+        let result = find_project_root(&file_path, None);
+        assert_eq!(result, Some(project_dir));
+    }
+
+    #[test]
+    fn test_find_project_root_with_package_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path().join("myproject");
+        fs::create_dir_all(&project_dir).unwrap();
+        
+        // Create package.json in project directory
+        fs::write(project_dir.join("package.json"), r#"{"name": "test"}"#).unwrap();
+        
+        // Create a nested source file
+        let src_dir = project_dir.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let file_path = src_dir.join("index.ts");
+        fs::write(&file_path, "console.log('hello')").unwrap();
+        
+        // Find project root from the source file
+        let result = find_project_root(&file_path, None);
+        assert_eq!(result, Some(project_dir));
+    }
+
+    #[test]
+    fn test_find_project_root_monorepo() {
+        let temp_dir = TempDir::new().unwrap();
+        
+        // Create monorepo structure
+        let monorepo_root = temp_dir.path();
+        fs::write(monorepo_root.join("package.json"), r#"{"name": "monorepo"}"#).unwrap();
+        
+        // Create a sub-project
+        let subproject_dir = monorepo_root.join("packages").join("myapp");
+        fs::create_dir_all(&subproject_dir).unwrap();
+        fs::write(subproject_dir.join("pyproject.toml"), "[project]\nname = \"myapp\"").unwrap();
+        
+        // Create a source file in the sub-project
+        let src_dir = subproject_dir.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let file_path = src_dir.join("main.py");
+        fs::write(&file_path, "print('hello')").unwrap();
+        
+        // Find project root should return the sub-project, not the monorepo root
+        let result = find_project_root(&file_path, Some(&monorepo_root.to_path_buf()));
+        assert_eq!(result, Some(subproject_dir));
+    }
+
+    #[test]
+    fn test_find_project_root_no_marker() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("random.py");
+        fs::write(&file_path, "print('hello')").unwrap();
+        
+        // No project marker exists
+        let result = find_project_root(&file_path, None);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_project_root_with_git() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path().join("myproject");
+        fs::create_dir_all(&project_dir).unwrap();
+        
+        // Create .git directory (fallback marker)
+        fs::create_dir_all(project_dir.join(".git")).unwrap();
+        
+        // Create a source file
+        let file_path = project_dir.join("main.py");
+        fs::write(&file_path, "print('hello')").unwrap();
+        
+        // Find project root from the source file
+        let result = find_project_root(&file_path, None);
+        assert_eq!(result, Some(project_dir));
+    }
+
+    // ==================== byte_offset_to_position tests ====================
+
+    #[test]
+    fn test_byte_offset_to_position_start_of_first_line() {
+        let source = "line1\nline2\nline3";
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(source.char_indices().filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }))
+            .chain(std::iter::once(source.len()))
+            .collect();
+        let source_lines: Vec<&str> = source.lines().collect();
+        
+        // Offset 0 should be line 0, col 0
+        let result = byte_offset_to_position(&line_starts, &source_lines, 0);
+        assert_eq!(result, Some((0, 0)));
+    }
+
+    #[test]
+    fn test_byte_offset_to_position_middle_of_first_line() {
+        let source = "line1\nline2\nline3";
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(source.char_indices().filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }))
+            .chain(std::iter::once(source.len()))
+            .collect();
+        let source_lines: Vec<&str> = source.lines().collect();
+        
+        // Offset 3 should be line 0, col 3
+        let result = byte_offset_to_position(&line_starts, &source_lines, 3);
+        assert_eq!(result, Some((0, 3)));
+    }
+
+    #[test]
+    fn test_byte_offset_to_position_start_of_second_line() {
+        let source = "line1\nline2\nline3";
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(source.char_indices().filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }))
+            .chain(std::iter::once(source.len()))
+            .collect();
+        let source_lines: Vec<&str> = source.lines().collect();
+        
+        // Offset 6 (after first \n) should be line 1, col 0
+        let result = byte_offset_to_position(&line_starts, &source_lines, 6);
+        assert_eq!(result, Some((1, 0)));
+    }
+
+    #[test]
+    fn test_byte_offset_to_position_middle_of_second_line() {
+        let source = "line1\nline2\nline3";
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(source.char_indices().filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }))
+            .chain(std::iter::once(source.len()))
+            .collect();
+        let source_lines: Vec<&str> = source.lines().collect();
+        
+        // Offset 8 should be line 1, col 2
+        let result = byte_offset_to_position(&line_starts, &source_lines, 8);
+        assert_eq!(result, Some((1, 2)));
+    }
+
+    #[test]
+    fn test_byte_offset_to_position_end_of_file() {
+        let source = "line1\nline2\nline3";
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(source.char_indices().filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }))
+            .chain(std::iter::once(source.len()))
+            .collect();
+        let source_lines: Vec<&str> = source.lines().collect();
+        
+        // Offset at EOF should be last line, last column
+        let result = byte_offset_to_position(&line_starts, &source_lines, source.len());
+        assert_eq!(result, Some((2, 5))); // line3 has 5 chars
+    }
+
+    // ==================== FilePatch JSON parsing tests ====================
+
+    #[test]
+    fn test_parse_file_patch_json_insert_after_line() {
+        use unfault_core::types::{FilePatch, PatchHunk, PatchRange};
+        use unfault_core::parse::ast::FileId;
+        
+        let patch = FilePatch {
+            file_id: FileId(1),
+            hunks: vec![
+                PatchHunk {
+                    range: PatchRange::InsertAfterLine { line: 1 },
+                    replacement: "from fastapi.middleware.cors import CORSMiddleware\n".to_string(),
+                },
+                PatchHunk {
+                    range: PatchRange::InsertAfterLine { line: 5 },
+                    replacement: "\napp.add_middleware(CORSMiddleware)\n".to_string(),
+                },
+            ],
+        };
+        
+        let json = serde_json::to_string(&patch).unwrap();
+        let parsed: FilePatch = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(parsed.hunks.len(), 2);
+        match &parsed.hunks[0].range {
+            PatchRange::InsertAfterLine { line } => assert_eq!(*line, 1),
+            _ => panic!("Expected InsertAfterLine"),
+        }
+        match &parsed.hunks[1].range {
+            PatchRange::InsertAfterLine { line } => assert_eq!(*line, 5),
+            _ => panic!("Expected InsertAfterLine"),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_patch_json_insert_before_line() {
+        use unfault_core::types::{FilePatch, PatchHunk, PatchRange};
+        use unfault_core::parse::ast::FileId;
+        
+        let patch = FilePatch {
+            file_id: FileId(1),
+            hunks: vec![PatchHunk {
+                range: PatchRange::InsertBeforeLine { line: 3 },
+                replacement: "# Comment\n".to_string(),
+            }],
+        };
+        
+        let json = serde_json::to_string(&patch).unwrap();
+        let parsed: FilePatch = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(parsed.hunks.len(), 1);
+        match &parsed.hunks[0].range {
+            PatchRange::InsertBeforeLine { line } => assert_eq!(*line, 3),
+            _ => panic!("Expected InsertBeforeLine"),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_patch_json_replace_bytes() {
+        use unfault_core::types::{FilePatch, PatchHunk, PatchRange};
+        use unfault_core::parse::ast::FileId;
+        
+        let patch = FilePatch {
+            file_id: FileId(1),
+            hunks: vec![PatchHunk {
+                range: PatchRange::ReplaceBytes { start: 10, end: 20 },
+                replacement: "new_content".to_string(),
+            }],
+        };
+        
+        let json = serde_json::to_string(&patch).unwrap();
+        let parsed: FilePatch = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(parsed.hunks.len(), 1);
+        match &parsed.hunks[0].range {
+            PatchRange::ReplaceBytes { start, end } => {
+                assert_eq!(*start, 10);
+                assert_eq!(*end, 20);
+            }
+            _ => panic!("Expected ReplaceBytes"),
+        }
+    }
 }

@@ -29,6 +29,7 @@ serde_json = "1"
 async-trait = "0.1"
 tower-lsp = "0.20"
 dashmap = "6"
+scc = "3.4.8"
 sha2 = "0.10"
 rmp-serde = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

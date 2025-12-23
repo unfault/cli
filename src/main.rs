@@ -53,9 +53,12 @@ enum Commands {
         /// Natural language query about project health
         #[arg(value_name = "QUERY")]
         query: String,
-        /// Scope query to a specific workspace ID
+        /// Scope query to a specific workspace ID (auto-detected from current directory if not provided)
         #[arg(long, short = 'w', value_name = "WORKSPACE_ID")]
         workspace: Option<String>,
+        /// Workspace path to auto-detect workspace ID from (defaults to current directory)
+        #[arg(long, short = 'p', value_name = "PATH")]
+        path: Option<String>,
         /// Maximum session contexts to retrieve (1-20)
         #[arg(long, value_name = "COUNT", default_value = "5")]
         max_sessions: i32,
@@ -80,8 +83,22 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Query the code graph for impact analysis, dependencies, and critical files
+    Graph {
+        #[command(subcommand)]
+        command: GraphCommands,
+    },
     /// Authenticate with Unfault using device flow
     Login,
+    /// Start the LSP server for IDE integration
+    Lsp {
+        /// Enable verbose logging to stderr
+        #[arg(long, short = 'v')]
+        verbose: bool,
+        /// Use stdio transport (default, added for compatibility with language clients)
+        #[arg(long, hide = true)]
+        stdio: bool,
+    },
     /// Analyze code and get recommendations
     Review {
         /// Output format (basic: header + summary, concise: brief findings, full: detailed analysis)
@@ -98,9 +115,164 @@ enum Commands {
         /// Default: all dimensions from the profile
         #[arg(long, short = 'd', value_name = "DIMENSION")]
         dimension: Vec<String>,
+        /// Auto-apply all suggested fixes
+        #[arg(long)]
+        fix: bool,
+        /// Show what fixes would be applied without actually applying them
+        #[arg(long)]
+        dry_run: bool,
+        /// Use legacy server-side parsing (sends source code to server)
+        #[arg(long)]
+        server_parse: bool,
     },
     /// Check authentication and service configuration status
     Status,
+}
+
+/// Graph subcommands
+#[derive(Subcommand)]
+enum GraphCommands {
+    /// Analyze impact: "What breaks if I change this file?"
+    Impact {
+        /// File path to analyze
+        #[arg(value_name = "FILE")]
+        file_path: String,
+        /// Analysis session ID (advanced: overrides workspace auto-detection)
+        #[arg(long, short = 's', value_name = "SESSION_ID")]
+        session: Option<String>,
+        /// Workspace path to analyze (defaults to current directory)
+        #[arg(long, short = 'w', value_name = "PATH")]
+        workspace: Option<String>,
+        /// Maximum depth for transitive analysis (1-10)
+        #[arg(long, value_name = "DEPTH", default_value = "5")]
+        max_depth: i32,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Enable verbose output
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
+    /// Analyze function impact: "What breaks if I change this function?"
+    FunctionImpact {
+        /// Function in format file:function
+        #[arg(value_name = "FUNCTION")]
+        function: String,
+        /// Analysis session ID (advanced: overrides workspace auto-detection)
+        #[arg(long, short = 's', value_name = "SESSION_ID")]
+        session: Option<String>,
+        /// Workspace path to analyze (defaults to current directory)
+        #[arg(long, short = 'w', value_name = "PATH")]
+        workspace: Option<String>,
+        /// Maximum depth for transitive analysis (1-10)
+        #[arg(long, value_name = "DEPTH", default_value = "5")]
+        max_depth: i32,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Enable verbose output
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
+    /// Find files that use a specific library
+    Library {
+        /// Library name to search for (e.g., "requests", "fastapi")
+        #[arg(value_name = "LIBRARY")]
+        library_name: String,
+        /// Analysis session ID (advanced: overrides workspace auto-detection)
+        #[arg(long, short = 's', value_name = "SESSION_ID")]
+        session: Option<String>,
+        /// Workspace path to analyze (defaults to current directory)
+        #[arg(long, short = 'w', value_name = "PATH")]
+        workspace: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Enable verbose output
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
+    /// Find external dependencies of a file
+    Deps {
+        /// File path to analyze
+        #[arg(value_name = "FILE")]
+        file_path: String,
+        /// Analysis session ID (advanced: overrides workspace auto-detection)
+        #[arg(long, short = 's', value_name = "SESSION_ID")]
+        session: Option<String>,
+        /// Workspace path to analyze (defaults to current directory)
+        #[arg(long, short = 'w', value_name = "PATH")]
+        workspace: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Enable verbose output
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
+    /// Find the most critical/hub files in the codebase
+    Critical {
+        /// Analysis session ID (advanced: overrides workspace auto-detection)
+        #[arg(long, short = 's', value_name = "SESSION_ID")]
+        session: Option<String>,
+        /// Workspace path to analyze (defaults to current directory)
+        #[arg(long, short = 'w', value_name = "PATH")]
+        workspace: Option<String>,
+        /// Maximum number of files to return (1-50)
+        #[arg(long, short = 'n', value_name = "COUNT", default_value = "10")]
+        limit: i32,
+        /// Metric to sort by
+        #[arg(long, value_name = "METRIC", default_value = "in_degree")]
+        sort_by: SortMetric,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Enable verbose output
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
+    /// Get code graph statistics
+    Stats {
+        /// Analysis session ID (advanced: overrides workspace auto-detection)
+        #[arg(long, short = 's', value_name = "SESSION_ID")]
+        session: Option<String>,
+        /// Workspace path to analyze (defaults to current directory)
+        #[arg(long, short = 'w', value_name = "PATH")]
+        workspace: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Enable verbose output
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
+}
+
+/// Centrality sort metric options
+#[derive(Clone, Debug, ValueEnum)]
+pub enum SortMetric {
+    /// Sort by number of files that import this file (most critical dependencies)
+    InDegree,
+    /// Sort by number of files this file imports
+    OutDegree,
+    /// Sort by total connectivity (in + out)
+    TotalDegree,
+    /// Sort by number of external libraries used
+    LibraryUsage,
+    /// Sort by weighted importance score
+    ImportanceScore,
+}
+
+impl SortMetric {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SortMetric::InDegree => "in_degree",
+            SortMetric::OutDegree => "out_degree",
+            SortMetric::TotalDegree => "total_degree",
+            SortMetric::LibraryUsage => "library_usage",
+            SortMetric::ImportanceScore => "importance_score",
+        }
+    }
 }
 
 /// Config subcommands
@@ -185,6 +357,7 @@ async fn run_command(command: Commands) -> i32 {
         Commands::Ask {
             query,
             workspace,
+            path,
             max_sessions,
             max_findings,
             threshold,
@@ -195,6 +368,7 @@ async fn run_command(command: Commands) -> i32 {
             let args = commands::ask::AskArgs {
                 query,
                 workspace_id: workspace,
+                workspace_path: path,
                 max_sessions: Some(max_sessions),
                 max_findings: Some(max_findings),
                 similarity_threshold: Some(threshold),
@@ -211,6 +385,7 @@ async fn run_command(command: Commands) -> i32 {
             }
         }
         Commands::Config { command } => run_config_command(command),
+        Commands::Graph { command } => run_graph_command(command).await,
         Commands::Login => match commands::login::execute().await {
             Ok(exit_code) => exit_code,
             Err(e) => {
@@ -218,11 +393,25 @@ async fn run_command(command: Commands) -> i32 {
                 EXIT_CONFIG_ERROR
             }
         },
+        Commands::Lsp { verbose, stdio: _ } => {
+            // stdio flag is just for compatibility with language clients, we always use stdio
+            let args = commands::lsp::LspArgs { verbose };
+            match commands::lsp::execute(args).await {
+                Ok(exit_code) => exit_code,
+                Err(e) => {
+                    eprintln!("LSP error: {}", e);
+                    EXIT_ERROR
+                }
+            }
+        }
         Commands::Review {
             output,
             verbose,
             profile,
             dimension,
+            fix,
+            dry_run,
+            server_parse,
         } => {
             // Convert OutputFormat to string for backward compatibility
             let output_format = match output {
@@ -252,6 +441,9 @@ async fn run_command(command: Commands) -> i32 {
                 } else {
                     Some(dimension)
                 },
+                fix,
+                dry_run,
+                server_parse,
             };
             match commands::review::execute(args).await {
                 Ok(exit_code) => exit_code,
@@ -321,6 +513,149 @@ fn run_llm_command(command: LlmCommands) -> i32 {
         Err(e) => {
             eprintln!("Config LLM error: {}", e);
             EXIT_CONFIG_ERROR
+        }
+    }
+}
+
+async fn run_graph_command(command: GraphCommands) -> i32 {
+    use unfault::exit_codes::*;
+
+    match command {
+        GraphCommands::Impact {
+            file_path,
+            session,
+            workspace,
+            max_depth,
+            json,
+            verbose,
+        } => {
+            let args = commands::graph::ImpactArgs {
+                session_id: session,
+                workspace_path: workspace,
+                file_path,
+                max_depth,
+                json,
+                verbose,
+            };
+            match commands::graph::execute_impact(args).await {
+                Ok(exit_code) => exit_code,
+                Err(e) => {
+                    eprintln!("Graph impact error: {}", e);
+                    EXIT_ERROR
+                }
+            }
+        }
+        GraphCommands::FunctionImpact {
+            function,
+            session,
+            workspace,
+            max_depth,
+            json,
+            verbose,
+        } => {
+            let args = commands::graph::FunctionImpactArgs {
+                session_id: session,
+                workspace_path: workspace,
+                function,
+                max_depth,
+                json,
+                verbose,
+            };
+            match commands::graph::execute_function_impact(args).await {
+                Ok(exit_code) => exit_code,
+                Err(e) => {
+                    eprintln!("Graph function impact error: {}", e);
+                    EXIT_ERROR
+                }
+            }
+        }
+        GraphCommands::Library {
+            library_name,
+            session,
+            workspace,
+            json,
+            verbose,
+        } => {
+            let args = commands::graph::LibraryArgs {
+                session_id: session,
+                workspace_path: workspace,
+                library_name,
+                json,
+                verbose,
+            };
+            match commands::graph::execute_library(args).await {
+                Ok(exit_code) => exit_code,
+                Err(e) => {
+                    eprintln!("Graph library error: {}", e);
+                    EXIT_ERROR
+                }
+            }
+        }
+        GraphCommands::Deps {
+            file_path,
+            session,
+            workspace,
+            json,
+            verbose,
+        } => {
+            let args = commands::graph::DepsArgs {
+                session_id: session,
+                workspace_path: workspace,
+                file_path,
+                json,
+                verbose,
+            };
+            match commands::graph::execute_deps(args).await {
+                Ok(exit_code) => exit_code,
+                Err(e) => {
+                    eprintln!("Graph deps error: {}", e);
+                    EXIT_ERROR
+                }
+            }
+        }
+        GraphCommands::Critical {
+            session,
+            workspace,
+            limit,
+            sort_by,
+            json,
+            verbose,
+        } => {
+            let args = commands::graph::CriticalArgs {
+                session_id: session,
+                workspace_path: workspace,
+                limit,
+                sort_by: sort_by.as_str().to_string(),
+                json,
+                verbose,
+            };
+            match commands::graph::execute_critical(args).await {
+                Ok(exit_code) => exit_code,
+                Err(e) => {
+                    eprintln!("Graph critical error: {}", e);
+                    EXIT_ERROR
+                }
+            }
+        }
+        GraphCommands::Stats {
+            session,
+            workspace,
+            json,
+            verbose,
+        } => {
+            let args = commands::graph::StatsArgs {
+                session_id: session,
+                workspace_path: workspace,
+                json,
+                verbose,
+            };
+            match commands::graph::execute_stats(args).await {
+                Ok(exit_code) => exit_code,
+                Err(e) => {
+                    eprintln!("Graph stats error: {}", e);
+                    EXIT_ERROR
+                }
+            }
         }
     }
 }

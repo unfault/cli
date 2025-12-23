@@ -3,19 +3,23 @@
 //!
 //! Implements the code review/analysis command for the Unfault CLI.
 //!
-//! ## Workflow
+//! ## Architecture
 //!
-//! 1. Load configuration and verify authentication
-//! 2. Scan the current directory for source files using [`WorkspaceScanner`]
-//! 3. Detect project type and frameworks
-//! 4. Create an analysis session with the API
-//! 5. Collect files based on file hints using [`FileCollector`]
-//! 6. Run analysis using [`SessionRunner`] and display results
+//! By default, the review command uses **client-side parsing**:
+//! 1. Parse source files locally using tree-sitter (via unfault-core)
+//! 2. Build an Intermediate Representation (IR) containing semantics and code graph
+//! 3. Send serialized IR to the API (no source code over the wire)
+//! 4. Receive findings and optionally apply patches locally
+//!
+//! Use `--server-parse` flag to fall back to legacy server-side parsing.
 //!
 //! ## Usage
 //!
 //! ```bash
-//! unfault review
+//! unfault review               # Client-side parsing (default)
+//! unfault review --fix         # Auto-apply all fixes
+//! unfault review --dry-run     # Show what fixes would be applied
+//! unfault review --server-parse # Legacy: send source to server
 //! unfault review --output full
 //! unfault review --output json
 //! unfault review --output sarif
@@ -28,6 +32,7 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::api::graph::IrFinding;
 use crate::api::{ApiClient, ApiError, SessionContextInput, SubscriptionWarning};
 use crate::config::Config;
 use crate::errors::{
@@ -35,7 +40,10 @@ use crate::errors::{
     display_validation_error,
 };
 use crate::exit_codes::*;
-use crate::session::{FileCollector, ScanProgress, SessionRunner, WorkspaceScanner};
+use crate::session::{
+    build_ir_cached, compute_workspace_id, get_git_remote, FileCollector, PatchApplier, ScanProgress,
+    SessionRunner, WorkspaceScanner,
+};
 
 /// Display a subscription warning banner (non-blocking nudge).
 ///
@@ -126,6 +134,12 @@ pub struct ReviewArgs {
     pub profile: Option<String>,
     /// Dimensions to analyze (None = all from profile)
     pub dimensions: Option<Vec<String>>,
+    /// Auto-apply all suggested fixes
+    pub fix: bool,
+    /// Show what fixes would be applied without actually applying them
+    pub dry_run: bool,
+    /// Use legacy server-side parsing (sends source code to server)
+    pub server_parse: bool,
 }
 
 /// Execute the review command
@@ -238,10 +252,16 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
         .to_string();
 
     // Print header immediately
+    let mode_indicator = if args.server_parse {
+        " (server-parse)"
+    } else {
+        ""
+    };
     eprintln!(
-        "{} Analyzing {}...",
+        "{} Analyzing {}{}...",
         "→".cyan().bold(),
-        workspace_label.bright_blue()
+        workspace_label.bright_blue(),
+        mode_indicator.dimmed()
     );
 
     // Determine dimensions to analyze (needed for display)
@@ -291,6 +311,486 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
         return Ok(EXIT_SUCCESS);
     }
 
+    // Branch: Server-side parsing (legacy) vs Client-side parsing (default)
+    if args.server_parse {
+        // Legacy mode: send source code to server
+        execute_server_parse(
+            &args,
+            &config,
+            &api_client,
+            &trace_id,
+            &current_dir,
+            &workspace_label,
+            &dimensions,
+            &workspace_info,
+            session_start,
+        )
+        .await
+    } else {
+        // New default: client-side parsing
+        execute_client_parse(
+            &args,
+            &config,
+            &api_client,
+            &trace_id,
+            &current_dir,
+            &workspace_label,
+            &dimensions,
+            &workspace_info,
+            session_start,
+        )
+        .await
+    }
+}
+
+/// Execute review with client-side parsing (default mode).
+///
+/// 1. Parse source files locally using tree-sitter
+/// 2. Build IR (semantics + graph)
+/// 3. Serialize and send IR to API
+/// 4. Receive findings and optionally apply patches
+async fn execute_client_parse(
+    args: &ReviewArgs,
+    config: &Config,
+    api_client: &ApiClient,
+    trace_id: &str,
+    current_dir: &std::path::Path,
+    workspace_label: &str,
+    _dimensions: &[String],
+    workspace_info: &crate::session::WorkspaceInfo,
+    session_start: Instant,
+) -> Result<i32> {
+    // Create progress bar for operations
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    pb.enable_steady_tick(Duration::from_millis(100));
+
+    // Step 1: Build IR locally (with caching)
+    pb.set_message("Parsing source files locally...");
+
+    let parse_start = Instant::now();
+    let build_result = match build_ir_cached(current_dir, None, args.verbose) {
+        Ok(result) => result,
+        Err(e) => {
+            pb.finish_and_clear();
+            eprintln!(
+                "{} Failed to parse source files: {}",
+                "✗".red().bold(),
+                e
+            );
+            return Ok(EXIT_CONFIG_ERROR);
+        }
+    };
+    let parse_ms = parse_start.elapsed().as_millis() as u64;
+
+    let ir = build_result.ir;
+    let cache_stats = build_result.cache_stats;
+    let file_count = ir.file_count();
+    
+    if args.verbose {
+        let stats = ir.graph.stats();
+        eprintln!(
+            "\n{} Built IR: {} files, {} functions, {} imports ({}ms)",
+            "DEBUG".yellow(),
+            stats.file_count,
+            stats.function_count,
+            stats.import_edge_count,
+            parse_ms
+        );
+        eprintln!(
+            "{} Cache: {} hits, {} misses ({:.1}% hit rate)",
+            "DEBUG".yellow(),
+            cache_stats.hits,
+            cache_stats.misses,
+            cache_stats.hit_rate()
+        );
+    }
+
+    // Step 2: Serialize IR to JSON
+    pb.set_message("Serializing code graph...");
+
+    let serialize_start = Instant::now();
+    let ir_json = match serde_json::to_string(&ir) {
+        Ok(json) => json,
+        Err(e) => {
+            pb.finish_and_clear();
+            eprintln!(
+                "{} Failed to serialize IR: {}",
+                "✗".red().bold(),
+                e
+            );
+            return Ok(EXIT_CONFIG_ERROR);
+        }
+    };
+    let serialize_ms = serialize_start.elapsed().as_millis() as u64;
+
+    if args.verbose {
+        eprintln!(
+            "\n{} IR JSON size: {} bytes ({}ms)",
+            "DEBUG".yellow(),
+            ir_json.len(),
+            serialize_ms
+        );
+    }
+
+    // Step 3: Compute workspace ID
+    let git_remote = get_git_remote(current_dir);
+    let workspace_id_result = compute_workspace_id(
+        git_remote.as_deref(),
+        None, // No meta files in client-side parsing (could be added later)
+        Some(workspace_label),
+    );
+    let workspace_id = workspace_id_result
+        .as_ref()
+        .map(|r| r.id.clone())
+        .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
+
+    if args.verbose {
+        if let Some(ref result) = workspace_id_result {
+            eprintln!(
+                "\n{} Workspace ID: {} (source: {:?})",
+                "DEBUG".yellow(),
+                result.id,
+                result.source
+            );
+        }
+    }
+
+    // Step 4: Send IR to API
+    pb.set_message("Analyzing code graph...");
+
+    // Build profiles from detected frameworks (e.g., "python_fastapi_backend", "go_gin_service")
+    // The API resolves these profile IDs to specific rules
+    let profiles: Vec<String> = workspace_info
+        .to_workspace_descriptor()
+        .profiles
+        .iter()
+        .map(|p| p.id.clone())
+        .collect();
+
+    if args.verbose {
+        eprintln!(
+            "\n{} Detected profiles: {:?}",
+            "DEBUG".yellow(),
+            profiles
+        );
+    }
+
+    let api_start = Instant::now();
+    let response = match api_client
+        .analyze_ir(
+            &config.api_key,
+            &workspace_id,
+            Some(&workspace_label),
+            &profiles,
+            ir_json,
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            pb.finish_and_clear();
+            return Ok(handle_api_error(e));
+        }
+    };
+    let api_ms = api_start.elapsed().as_millis() as u64;
+
+    pb.finish_and_clear();
+
+    // Calculate elapsed time
+    let elapsed = session_start.elapsed();
+    let elapsed_ms = elapsed.as_millis() as u64;
+    let engine_ms = response.elapsed_ms as u64;
+
+    // Display review time with breakdown (include cache hit rate if meaningful)
+    let cache_hit_rate = cache_stats.hit_rate();
+    if cache_stats.hits > 0 || cache_stats.misses > 0 {
+        eprintln!(
+            "  Reviewed {} files in {}ms (parse: {}ms, api: {}ms, engine: {}ms, cache: {:.0}%) (trace: {})",
+            file_count.to_string().bright_green(),
+            elapsed_ms.to_string().bright_cyan(),
+            parse_ms.to_string().dimmed(),
+            api_ms.to_string().dimmed(),
+            engine_ms.to_string().dimmed(),
+            cache_hit_rate,
+            &trace_id[..8].dimmed()
+        );
+    } else {
+        eprintln!(
+            "  Reviewed {} files in {}ms (parse: {}ms, api: {}ms, engine: {}ms) (trace: {})",
+            file_count.to_string().bright_green(),
+            elapsed_ms.to_string().bright_cyan(),
+            parse_ms.to_string().dimmed(),
+            api_ms.to_string().dimmed(),
+            engine_ms.to_string().dimmed(),
+            &trace_id[..8].dimmed()
+        );
+    }
+
+    let finding_count = response.findings.len();
+    
+    if args.verbose {
+        eprintln!(
+            "\n{} Analysis response: {} findings from {} files",
+            "DEBUG".yellow(),
+            finding_count,
+            response.file_count
+        );
+    }
+
+    // Handle fix/dry-run mode
+    let applied_patches = if args.fix || args.dry_run {
+        apply_ir_patches(args, current_dir, &response.findings)?
+    } else {
+        0
+    };
+
+    // Display results
+    display_ir_findings(args, &response.findings, applied_patches);
+
+    if finding_count > 0 {
+        Ok(EXIT_FINDINGS_FOUND)
+    } else {
+        Ok(EXIT_SUCCESS)
+    }
+}
+
+/// Apply patches from IR findings to local files.
+fn apply_ir_patches(
+    args: &ReviewArgs,
+    workspace_path: &std::path::Path,
+    findings: &[IrFinding],
+) -> Result<usize> {
+    let applier = PatchApplier::new(workspace_path);
+    let stats = applier.apply_findings(findings, args.dry_run)?;
+
+    if args.dry_run {
+        if stats.applied > 0 {
+            eprintln!();
+            eprintln!(
+                "{} Would apply {} patch{} to {} file{}",
+                "→".cyan().bold(),
+                stats.applied.to_string().bright_green(),
+                if stats.applied == 1 { "" } else { "es" },
+                stats.modified_files.len().to_string().bright_green(),
+                if stats.modified_files.len() == 1 { "" } else { "s" }
+            );
+        }
+    } else if stats.applied > 0 {
+        eprintln!();
+        eprintln!(
+            "{} Applied {} patch{} to {} file{}",
+            "✓".green().bold(),
+            stats.applied.to_string().bright_green(),
+            if stats.applied == 1 { "" } else { "es" },
+            stats.modified_files.len().to_string().bright_green(),
+            if stats.modified_files.len() == 1 { "" } else { "s" }
+        );
+        for file in &stats.modified_files {
+            eprintln!("  {} {}", "→".dimmed(), file);
+        }
+    }
+
+    if !stats.errors.is_empty() {
+        eprintln!();
+        eprintln!("{} Some patches failed:", "⚠".yellow().bold());
+        for error in &stats.errors {
+            eprintln!("  {} {}", "→".red(), error);
+        }
+    }
+
+    Ok(stats.applied)
+}
+
+/// Display findings from IR analysis.
+fn display_ir_findings(args: &ReviewArgs, findings: &[IrFinding], applied_patches: usize) {
+    let total_findings = findings.len();
+
+    if args.output_format == "json" {
+        let output = serde_json::json!({
+            "findings_count": total_findings,
+            "findings": findings,
+            "patches_applied": applied_patches,
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        return;
+    }
+
+    // Text output
+    println!();
+
+    if total_findings == 0 {
+        println!(
+            "{} No issues found! Your code looks good.",
+            "✓".bright_green().bold()
+        );
+        return;
+    }
+
+    println!(
+        "{} Found {} issue{}",
+        "⚠".yellow().bold(),
+        total_findings.to_string().bright_yellow(),
+        if total_findings == 1 { "" } else { "s" }
+    );
+    println!();
+
+    if args.output_mode == "full" {
+        for finding in findings {
+            display_ir_finding(finding);
+        }
+    } else {
+        // Basic mode: grouped display
+        display_ir_findings_grouped(findings);
+    }
+}
+
+/// Display a single IR finding (full mode).
+fn display_ir_finding(finding: &IrFinding) {
+    let severity_color = match finding.severity.as_str() {
+        "critical" | "Critical" => "red",
+        "high" | "High" => "red",
+        "medium" | "Medium" => "yellow",
+        "low" | "Low" => "blue",
+        _ => "white",
+    };
+
+    let severity_icon = match finding.severity.to_lowercase().as_str() {
+        "critical" => "🔴",
+        "high" => "🟠",
+        "medium" => "🟡",
+        "low" => "🔵",
+        _ => "⚪",
+    };
+
+    println!(
+        "{} {} [{}]",
+        severity_icon,
+        finding.rule_id.bold(),
+        finding.severity.color(severity_color)
+    );
+
+    println!("   {}", finding.message.dimmed());
+    println!(
+        "   File: {}:{}:{}",
+        finding.file_path.cyan(),
+        finding.line,
+        finding.column
+    );
+
+    if let Some(patch) = &finding.patch {
+        println!();
+        println!("   {}", "Suggested fix:".green().bold());
+        for line in patch.lines() {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                println!("   {}", line.green());
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                println!("   {}", line.red());
+            } else {
+                println!("   {}", line.dimmed());
+            }
+        }
+    }
+    println!();
+}
+
+/// Display IR findings grouped by severity and rule_id (basic mode).
+fn display_ir_findings_grouped(findings: &[IrFinding]) {
+    use std::collections::BTreeMap;
+
+    let severity_order = |s: &str| -> u8 {
+        match s.to_lowercase().as_str() {
+            "critical" => 0,
+            "high" => 1,
+            "medium" => 2,
+            "low" => 3,
+            _ => 4,
+        }
+    };
+
+    let mut grouped: BTreeMap<u8, BTreeMap<String, Vec<&IrFinding>>> = BTreeMap::new();
+
+    for finding in findings {
+        let sev_key = severity_order(&finding.severity);
+        grouped
+            .entry(sev_key)
+            .or_default()
+            .entry(finding.rule_id.clone())
+            .or_default()
+            .push(finding);
+    }
+
+    let mut first_severity = true;
+    for (sev_key, rules_by_id) in &grouped {
+        if !first_severity {
+            println!();
+        }
+        first_severity = false;
+
+        let severity_name = match sev_key {
+            0 => "Critical",
+            1 => "High",
+            2 => "Medium",
+            3 => "Low",
+            _ => "Other",
+        };
+
+        let severity_icon = match sev_key {
+            0 => "🔴",
+            1 => "🟠",
+            2 => "🟡",
+            3 => "🔵",
+            _ => "⚪",
+        };
+
+        let severity_color = match sev_key {
+            0 | 1 => "red",
+            2 => "yellow",
+            3 => "blue",
+            _ => "white",
+        };
+
+        let severity_count: usize = rules_by_id.values().map(|v| v.len()).sum();
+        println!(
+            "{} {} ({} issue{})",
+            severity_icon,
+            severity_name.color(severity_color).bold(),
+            severity_count,
+            if severity_count == 1 { "" } else { "s" }
+        );
+
+        for (rule_id, rule_findings) in rules_by_id {
+            let count = rule_findings.len();
+            let title = &rule_findings[0].title;
+
+            println!(
+                "   [{}] {} ({}x)",
+                rule_id.dimmed(),
+                title,
+                count.to_string().color("yellow")
+            );
+        }
+    }
+}
+
+/// Execute review with server-side parsing (legacy mode).
+///
+/// This is the original implementation that sends source code to the server.
+async fn execute_server_parse(
+    args: &ReviewArgs,
+    config: &Config,
+    api_client: &ApiClient,
+    trace_id: &str,
+    current_dir: &std::path::Path,
+    workspace_label: &str,
+    dimensions: &[String],
+    workspace_info: &crate::session::WorkspaceInfo,
+    session_start: Instant,
+) -> Result<i32> {
     // Create progress bar for API operations
     let pb = ProgressBar::new_spinner();
     pb.set_style(
@@ -303,8 +803,8 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     // Step 2: Create session
     pb.set_message("Creating analysis session...");
 
-    let runner = SessionRunner::new(&api_client, &config.api_key);
-    let session_response = match runner.create_session(&workspace_info, None).await {
+    let runner = SessionRunner::new(api_client, &config.api_key);
+    let session_response = match runner.create_session(workspace_info, None).await {
         Ok(response) => response,
         Err(e) => {
             pb.finish_and_clear();
@@ -329,7 +829,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     // Step 3: Collect files based on file hints
     pb.set_message("Collecting files for analysis...");
 
-    let collector = FileCollector::new(&current_dir);
+    let collector = FileCollector::new(current_dir);
     let collected_files = collector
         .collect(&session_response.file_hints, &workspace_info.source_files)
         .context("Failed to collect files")?;
@@ -344,10 +844,8 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     }
 
     // Step 4: Run analysis
-    // Build contexts for each dimension the user requested
     pb.set_message("Running analysis...");
 
-    // Build contexts for each dimension
     let contexts: Vec<SessionContextInput> = dimensions
         .iter()
         .map(|dim| SessionContextInput {
@@ -359,7 +857,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
         .collect();
 
     let run_response = match runner
-        .run_analysis_with_contexts(&session_response.session_id, &workspace_info, contexts)
+        .run_analysis_with_contexts(&session_response.session_id, workspace_info, contexts)
         .await
     {
         Ok(response) => response,
@@ -369,16 +867,12 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
         }
     };
 
-    // Note: Embeddings are generated lazily when the user runs `unfault ask`
-    // This saves ~100-500ms per review for users who don't use the ask feature
-
     pb.finish_and_clear();
 
     // Calculate elapsed time
     let elapsed = session_start.elapsed();
     let elapsed_ms = elapsed.as_millis() as u64;
 
-    // Display review time (file count already shown during scanning)
     eprintln!(
         "  Reviewed in {}ms (trace: {})",
         elapsed_ms.to_string().bright_cyan(),
@@ -396,14 +890,10 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     // Display results
     let total_findings: usize = run_response.contexts.iter().map(|c| c.findings.len()).sum();
 
-    let _matched_files = workspace_info.source_files.len();
-
     if args.output_format == "sarif" {
-        // SARIF output for GitHub Code Scanning / IDE integration
-        let sarif = generate_sarif_output(&run_response, &workspace_label);
+        let sarif = generate_sarif_output(&run_response, workspace_label);
         println!("{}", serde_json::to_string_pretty(&sarif).unwrap());
     } else if args.output_format == "json" {
-        // JSON output - include subscription and limited info
         let output = serde_json::json!({
             "session_id": run_response.session_id,
             "status": run_response.status,
@@ -416,13 +906,10 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
         });
         println!("{}", serde_json::to_string_pretty(&output).unwrap());
     } else {
-        // Text output (basic or full)
         println!();
 
-        // Display appropriate message based on findings count
         if total_findings == 0 {
             if run_response.is_limited {
-                // No findings shown, but there might be more with subscription
                 if let Some(total) = run_response.total_findings_count {
                     if total > 0 {
                         println!(
@@ -450,7 +937,6 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
                 );
             }
         } else {
-            // Show findings count with limited mode indicator if applicable
             if run_response.is_limited {
                 if let Some(total) = run_response.total_findings_count {
                     println!(
@@ -479,7 +965,6 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
             }
             println!();
 
-            // Collect all findings
             let all_findings: Vec<&crate::api::Finding> = run_response
                 .contexts
                 .iter()
@@ -491,11 +976,9 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
                     display_finding(finding);
                 }
             } else {
-                // Basic mode: grouped display
                 display_findings_grouped(&all_findings);
             }
 
-            // Show limited results notice if applicable
             if run_response.is_limited {
                 if let Some(total) = run_response.total_findings_count {
                     display_limited_results_notice(total_findings, total);
@@ -503,12 +986,24 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
             }
         }
 
-        // Display subscription warning from run response if present and not already shown
-        // (session response warning takes precedence, but run response may have updated message)
         if let Some(warning) = &run_response.subscription_warning {
             if session_response.subscription_warning.is_none() || run_response.is_limited {
                 display_subscription_warning(warning);
             }
+        }
+
+        if let Some(graph_warning) = &run_response.graph_warning {
+            eprintln!();
+            eprintln!(
+                "{} {} {}",
+                "⚠".yellow(),
+                "Graph Error:".yellow().bold(),
+                graph_warning.dimmed()
+            );
+            eprintln!(
+                "  {} RAG queries (unfault ask) will not work for this session.",
+                "→".dimmed()
+            );
         }
     }
 
@@ -997,6 +1492,7 @@ mod tests {
             subscription_warning: None,
             is_limited: false,
             total_findings_count: None,
+            graph_warning: None,
         };
 
         let sarif = generate_sarif_output(&run_response, "test-workspace");

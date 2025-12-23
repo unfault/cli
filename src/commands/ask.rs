@@ -362,15 +362,38 @@ fn format_flow_node(node: &RAGFlowPathNode, indent: usize) -> String {
     }
 }
 
-/// Merge paths that share the same root node into a tree structure
-/// Returns a list of (root_node, children) tuples where children are unique leaf nodes
-fn merge_paths_by_root(
-    paths: &[Vec<RAGFlowPathNode>],
-) -> Vec<(RAGFlowPathNode, Vec<RAGFlowPathNode>)> {
+/// A tree node for displaying call hierarchies
+#[derive(Debug, Clone)]
+struct TreeNode {
+    node: RAGFlowPathNode,
+    children: Vec<TreeNode>,
+}
+
+impl TreeNode {
+    fn new(node: RAGFlowPathNode) -> Self {
+        Self {
+            node,
+            children: Vec::new(),
+        }
+    }
+
+    /// Recursively render the tree with proper indentation
+    fn render(&self, indent: usize) -> Vec<String> {
+        let mut lines = vec![format_flow_node(&self.node, indent)];
+        for child in &self.children {
+            lines.extend(child.render(indent + 1));
+        }
+        lines
+    }
+}
+
+/// Build a tree structure from flat paths, respecting the depth field
+/// Returns a list of root TreeNodes
+fn build_trees_from_paths(paths: &[Vec<RAGFlowPathNode>]) -> Vec<TreeNode> {
     use std::collections::HashMap;
 
     // Group paths by root node_id
-    let mut grouped: HashMap<String, (RAGFlowPathNode, Vec<RAGFlowPathNode>)> = HashMap::new();
+    let mut root_trees: HashMap<String, TreeNode> = HashMap::new();
 
     for path in paths {
         if path.is_empty() {
@@ -380,22 +403,46 @@ fn merge_paths_by_root(
         let root = &path[0];
         let root_id = root.node_id.clone();
 
-        // Get children (all nodes after the root)
-        let children: Vec<RAGFlowPathNode> = path.iter().skip(1).cloned().collect();
+        // Get or create the root tree node
+        let tree = root_trees
+            .entry(root_id.clone())
+            .or_insert_with(|| TreeNode::new(root.clone()));
 
-        if let Some((_, existing_children)) = grouped.get_mut(&root_id) {
-            // Add children that aren't already in the list (by node_id)
-            for child in children {
-                if !existing_children.iter().any(|c| c.node_id == child.node_id) {
-                    existing_children.push(child);
-                }
-            }
-        } else {
-            grouped.insert(root_id, (root.clone(), children));
+        // Add path nodes as children, respecting depth
+        // path[1] is depth 1 (child of root), path[2] is depth 2 (child of path[1]), etc.
+        if path.len() > 1 {
+            insert_path_into_tree(tree, &path[1..]);
         }
     }
 
-    grouped.into_values().collect()
+    root_trees.into_values().collect()
+}
+
+/// Insert a path segment into a tree, creating intermediate nodes as needed
+fn insert_path_into_tree(parent: &mut TreeNode, remaining_path: &[RAGFlowPathNode]) {
+    if remaining_path.is_empty() {
+        return;
+    }
+
+    let current = &remaining_path[0];
+    
+    // Find or create child node
+    let child_idx = parent
+        .children
+        .iter()
+        .position(|c| c.node.node_id == current.node_id);
+
+    let child = if let Some(idx) = child_idx {
+        &mut parent.children[idx]
+    } else {
+        parent.children.push(TreeNode::new(current.clone()));
+        parent.children.last_mut().unwrap()
+    };
+
+    // Recurse for remaining path
+    if remaining_path.len() > 1 {
+        insert_path_into_tree(child, &remaining_path[1..]);
+    }
 }
 
 /// Render flow context showing call paths
@@ -453,25 +500,35 @@ fn render_flow_context(flow_context: &RAGFlowContext, verbose: bool) {
     println!("{} flow identified:", topic.bright_white().bold());
     println!();
 
-    // Merge paths by root node to create a tree view
-    let merged_trees = merge_paths_by_root(&flow_context.paths);
+    // Build tree structure from paths
+    let trees = build_trees_from_paths(&flow_context.paths);
 
     // Track unique nodes and edges for stats
     let mut total_nodes = 0;
     let mut total_edges = 0;
 
-    // Render each merged tree
-    for (i, (root, children)) in merged_trees.iter().enumerate() {
-        println!("{}. {}", i + 1, format_flow_node(root, 0));
-        total_nodes += 1;
+    // Count nodes recursively
+    fn count_tree(tree: &TreeNode, nodes: &mut usize, edges: &mut usize) {
+        *nodes += 1;
+        for child in &tree.children {
+            *edges += 1;
+            count_tree(child, nodes, edges);
+        }
+    }
 
-        for child in children {
-            println!("{}", format_flow_node(child, 1));
-            total_nodes += 1;
-            total_edges += 1;
+    // Render each tree
+    for (i, tree) in trees.iter().enumerate() {
+        count_tree(tree, &mut total_nodes, &mut total_edges);
+        let lines = tree.render(0);
+        for (j, line) in lines.iter().enumerate() {
+            if j == 0 {
+                println!("{}. {}", i + 1, line);
+            } else {
+                println!("   {}", line);
+            }
         }
 
-        if i < merged_trees.len() - 1 {
+        if i < trees.len() - 1 {
             println!();
         }
     }

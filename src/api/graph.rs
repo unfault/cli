@@ -1,0 +1,1016 @@
+//! # Graph API
+//!
+//! This module contains all API endpoints and types related to the code graph
+//! for impact analysis, dependency queries, and centrality analysis.
+//!
+//! ## Endpoints
+//!
+//! - `POST /api/v1/graph/analyze` - Analyze IR with rules (client-side parsing, builds full graph)
+//! - `POST /api/v1/graph/impact` - Impact analysis ("What breaks if I change X?")
+//! - `POST /api/v1/graph/dependencies` - Dependency queries
+//! - `POST /api/v1/graph/centrality` - Centrality analysis ("What are the most critical files?")
+//! - `GET /api/v1/graph/stats/{session_id}` - Graph statistics
+//!
+//! ## Note
+//!
+//! The code graph is automatically built when running `unfault review`, which uses
+//! client-side parsing to build the full IR (semantics + graph) and sends it to
+//! the `/api/v1/graph/analyze` endpoint.
+
+use crate::api::client::{ApiClient, ApiError};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tower_lsp::lsp_types::Range;
+
+// =============================================================================
+// Request Types
+// =============================================================================
+
+/// Request for impact analysis: "What breaks if I change this file?"
+///
+/// Either `session_id` or `workspace_id` must be provided. If `workspace_id` is used,
+/// the API automatically resolves to the latest session with graph data.
+///
+/// # Example
+///
+/// ```rust
+/// use unfault::api::graph::ImpactAnalysisRequest;
+///
+/// // Using workspace_id (recommended)
+/// let request = ImpactAnalysisRequest {
+///     session_id: None,
+///     workspace_id: Some("wks_abc123".to_string()),
+///     file_path: "auth/middleware.py".to_string(),
+///     max_depth: 5,
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize)]
+pub struct ImpactAnalysisRequest {
+    /// Analysis session ID (UUID) - optional if workspace_id is provided
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Workspace ID (auto-resolves to latest session with graph)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Path to the file to analyze
+    pub file_path: String,
+    /// Maximum import hops to traverse (1-10, default: 5)
+    pub max_depth: i32,
+}
+
+/// Request for dependency queries
+///
+/// Supports two query types:
+/// - `files_using_library`: Find all files using a specific library
+/// - `external_dependencies`: Find all external deps for a file
+///
+/// Either `session_id` or `workspace_id` must be provided.
+#[derive(Debug, Clone, Serialize)]
+pub struct DependencyQueryRequest {
+    /// Analysis session ID (UUID) - optional if workspace_id is provided
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Workspace ID (auto-resolves to latest session with graph)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Query type: "files_using_library" or "external_dependencies"
+    pub query_type: String,
+    /// Library name (required for files_using_library)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library_name: Option<String>,
+    /// File path (required for external_dependencies)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+}
+
+/// Request for centrality analysis: "What are the most critical files?"
+///
+/// Either `session_id` or `workspace_id` must be provided.
+#[derive(Debug, Clone, Serialize)]
+pub struct CentralityRequest {
+    /// Analysis session ID (UUID) - optional if workspace_id is provided
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Workspace ID (auto-resolves to latest session with graph)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Maximum number of files to return (1-50, default: 10)
+    pub limit: i32,
+    /// Metric to sort by (in_degree, out_degree, total_degree, library_usage, importance_score)
+    pub sort_by: String,
+}
+
+// =============================================================================
+// IR Analysis Types (Client-Side Parsing)
+// =============================================================================
+
+/// Request to analyze code using client-side parsed Intermediate Representation.
+///
+/// This is the new architecture where:
+/// 1. CLI parses code locally and builds semantics + graph
+/// 2. Serialized IR is sent to the API (no source code over the wire)
+/// 3. API runs rules and returns findings
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use unfault::api::graph::IrAnalyzeRequest;
+/// use unfault::session::ir_builder::build_ir;
+///
+/// let ir = build_ir(&workspace_path, &files)?;
+/// let request = IrAnalyzeRequest {
+///     workspace_id: "wks_abc123".to_string(),
+///     workspace_label: Some("my-project".to_string()),
+///     profiles: vec!["stability".to_string()],
+///     ir_json: serde_json::to_string(&ir)?,
+/// };
+/// let response = client.analyze_ir(&api_key, &request).await?;
+/// ```
+#[derive(Debug, Clone, Serialize)]
+pub struct IrAnalyzeRequest {
+    /// Workspace ID (computed from git remote or manifest)
+    pub workspace_id: String,
+    /// Human-readable workspace label (usually directory name)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_label: Option<String>,
+    /// Profiles to use for analysis (e.g., ["stability", "security"])
+    pub profiles: Vec<String>,
+    /// JSON-serialized IntermediateRepresentation from unfault-core
+    pub ir_json: String,
+}
+
+/// A single finding from rule evaluation (API response format)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IrFinding {
+    /// Rule ID that generated this finding
+    pub rule_id: String,
+    /// Title of the finding
+    #[serde(default)]
+    pub title: String,
+    /// Detailed description
+    #[serde(default)]
+    pub description: String,
+    /// Severity level (Info, Low, Medium, High, Critical)
+    pub severity: String,
+    /// Category/dimension (Stability, Performance, etc.)
+    #[serde(default)]
+    pub dimension: String,
+    /// File path where the issue was found
+    pub file_path: String,
+    /// Line number (1-indexed) - optional for backwards compatibility
+    #[serde(default)]
+    pub line: u32,
+    /// Column number (1-indexed)
+    #[serde(default)]
+    pub column: u32,
+    /// End line (1-indexed)
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    /// End column (1-indexed)
+    #[serde(default)]
+    pub end_column: Option<u32>,
+    /// Human-readable description of the issue (alias for backwards compat)
+    #[serde(default)]
+    pub message: String,
+    /// JSON-serialized patch for client-side application
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch_json: Option<String>,
+    /// Human-readable fix preview
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_preview: Option<String>,
+    /// Legacy: Suggested fix patch (unified diff format)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
+    /// Byte offset start (for precise patching)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub byte_start: Option<usize>,
+    /// Byte offset end (for precise patching)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub byte_end: Option<usize>,
+}
+
+/// Response from IR analysis endpoint (matches API IrAnalysisResponse)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IrAnalyzeResponse {
+    /// List of findings from rule evaluation
+    pub findings: Vec<IrFinding>,
+    /// Number of files analyzed
+    pub file_count: i32,
+    /// Processing time in milliseconds
+    pub elapsed_ms: i64,
+    /// Graph statistics after rebuild
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_stats: Option<IrGraphStats>,
+}
+
+/// Graph statistics from IR analysis (matches API IrGraphStats)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IrGraphStats {
+    /// Number of file nodes
+    pub file_count: i32,
+    /// Number of function nodes
+    pub function_count: i32,
+    /// Number of class nodes
+    pub class_count: i32,
+    /// Number of external library nodes
+    pub external_module_count: i32,
+    /// Number of import edges
+    pub import_edge_count: i32,
+    /// Number of contains edges
+    pub contains_edge_count: i32,
+    /// Number of uses_library edges
+    pub uses_library_edge_count: i32,
+    /// Total number of nodes
+    pub total_nodes: i32,
+    /// Total number of edges
+    pub total_edges: i32,
+}
+
+// =============================================================================
+// Response Types
+// =============================================================================
+
+/// Information about a file in the code graph
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FileInfo {
+    /// Path to the file relative to workspace root
+    pub path: String,
+    /// Programming language of the file (e.g., "Python", "Go")
+    pub language: Option<String>,
+    /// Distance from the target file (for transitive queries)
+    pub depth: Option<i32>,
+}
+
+/// Information about a function in a file (for LSP hover/navigation)
+#[derive(Debug, Clone)]
+pub struct FunctionInfo {
+    /// Function name (qualified if method)
+    pub name: String,
+    /// LSP range where the function is defined
+    pub range: Range,
+}
+
+/// Information about an external library/module
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExternalModuleInfo {
+    /// Name of the library (e.g., "requests", "fastapi")
+    pub name: String,
+    /// Category of the library (e.g., "HttpClient", "Database")
+    pub category: Option<String>,
+}
+
+/// Response for impact analysis query
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImpactAnalysisResponse {
+    /// The file being analyzed
+    pub file_path: String,
+    /// Files that directly import this file
+    pub direct_importers: Vec<FileInfo>,
+    /// All files affected (including direct)
+    pub transitive_importers: Vec<FileInfo>,
+    /// Total number of affected files
+    pub total_affected: i32,
+}
+
+/// Response for dependency queries
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DependencyQueryResponse {
+    /// The query type executed
+    pub query_type: String,
+    /// Files matching the query (for files_using_library)
+    pub files: Option<Vec<FileInfo>>,
+    /// External dependencies (for external_dependencies)
+    pub dependencies: Option<Vec<ExternalModuleInfo>>,
+}
+
+/// Centrality metrics for a single file
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FileCentrality {
+    /// Path to the file
+    pub path: String,
+    /// Number of files that import this file
+    pub in_degree: i32,
+    /// Number of files this file imports
+    pub out_degree: i32,
+    /// Sum of in and out degrees
+    pub total_degree: i32,
+    /// Number of external libraries used
+    pub library_usage: i32,
+    /// Weighted importance score (higher = more critical)
+    pub importance_score: i32,
+}
+
+/// Response for centrality analysis query
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CentralityResponse {
+    /// Files with centrality metrics, sorted by requested metric
+    pub files: Vec<FileCentrality>,
+    /// Total number of files in the graph
+    pub total_files: i32,
+    /// The metric used for sorting
+    pub sort_by: String,
+}
+
+/// Statistics about the code graph for a session
+#[derive(Debug, Clone, Serialize)]
+pub struct FunctionImpactRequest {
+    /// Analysis session ID (UUID) - optional if workspace_id is provided
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Workspace ID (auto-resolves to latest session with graph)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Path to the file containing the function
+    pub file_path: String,
+    /// Name of the function (qualified if method)
+    pub function_name: String,
+    /// Maximum call hops to traverse (1-10, default: 5)
+    pub max_depth: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FunctionImpactResponse {
+    /// The function being analyzed (file:function)
+    pub function: String,
+    /// Functions that directly call this function
+    pub direct_callers: Vec<HashMap<String, String>>,
+    /// All functions affected (including direct)
+    pub transitive_callers: Vec<HashMap<String, String>>,
+    /// Total number of affected functions
+    pub total_affected: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GraphStatsResponse {
+    /// Number of file nodes
+    pub file_count: i32,
+    /// Number of function nodes
+    pub function_count: i32,
+    /// Number of class nodes
+    pub class_count: i32,
+    /// Number of external library nodes
+    pub external_module_count: i32,
+    /// Total number of nodes
+    pub total_nodes: i32,
+    /// Number of import edges
+    pub imports_edge_count: i32,
+    /// Number of contains edges
+    pub contains_edge_count: i32,
+    /// Number of uses_library edges
+    pub uses_library_edge_count: i32,
+    /// Number of calls edges
+    pub calls_edge_count: i32,
+    /// Total number of edges
+    pub total_edges: i32,
+}
+
+// =============================================================================
+// API Client Methods
+// =============================================================================
+
+/// Convert a reqwest error to an ApiError
+fn to_network_error(err: reqwest::Error) -> ApiError {
+    ApiError::Network {
+        message: err.to_string(),
+    }
+}
+
+/// Convert an HTTP response with error status to an ApiError
+fn to_http_error(status: reqwest::StatusCode, error_text: String) -> ApiError {
+    let status_code = status.as_u16();
+
+    match status_code {
+        401 => ApiError::Unauthorized {
+            message: if error_text.is_empty() {
+                "Invalid or expired API key".to_string()
+            } else {
+                error_text
+            },
+        },
+        403 => ApiError::Forbidden {
+            message: if error_text.is_empty() {
+                "Access denied".to_string()
+            } else {
+                error_text
+            },
+        },
+        404 => ApiError::ClientError {
+            status: status_code,
+            message: if error_text.is_empty() {
+                "Resource not found".to_string()
+            } else {
+                error_text
+            },
+        },
+        500..=599 => ApiError::Server {
+            status: status_code,
+            message: if error_text.is_empty() {
+                format!("Server error ({})", status_code)
+            } else {
+                error_text
+            },
+        },
+        _ => ApiError::ClientError {
+            status: status_code,
+            message: if error_text.is_empty() {
+                format!("Request failed ({})", status_code)
+            } else {
+                error_text
+            },
+        },
+    }
+}
+
+impl ApiClient {
+    /// Query impact analysis: "What breaks if I change this file?"
+    pub async fn graph_impact(
+        &self,
+        api_key: &str,
+        request: &ImpactAnalysisRequest,
+    ) -> Result<ImpactAnalysisResponse, ApiError> {
+        let url = format!("{}/api/v1/graph/impact", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(request)
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        let impact_response: ImpactAnalysisResponse = response.json().await.map_err(|e| {
+            ApiError::ParseError {
+                message: format!("Failed to parse impact response: {}", e),
+            }
+        })?;
+
+        Ok(impact_response)
+    }
+
+    /// Query code dependencies
+    pub async fn graph_dependencies(
+        &self,
+        api_key: &str,
+        request: &DependencyQueryRequest,
+    ) -> Result<DependencyQueryResponse, ApiError> {
+        let url = format!("{}/api/v1/graph/dependencies", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(request)
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        let dependency_response: DependencyQueryResponse = response.json().await.map_err(|e| {
+            ApiError::ParseError {
+                message: format!("Failed to parse dependency response: {}", e),
+            }
+        })?;
+
+        Ok(dependency_response)
+    }
+
+    /// Query centrality analysis: "What are the most critical files?"
+    pub async fn graph_centrality(
+        &self,
+        api_key: &str,
+        request: &CentralityRequest,
+    ) -> Result<CentralityResponse, ApiError> {
+        let url = format!("{}/api/v1/graph/centrality", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(request)
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        let centrality_response: CentralityResponse = response.json().await.map_err(|e| {
+            ApiError::ParseError {
+                message: format!("Failed to parse centrality response: {}", e),
+            }
+        })?;
+
+        Ok(centrality_response)
+    }
+
+    /// Query function impact analysis: "What breaks if I change this function?"
+    pub async fn graph_function_impact(
+        &self,
+        api_key: &str,
+        request: &FunctionImpactRequest,
+    ) -> Result<FunctionImpactResponse, ApiError> {
+        let url = format!("{}/api/v1/graph/function_impact", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(request)
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        let impact_response: FunctionImpactResponse = response.json().await.map_err(|e| {
+            ApiError::ParseError {
+                message: format!("Failed to parse function impact response: {}", e),
+            }
+        })?;
+
+        Ok(impact_response)
+    }
+
+    /// Get statistics about the code graph for a session
+    pub async fn graph_stats(
+        &self,
+        api_key: &str,
+        session_id: &str,
+    ) -> Result<GraphStatsResponse, ApiError> {
+        let url = format!("{}/api/v1/graph/stats/{}", self.base_url, session_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        let stats_response: GraphStatsResponse = response.json().await.map_err(|e| {
+            ApiError::ParseError {
+                message: format!("Failed to parse stats response: {}", e),
+            }
+        })?;
+
+        Ok(stats_response)
+    }
+
+    /// Get statistics about the code graph for a workspace
+    ///
+    /// This automatically resolves to the latest session with graph data.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - API key for authentication
+    /// * `workspace_id` - Workspace ID (computed from git remote or manifest)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(GraphStatsResponse)` - Statistics retrieved
+    /// * `Err(ApiError)` - Request failed (404 if no graph data found)
+    pub async fn graph_stats_by_workspace(
+        &self,
+        api_key: &str,
+        workspace_id: &str,
+    ) -> Result<GraphStatsResponse, ApiError> {
+        let url = format!(
+            "{}/api/v1/graph/stats?workspace_id={}",
+            self.base_url,
+            urlencoding::encode(workspace_id)
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        let stats_response: GraphStatsResponse = response.json().await.map_err(|e| {
+            ApiError::ParseError {
+                message: format!("Failed to parse stats response: {}", e),
+            }
+        })?;
+
+        Ok(stats_response)
+    }
+
+    /// Analyze code using client-side parsed Intermediate Representation
+    ///
+    /// Sends a JSON request body with the IR JSON and metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - API key for authentication
+    /// * `workspace_id` - Workspace ID
+    /// * `workspace_label` - Workspace label
+    /// * `profiles` - Profiles to analyze
+    /// * `ir_json` - JSON-serialized IntermediateRepresentation
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(IrAnalyzeResponse)` - Analysis completed with findings
+    /// * `Err(ApiError)` - Request failed
+    pub async fn analyze_ir(
+        &self,
+        api_key: &str,
+        workspace_id: &str,
+        workspace_label: Option<&str>,
+        profiles: &[String],
+        ir_json: String,
+    ) -> Result<IrAnalyzeResponse, ApiError> {
+        let url = format!("{}/api/v1/graph/analyze", self.base_url);
+
+        let request = IrAnalyzeRequest {
+            workspace_id: workspace_id.to_string(),
+            workspace_label: workspace_label.map(|s| s.to_string()),
+            profiles: profiles.to_vec(),
+            ir_json,
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&request)
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        let analyze_response: IrAnalyzeResponse = response.json().await.map_err(|e| {
+            ApiError::ParseError {
+                message: format!("Failed to parse IR analysis response: {}", e),
+            }
+        })?;
+
+        Ok(analyze_response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_impact_request_serialization_with_session_id() {
+        let request = ImpactAnalysisRequest {
+            session_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            workspace_id: None,
+            file_path: "auth/middleware.py".to_string(),
+            max_depth: 5,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(json.contains("auth/middleware.py"));
+        assert!(json.contains("\"max_depth\":5"));
+        assert!(!json.contains("workspace_id"));
+    }
+
+    #[test]
+    fn test_impact_request_serialization_with_workspace_id() {
+        let request = ImpactAnalysisRequest {
+            session_id: None,
+            workspace_id: Some("wks_abc123".to_string()),
+            file_path: "auth/middleware.py".to_string(),
+            max_depth: 5,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("wks_abc123"));
+        assert!(json.contains("auth/middleware.py"));
+        assert!(!json.contains("session_id"));
+    }
+
+    #[test]
+    fn test_dependency_request_files_using_library() {
+        let request = DependencyQueryRequest {
+            session_id: None,
+            workspace_id: Some("wks_test".to_string()),
+            query_type: "files_using_library".to_string(),
+            library_name: Some("requests".to_string()),
+            file_path: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("files_using_library"));
+        assert!(json.contains("requests"));
+        assert!(!json.contains("\"file_path\""));
+        assert!(json.contains("wks_test"));
+    }
+
+    #[test]
+    fn test_dependency_request_external_dependencies() {
+        let request = DependencyQueryRequest {
+            session_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            workspace_id: None,
+            query_type: "external_dependencies".to_string(),
+            library_name: None,
+            file_path: Some("main.py".to_string()),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("external_dependencies"));
+        assert!(json.contains("main.py"));
+        assert!(!json.contains("library_name"));
+        assert!(!json.contains("workspace_id"));
+    }
+
+    #[test]
+    fn test_centrality_request_serialization_with_workspace_id() {
+        let request = CentralityRequest {
+            session_id: None,
+            workspace_id: Some("wks_test".to_string()),
+            limit: 10,
+            sort_by: "in_degree".to_string(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"limit\":10"));
+        assert!(json.contains("in_degree"));
+        assert!(json.contains("wks_test"));
+        assert!(!json.contains("session_id"));
+    }
+
+    #[test]
+    fn test_centrality_request_serialization_with_session_id() {
+        let request = CentralityRequest {
+            session_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            workspace_id: None,
+            limit: 10,
+            sort_by: "in_degree".to_string(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"limit\":10"));
+        assert!(json.contains("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!json.contains("workspace_id"));
+    }
+
+    #[test]
+    fn test_impact_response_deserialization() {
+        let json = r#"{
+            "file_path": "auth/middleware.py",
+            "direct_importers": [
+                {"path": "api/routes.py", "language": "Python", "depth": 1}
+            ],
+            "transitive_importers": [
+                {"path": "api/routes.py", "language": "Python", "depth": 1},
+                {"path": "main.py", "language": "Python", "depth": 2}
+            ],
+            "total_affected": 2
+        }"#;
+        let response: ImpactAnalysisResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.file_path, "auth/middleware.py");
+        assert_eq!(response.direct_importers.len(), 1);
+        assert_eq!(response.transitive_importers.len(), 2);
+        assert_eq!(response.total_affected, 2);
+    }
+
+    #[test]
+    fn test_dependency_response_files() {
+        let json = r#"{
+            "query_type": "files_using_library",
+            "files": [
+                {"path": "api/client.py", "language": "Python", "depth": null}
+            ],
+            "dependencies": null
+        }"#;
+        let response: DependencyQueryResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.query_type, "files_using_library");
+        assert!(response.files.is_some());
+        assert!(response.dependencies.is_none());
+    }
+
+    #[test]
+    fn test_dependency_response_deps() {
+        let json = r#"{
+            "query_type": "external_dependencies",
+            "files": null,
+            "dependencies": [
+                {"name": "requests", "category": "HttpClient"},
+                {"name": "fastapi", "category": "WebFramework"}
+            ]
+        }"#;
+        let response: DependencyQueryResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.query_type, "external_dependencies");
+        assert!(response.files.is_none());
+        assert!(response.dependencies.is_some());
+        assert_eq!(response.dependencies.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_centrality_response_deserialization() {
+        let json = r#"{
+            "files": [
+                {
+                    "path": "db/connection.py",
+                    "in_degree": 15,
+                    "out_degree": 3,
+                    "total_degree": 18,
+                    "library_usage": 5,
+                    "importance_score": 38
+                }
+            ],
+            "total_files": 47,
+            "sort_by": "in_degree"
+        }"#;
+        let response: CentralityResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.files.len(), 1);
+        assert_eq!(response.files[0].path, "db/connection.py");
+        assert_eq!(response.files[0].in_degree, 15);
+        assert_eq!(response.total_files, 47);
+        assert_eq!(response.sort_by, "in_degree");
+    }
+
+    #[test]
+    fn test_graph_stats_response_deserialization() {
+        let json = r#"{
+            "file_count": 10,
+            "function_count": 50,
+            "class_count": 5,
+            "external_module_count": 8,
+            "total_nodes": 73,
+            "imports_edge_count": 25,
+            "contains_edge_count": 55,
+            "uses_library_edge_count": 16,
+            "calls_edge_count": 0,
+            "total_edges": 96
+        }"#;
+        let response: GraphStatsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.file_count, 10);
+        assert_eq!(response.function_count, 50);
+        assert_eq!(response.total_nodes, 73);
+        assert_eq!(response.total_edges, 96);
+    }
+
+    // ==================== IR Analysis Types Tests ====================
+
+    #[test]
+    fn test_ir_analyze_request_serialization() {
+        let request = IrAnalyzeRequest {
+            workspace_id: "wks_abc123".to_string(),
+            workspace_label: Some("my-project".to_string()),
+            profiles: vec!["stability".to_string(), "security".to_string()],
+            ir_json: r#"{"semantics":[],"graph":{}}"#.to_string(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("wks_abc123"));
+        assert!(json.contains("my-project"));
+        assert!(json.contains("stability"));
+        assert!(json.contains("security"));
+        assert!(json.contains("ir_json"));
+    }
+
+    #[test]
+    fn test_ir_analyze_request_without_label() {
+        let request = IrAnalyzeRequest {
+            workspace_id: "wks_xyz".to_string(),
+            workspace_label: None,
+            profiles: vec!["stability".to_string()],
+            ir_json: "{}".to_string(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("wks_xyz"));
+        assert!(!json.contains("workspace_label"));
+    }
+
+    #[test]
+    fn test_ir_finding_deserialization_full() {
+        let json = r#"{
+            "rule_id": "missing-circuit-breaker",
+            "title": "Missing Circuit Breaker",
+            "description": "HTTP calls should use circuit breakers for resilience",
+            "severity": "high",
+            "dimension": "stability",
+            "file_path": "api/client.py",
+            "line": 42,
+            "column": 5,
+            "end_line": 45,
+            "end_column": 10,
+            "message": "HTTP client calls should use circuit breakers",
+            "patch": "--- a/api/client.py\n+++ b/api/client.py",
+            "byte_start": 1024,
+            "byte_end": 1234
+        }"#;
+        let finding: IrFinding = serde_json::from_str(json).unwrap();
+        assert_eq!(finding.rule_id, "missing-circuit-breaker");
+        assert_eq!(finding.title, "Missing Circuit Breaker");
+        assert_eq!(finding.severity, "high");
+        assert_eq!(finding.dimension, "stability");
+        assert_eq!(finding.file_path, "api/client.py");
+        assert_eq!(finding.line, 42);
+        assert_eq!(finding.column, 5);
+        assert_eq!(finding.end_line, Some(45));
+        assert_eq!(finding.end_column, Some(10));
+        assert_eq!(finding.message, "HTTP client calls should use circuit breakers");
+        assert!(finding.patch.is_some());
+        assert_eq!(finding.byte_start, Some(1024));
+        assert_eq!(finding.byte_end, Some(1234));
+    }
+
+    #[test]
+    fn test_ir_finding_deserialization_minimal() {
+        let json = r#"{
+            "rule_id": "test-rule",
+            "severity": "info",
+            "file_path": "test.py",
+            "line": 1,
+            "column": 1,
+            "end_line": 1,
+            "end_column": 10,
+            "message": "Test message"
+        }"#;
+        let finding: IrFinding = serde_json::from_str(json).unwrap();
+        assert_eq!(finding.rule_id, "test-rule");
+        // dimension defaults to empty string with #[serde(default)]
+        assert_eq!(finding.dimension, "");
+        assert!(finding.patch.is_none());
+        assert!(finding.byte_start.is_none());
+    }
+
+    #[test]
+    fn test_ir_analyze_response_deserialization() {
+        let json = r#"{
+            "findings": [
+                {
+                    "rule_id": "test-rule",
+                    "severity": "medium",
+                    "file_path": "main.py",
+                    "line": 10,
+                    "column": 1,
+                    "end_line": 10,
+                    "end_column": 50,
+                    "message": "Consider adding error handling"
+                }
+            ],
+            "file_count": 5,
+            "elapsed_ms": 42
+        }"#;
+        let response: IrAnalyzeResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.findings.len(), 1);
+        assert_eq!(response.file_count, 5);
+        assert_eq!(response.elapsed_ms, 42);
+        assert!(response.graph_stats.is_none());
+    }
+
+    #[test]
+    fn test_ir_analyze_response_with_graph_stats() {
+        let json = r#"{
+            "findings": [],
+            "file_count": 3,
+            "elapsed_ms": 15,
+            "graph_stats": {
+                "file_count": 3,
+                "function_count": 10,
+                "class_count": 2,
+                "external_module_count": 5,
+                "import_edge_count": 8,
+                "contains_edge_count": 12,
+                "uses_library_edge_count": 5,
+                "total_nodes": 20,
+                "total_edges": 25
+            }
+        }"#;
+        let response: IrAnalyzeResponse = serde_json::from_str(json).unwrap();
+        assert!(response.graph_stats.is_some());
+        let stats = response.graph_stats.unwrap();
+        assert_eq!(stats.file_count, 3);
+        assert_eq!(stats.function_count, 10);
+        assert_eq!(stats.import_edge_count, 8);
+        assert_eq!(stats.contains_edge_count, 12);
+    }
+}

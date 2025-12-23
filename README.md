@@ -148,6 +148,32 @@ unfault config llm show
 unfault config llm remove
 ```
 
+### `unfault graph`
+
+Query the code graph for impact analysis, dependencies, and critical files.
+
+```bash
+# Build/refresh the code graph for impact analysis and RAG queries
+unfault graph refresh
+
+# What breaks if I change this file?
+unfault graph impact auth/middleware.py
+
+# Find files that use a specific library
+unfault graph library requests
+
+# Find external dependencies of a file
+unfault graph deps main.py
+
+# Find the most critical files in the codebase
+unfault graph critical --limit 10
+
+# Get graph statistics
+unfault graph stats
+```
+
+**Note:** Run `unfault graph refresh` to build or update the code graph before using other graph commands. The graph is stored server-side and persists across sessions.
+
 ## CI/CD Integration
 
 Unfault is designed for CI pipelines. Use exit codes to gate deployments:
@@ -223,8 +249,8 @@ Configuration is stored in `~/.config/unfault/config.json`:
 
 ```json
 {
-  "api_key": "uf_live_...",
-  "base_url": "https://api.unfault.dev",
+  "api_key": "sk_live_...",
+  "base_url": "https://app.unfault.dev",
   "llm": {
     "provider": "openai",
     "model": "gpt-4",
