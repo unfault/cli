@@ -195,7 +195,9 @@ pub fn build_local_graph(
                     Ok(p) => p,
                     Err(_) => continue,
                 };
-                let sem = TsFileSemantics::from_parsed(&parsed);
+                let mut sem = TsFileSemantics::from_parsed(&parsed);
+                // Analyze frameworks (Express, etc.)
+                let _ = sem.analyze_frameworks(&parsed);
                 Arc::new(SourceSemantics::Typescript(sem))
             }
             _ => continue,
