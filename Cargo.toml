@@ -1,6 +1,6 @@
 [package]
 name = "unfault"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 authors = ["Sylvain Hellegouarch <sylvain@unfault.dev>"]
 description = "Unfault — a calm reviewer for thoughtful engineers"

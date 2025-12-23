@@ -384,6 +384,7 @@ mod tests {
             max_sessions: Some(5),
             max_findings: Some(10),
             similarity_threshold: Some(0.5),
+            graph_data: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("How is my service doing?"));
@@ -399,6 +400,7 @@ mod tests {
             max_sessions: None,
             max_findings: None,
             similarity_threshold: None,
+            graph_data: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("Test query"));

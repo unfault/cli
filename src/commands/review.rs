@@ -158,8 +158,8 @@ pub struct ReviewArgs {
 /// * `Ok(EXIT_AUTH_ERROR)` - Authentication error
 /// * `Ok(EXIT_NETWORK_ERROR)` - Network error
 /// State for progressive display during scanning.
-#[derive(Default)]
 struct ScanDisplayState {
+    workspace_label: String,
     languages: Vec<String>,
     frameworks: Vec<String>,
     file_count: usize,
@@ -167,6 +167,16 @@ struct ScanDisplayState {
 }
 
 impl ScanDisplayState {
+    fn new(workspace_label: String) -> Self {
+        Self {
+            workspace_label,
+            languages: Vec::new(),
+            frameworks: Vec::new(),
+            file_count: 0,
+            lines_printed: 0,
+        }
+    }
+
     /// Update the display with new progress.
     fn update(&mut self, progress: &ScanProgress) {
         self.file_count = progress.file_count;
@@ -185,6 +195,14 @@ impl ScanDisplayState {
         }
 
         let mut lines = 0;
+
+        // Header line with workspace name
+        eprintln!(
+            "{} Analyzing {}…",
+            "→".cyan().bold(),
+            self.workspace_label.bright_blue()
+        );
+        lines += 1;
 
         // Languages line
         if !self.languages.is_empty() {
@@ -205,18 +223,42 @@ impl ScanDisplayState {
         }
 
         // Dimensions line
-        eprintln!("  Dimensions: {}", dimensions.join(", ").cyan());
+        eprintln!(
+            "  Dimensions: {}",
+            format_list_dimmed(dimensions, " · ").cyan()
+        );
         lines += 1;
 
         // File count line (always show, even if 0)
-        eprintln!(
-            "  Found {} matching source files",
-            self.file_count.to_string().bright_green()
-        );
+        let file_label = if self.file_count == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{} files", self.file_count)
+        };
+        eprintln!("  Files: {} scanned", file_label.bright_green());
         lines += 1;
 
         self.lines_printed = lines;
         let _ = io::stderr().flush();
+    }
+
+    fn clear(&mut self) {
+        if self.lines_printed == 0 {
+            return;
+        }
+        for _ in 0..self.lines_printed {
+            eprint!("\x1b[1A\x1b[2K");
+        }
+        self.lines_printed = 0;
+        let _ = io::stderr().flush();
+    }
+}
+
+fn format_list_dimmed(values: &[String], separator: &str) -> String {
+    if values.is_empty() {
+        "—".into()
+    } else {
+        values.join(separator)
     }
 }
 
@@ -251,19 +293,6 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
         .unwrap_or("workspace")
         .to_string();
 
-    // Print header immediately
-    let mode_indicator = if args.server_parse {
-        " (server-parse)"
-    } else {
-        ""
-    };
-    eprintln!(
-        "{} Analyzing {}{}...",
-        "→".cyan().bold(),
-        workspace_label.bright_blue(),
-        mode_indicator.dimmed()
-    );
-
     // Determine dimensions to analyze (needed for display)
     let dimensions: Vec<String> = args.dimensions.clone().unwrap_or_else(|| {
         vec![
@@ -274,7 +303,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     });
 
     // Set up progressive display state
-    let display_state = Arc::new(Mutex::new(ScanDisplayState::default()));
+    let display_state = Arc::new(Mutex::new(ScanDisplayState::new(workspace_label.clone())));
     let display_state_clone = Arc::clone(&display_state);
     let dimensions_clone = dimensions.clone();
     let profile_clone = args.profile.clone();
@@ -301,6 +330,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
         state.languages = workspace_info.language_strings();
         state.frameworks = workspace_info.framework_strings();
         state.render(&dimensions, args.profile.as_deref());
+        state.clear();
     }
 
     if workspace_info.source_files.is_empty() {
@@ -356,7 +386,7 @@ async fn execute_client_parse(
     trace_id: &str,
     current_dir: &std::path::Path,
     workspace_label: &str,
-    _dimensions: &[String],
+    dimensions: &[String],
     workspace_info: &crate::session::WorkspaceInfo,
     session_start: Instant,
 ) -> Result<i32> {
@@ -494,30 +524,13 @@ async fn execute_client_parse(
     let elapsed_ms = elapsed.as_millis() as u64;
     let engine_ms = response.elapsed_ms as u64;
 
-    // Display review time with breakdown (include cache hit rate if meaningful)
+    // Get cache hit rate for display context
     let cache_hit_rate = cache_stats.hit_rate();
-    if cache_stats.hits > 0 || cache_stats.misses > 0 {
-        eprintln!(
-            "  Reviewed {} files in {}ms (parse: {}ms, api: {}ms, engine: {}ms, cache: {:.0}%) (trace: {})",
-            file_count.to_string().bright_green(),
-            elapsed_ms.to_string().bright_cyan(),
-            parse_ms.to_string().dimmed(),
-            api_ms.to_string().dimmed(),
-            engine_ms.to_string().dimmed(),
-            cache_hit_rate,
-            &trace_id[..8].dimmed()
-        );
+    let cache_rate_opt = if cache_stats.hits > 0 || cache_stats.misses > 0 {
+        Some(cache_hit_rate)
     } else {
-        eprintln!(
-            "  Reviewed {} files in {}ms (parse: {}ms, api: {}ms, engine: {}ms) (trace: {})",
-            file_count.to_string().bright_green(),
-            elapsed_ms.to_string().bright_cyan(),
-            parse_ms.to_string().dimmed(),
-            api_ms.to_string().dimmed(),
-            engine_ms.to_string().dimmed(),
-            &trace_id[..8].dimmed()
-        );
-    }
+        None
+    };
 
     let finding_count = response.findings.len();
 
@@ -538,7 +551,22 @@ async fn execute_client_parse(
     };
 
     // Display results
-    display_ir_findings(args, &response.findings, applied_patches);
+    let display_context = ReviewOutputContext {
+        workspace_label: workspace_label.to_string(),
+        languages: workspace_info.language_strings(),
+        frameworks: workspace_info.framework_strings(),
+        dimensions: dimensions.to_vec(),
+        file_count,
+        elapsed_ms,
+        parse_ms,
+        api_ms,
+        engine_ms,
+        cache_hit_rate: cache_rate_opt,
+        trace_id: trace_id.chars().take(8).collect(),
+        profile: args.profile.clone(),
+    };
+
+    display_ir_findings(args, &response.findings, applied_patches, &display_context);
 
     if finding_count > 0 {
         Ok(EXIT_FINDINGS_FOUND)
@@ -603,7 +631,162 @@ fn apply_ir_patches(
 }
 
 /// Display findings from IR analysis.
-fn display_ir_findings(args: &ReviewArgs, findings: &[IrFinding], applied_patches: usize) {
+struct ReviewOutputContext {
+    workspace_label: String,
+    languages: Vec<String>,
+    frameworks: Vec<String>,
+    dimensions: Vec<String>,
+    file_count: usize,
+    elapsed_ms: u64,
+    parse_ms: u64,
+    api_ms: u64,
+    engine_ms: u64,
+    cache_hit_rate: Option<f64>,
+    trace_id: String,
+    profile: Option<String>,
+}
+
+struct SeveritySummary {
+    critical: usize,
+    high: usize,
+    medium: usize,
+    low: usize,
+}
+
+impl SeveritySummary {
+    fn total_tracked(&self) -> usize {
+        self.critical + self.high + self.medium + self.low
+    }
+}
+
+fn render_session_overview(context: &ReviewOutputContext) {
+    println!(
+        "{} Analyzing {}…",
+        "→".cyan().bold(),
+        context.workspace_label.bright_blue()
+    );
+
+    if let Some(profile) = &context.profile {
+        println!("  Profile: {}", profile.cyan());
+    }
+
+    println!(
+        "  Languages: {}",
+        format_list(&context.languages, ", ").cyan()
+    );
+    println!(
+        "  Frameworks: {}",
+        format_list(&context.frameworks, ", ").cyan()
+    );
+    println!(
+        "  Dimensions: {}",
+        format_list(&context.dimensions, " · ").cyan()
+    );
+
+    let file_label = if context.file_count == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{} files", context.file_count)
+    };
+    println!("  Files: {}", file_label.bright_green());
+
+    let mut timing_parts = vec![
+        format!("parse: {}ms", context.parse_ms.to_string().dimmed()),
+        format!("api: {}ms", context.api_ms.to_string().dimmed()),
+        format!("engine: {}ms", context.engine_ms.to_string().dimmed()),
+    ];
+
+    if let Some(cache) = context.cache_hit_rate {
+        timing_parts.push(format!("cache: {:.0}%", cache).dimmed().to_string());
+    }
+
+    println!(
+        "  Duration: {}ms total ({}) (trace: {})",
+        context.elapsed_ms.to_string().bright_cyan(),
+        timing_parts.join(", "),
+        context.trace_id.dimmed()
+    );
+    println!();
+}
+
+fn format_list(values: &[String], separator: &str) -> String {
+    if values.is_empty() {
+        "—".into()
+    } else {
+        values.join(separator)
+    }
+}
+
+fn compute_severity_summary(findings: &[IrFinding]) -> SeveritySummary {
+    let mut summary = SeveritySummary {
+        critical: 0,
+        high: 0,
+        medium: 0,
+        low: 0,
+    };
+
+    for finding in findings {
+        match finding.severity.to_lowercase().as_str() {
+            "critical" => summary.critical += 1,
+            "high" => summary.high += 1,
+            "medium" => summary.medium += 1,
+            "low" => summary.low += 1,
+            _ => {}
+        }
+    }
+
+    summary
+}
+
+fn format_severity_breakdown(summary: &SeveritySummary) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if summary.critical > 0 {
+        parts.push(format!(
+            "{} critical",
+            summary.critical.to_string().bright_red()
+        ));
+    }
+    if summary.high > 0 {
+        parts.push(format!("{} high", summary.high.to_string().bright_red()));
+    }
+    if summary.medium > 0 {
+        parts.push(format!(
+            "{} medium",
+            summary.medium.to_string().bright_yellow()
+        ));
+    }
+    if summary.low > 0 {
+        parts.push(format!("{} low", summary.low.to_string().bright_blue()));
+    }
+
+    if parts.is_empty() {
+        "—".into()
+    } else {
+        parts.join(&format!(" {} ", "·".dimmed()))
+    }
+}
+
+fn first_meaningful_line(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') || trimmed.starts_with("//") || trimmed.starts_with("```") {
+            continue;
+        }
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
+fn display_ir_findings(
+    args: &ReviewArgs,
+    findings: &[IrFinding],
+    applied_patches: usize,
+    context: &ReviewOutputContext,
+) {
     let total_findings = findings.len();
 
     if args.output_format == "json" {
@@ -619,6 +802,8 @@ fn display_ir_findings(args: &ReviewArgs, findings: &[IrFinding], applied_patche
     // Text output
     println!();
 
+    render_session_overview(context);
+
     if total_findings == 0 {
         println!(
             "{} No issues found! Your code looks good.",
@@ -633,6 +818,34 @@ fn display_ir_findings(args: &ReviewArgs, findings: &[IrFinding], applied_patche
         total_findings.to_string().bright_yellow(),
         if total_findings == 1 { "" } else { "s" }
     );
+
+    let severity_summary = compute_severity_summary(findings);
+    if severity_summary.total_tracked() > 0 {
+        println!(
+            "  Breakdown: {}",
+            format_severity_breakdown(&severity_summary)
+        );
+    }
+
+    if applied_patches > 0 {
+        let verb = if args.dry_run {
+            "Would apply"
+        } else {
+            "Applied"
+        };
+        println!(
+            "  {} {} {} patch{}",
+            if args.dry_run {
+                "→".cyan().bold()
+            } else {
+                "✓".green().bold()
+            },
+            verb,
+            applied_patches.to_string().bright_green(),
+            if applied_patches == 1 { "" } else { "es" }
+        );
+    }
+
     println!();
 
     if args.output_mode == "full" {
@@ -761,7 +974,14 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
 
         for (rule_id, rule_findings) in rules_by_id {
             let count = rule_findings.len();
-            let title = &rule_findings[0].title;
+            let sample = rule_findings[0];
+            let title = if !sample.title.is_empty() {
+                sample.title.clone()
+            } else if !sample.message.is_empty() {
+                sample.message.clone()
+            } else {
+                sample.rule_id.clone()
+            };
 
             println!(
                 "   [{}] {} ({}x)",
@@ -769,6 +989,20 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
                 title,
                 count.to_string().color("yellow")
             );
+
+            if let Some(detail) = first_meaningful_line(sample.message.as_str())
+                .or_else(|| first_meaningful_line(sample.description.as_str()))
+            {
+                println!("      {}", detail.dimmed());
+            }
+
+            if let Some(fix_line) = sample
+                .fix_preview
+                .as_deref()
+                .and_then(first_meaningful_line)
+            {
+                println!("      {} {}", "→".green(), fix_line);
+            }
         }
     }
 }

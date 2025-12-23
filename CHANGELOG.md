@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2025-12-23
+
+### Added
+
+- `unfault ask` now builds a local code graph and sends it with your RAG question, enabling flow-aware answers without uploading sources. Responses surface the HTTP route, call stack, and external dependency usage that shape the answer, so you can see exactly how a behavior is implemented.
+- Flow responses now highlight graph impact details, topic labels, and hints, making it easier to decide the next question or code change straight from the CLI.
+- Added the `UNFAULT_DUMP_IR` environment variable to persist the serialized IR produced during `unfault review`, which simplifies reproducing tricky analysis issues.
+
+### Fixed
+
+- `unfault ask` now auto-detects the workspace ID using the same heuristics as `graph` and `review`, ensuring queries are scoped to the current repo even when the flag is omitted.
+- Local graph building now runs framework analysis for TypeScript/Express projects and properly builds Rust semantics before serialization, so the flow context remains accurate across languages.
+- Flow path rendering now preserves the tree hierarchy of nested function calls, producing readable call stacks in the CLI output.
+
 ## [0.5.1] - 2025-12-21
 
 ### Fixed
@@ -66,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
+[0.6.0]: https://github.com/unfault/cli/releases/tag/v0.6.0
 [0.5.1]: https://github.com/unfault/cli/releases/tag/v0.5.1
 [0.5.0]: https://github.com/unfault/cli/releases/tag/v0.5.0
 [0.4.0]: https://github.com/unfault/cli/releases/tag/v0.4.0
