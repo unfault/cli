@@ -705,15 +705,67 @@ fn format_severity_breakdown(summary: &SeveritySummary) -> String {
 /// Max width for terminal output (80 chars standard)
 const MAX_WIDTH: usize = 80;
 
-/// Truncate a string to fit within max_len characters, adding "..." if truncated.
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else if max_len <= 3 {
-        "...".to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
+/// Wrap text to fit within max_width, continuing on the next line with the given indent.
+/// Returns a Vec of lines to print.
+fn wrap_text(s: &str, first_line_max: usize, continuation_indent: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let words: Vec<&str> = s.split_whitespace().collect();
+    
+    if words.is_empty() {
+        return vec![String::new()];
     }
+    
+    let cont_max = MAX_WIDTH.saturating_sub(continuation_indent.len());
+    
+    let mut current_line = String::new();
+    let mut current_max = first_line_max;
+    
+    for word in words {
+        let word_len = word.len();
+        let current_len = current_line.len();
+        
+        // Check if we need to start a new line
+        let would_fit = if current_len == 0 {
+            word_len <= current_max
+        } else {
+            current_len + 1 + word_len <= current_max
+        };
+        
+        if !would_fit && current_len > 0 {
+            // Push the current line
+            lines.push(current_line);
+            // Start a new continuation line
+            current_line = String::new();
+            current_max = cont_max;
+        }
+        
+        // Add the word to the current line
+        if current_line.is_empty() {
+            // If word is longer than max width, we need to hard-break it
+            if word_len > current_max {
+                let mut remaining = word;
+                while remaining.len() > current_max {
+                    let (chunk, rest) = remaining.split_at(current_max);
+                    lines.push(chunk.to_string());
+                    remaining = rest;
+                    current_max = cont_max;
+                }
+                current_line = remaining.to_string();
+            } else {
+                current_line = word.to_string();
+            }
+        } else {
+            current_line.push(' ');
+            current_line.push_str(word);
+        }
+    }
+    
+    // Don't forget the last line
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+    
+    lines
 }
 
 fn render_session_overview(context: &ReviewOutputContext) {
@@ -996,7 +1048,7 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
         );
 
         // Display each rule as: [rule_id] title (matches landing page)
-        // Format: "   [rule_id] title" - truncate to fit 80 chars
+        // Format: "   [rule_id] title" - wrap to fit 80 chars
         for (rule_id, rule_findings) in rules_by_id {
             let sample = rule_findings[0];
             let title = if !sample.title.is_empty() {
@@ -1009,14 +1061,24 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
 
             // Calculate available space: 80 - "   [" - rule_id - "] " = 80 - 5 - rule_id.len()
             let prefix_len = 5 + rule_id.len(); // "   [" + rule_id + "] "
-            let max_title_len = MAX_WIDTH.saturating_sub(prefix_len);
-            let truncated_title = truncate(&title, max_title_len);
-
-            println!(
-                "   [{}] {}",
-                rule_id.cyan(),
-                truncated_title.dimmed()
-            );
+            let first_line_max = MAX_WIDTH.saturating_sub(prefix_len);
+            let continuation_indent = "      "; // 6 spaces for continuation lines
+            
+            let wrapped_lines = wrap_text(&title, first_line_max, continuation_indent);
+            
+            // Print first line with the rule_id prefix
+            if let Some(first_line) = wrapped_lines.first() {
+                println!(
+                    "   [{}] {}",
+                    rule_id.cyan(),
+                    first_line.dimmed()
+                );
+            }
+            
+            // Print continuation lines with indent
+            for line in wrapped_lines.iter().skip(1) {
+                println!("{}{}", continuation_indent, line.dimmed());
+            }
         }
     }
 }
