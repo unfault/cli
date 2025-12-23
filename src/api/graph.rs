@@ -445,11 +445,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let impact_response: ImpactAnalysisResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let impact_response: ImpactAnalysisResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse impact response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(impact_response)
     }
@@ -477,11 +476,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let dependency_response: DependencyQueryResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let dependency_response: DependencyQueryResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse dependency response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(dependency_response)
     }
@@ -509,11 +507,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let centrality_response: CentralityResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let centrality_response: CentralityResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse centrality response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(centrality_response)
     }
@@ -541,11 +538,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let impact_response: FunctionImpactResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let impact_response: FunctionImpactResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse function impact response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(impact_response)
     }
@@ -572,11 +568,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let stats_response: GraphStatsResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let stats_response: GraphStatsResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse stats response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(stats_response)
     }
@@ -619,11 +614,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let stats_response: GraphStatsResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let stats_response: GraphStatsResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse stats response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(stats_response)
     }
@@ -676,11 +670,10 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        let analyze_response: IrAnalyzeResponse = response.json().await.map_err(|e| {
-            ApiError::ParseError {
+        let analyze_response: IrAnalyzeResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse IR analysis response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(analyze_response)
     }
@@ -936,7 +929,10 @@ mod tests {
         assert_eq!(finding.column, 5);
         assert_eq!(finding.end_line, Some(45));
         assert_eq!(finding.end_column, Some(10));
-        assert_eq!(finding.message, "HTTP client calls should use circuit breakers");
+        assert_eq!(
+            finding.message,
+            "HTTP client calls should use circuit breakers"
+        );
         assert!(finding.patch.is_some());
         assert_eq!(finding.byte_start, Some(1024));
         assert_eq!(finding.byte_end, Some(1234));

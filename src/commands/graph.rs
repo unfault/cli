@@ -38,14 +38,14 @@ use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
 
+use crate::api::ApiClient;
 use crate::api::graph::{
     CentralityRequest, CentralityResponse, DependencyQueryRequest, DependencyQueryResponse,
     FunctionImpactRequest, GraphStatsResponse, ImpactAnalysisRequest, ImpactAnalysisResponse,
 };
-use crate::api::ApiClient;
 use crate::config::Config;
 use crate::exit_codes::*;
-use crate::session::{compute_workspace_id, get_git_remote, MetaFileInfo};
+use crate::session::{MetaFileInfo, compute_workspace_id, get_git_remote};
 
 /// Arguments for the graph impact command
 #[derive(Debug)]
@@ -337,11 +337,7 @@ pub async fn execute_impact(args: ImpactArgs) -> Result<i32> {
     };
 
     if args.verbose {
-        eprintln!(
-            "{} Analyzing impact of: {}",
-            "→".cyan(),
-            args.file_path
-        );
+        eprintln!("{} Analyzing impact of: {}", "→".cyan(), args.file_path);
     }
 
     // Execute query
@@ -409,15 +405,14 @@ pub async fn execute_library(args: LibraryArgs) -> Result<i32> {
     };
 
     if args.verbose {
-        eprintln!(
-            "{} Finding files using: {}",
-            "→".cyan(),
-            args.library_name
-        );
+        eprintln!("{} Finding files using: {}", "→".cyan(), args.library_name);
     }
 
     // Execute query
-    let response = match api_client.graph_dependencies(&config.api_key, &request).await {
+    let response = match api_client
+        .graph_dependencies(&config.api_key, &request)
+        .await
+    {
         Ok(response) => response,
         Err(e) => {
             return handle_api_error(e, &config, args.verbose);
@@ -481,15 +476,14 @@ pub async fn execute_deps(args: DepsArgs) -> Result<i32> {
     };
 
     if args.verbose {
-        eprintln!(
-            "{} Finding dependencies of: {}",
-            "→".cyan(),
-            args.file_path
-        );
+        eprintln!("{} Finding dependencies of: {}", "→".cyan(), args.file_path);
     }
 
     // Execute query
-    let response = match api_client.graph_dependencies(&config.api_key, &request).await {
+    let response = match api_client
+        .graph_dependencies(&config.api_key, &request)
+        .await
+    {
         Ok(response) => response,
         Err(e) => {
             return handle_api_error(e, &config, args.verbose);
@@ -630,7 +624,9 @@ pub async fn execute_stats(args: StatsArgs) -> Result<i32> {
                     wid
                 );
             }
-            api_client.graph_stats_by_workspace(&config.api_key, &wid).await
+            api_client
+                .graph_stats_by_workspace(&config.api_key, &wid)
+                .await
         }
     };
 
@@ -786,7 +782,11 @@ fn output_deps_json(response: &DependencyQueryResponse) -> Result<()> {
     Ok(())
 }
 
-fn output_library_formatted(response: &DependencyQueryResponse, library_name: &str, _verbose: bool) {
+fn output_library_formatted(
+    response: &DependencyQueryResponse,
+    library_name: &str,
+    _verbose: bool,
+) {
     println!();
     println!(
         "{} {} {}",
@@ -840,10 +840,7 @@ fn output_deps_formatted(response: &DependencyQueryResponse, file_path: &str, ve
 
     if let Some(deps) = &response.dependencies {
         if deps.is_empty() {
-            println!(
-                "  {} No external dependencies found",
-                "ℹ".blue()
-            );
+            println!("  {} No external dependencies found", "ℹ".blue());
         } else {
             println!(
                 "  {} Found {} external dependencies",
@@ -1044,7 +1041,10 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
     }
 
     // Execute query
-    let response = match api_client.graph_function_impact(&config.api_key, &request).await {
+    let response = match api_client
+        .graph_function_impact(&config.api_key, &request)
+        .await
+    {
         Ok(response) => response,
         Err(e) => {
             return handle_api_error(e, &config, args.verbose);
@@ -1139,7 +1139,6 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
 
     Ok(EXIT_SUCCESS)
 }
-
 
 fn output_stats_formatted(response: &GraphStatsResponse, _verbose: bool) {
     println!();

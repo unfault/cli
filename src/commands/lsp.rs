@@ -51,11 +51,14 @@ use tower_lsp::jsonrpc::Result as RpcResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use crate::api::graph::{CentralityRequest, FileCentrality, FunctionImpactRequest, FunctionInfo, ImpactAnalysisRequest, IrFinding};
 use crate::api::ApiClient;
+use crate::api::graph::{
+    CentralityRequest, FileCentrality, FunctionImpactRequest, FunctionInfo, ImpactAnalysisRequest,
+    IrFinding,
+};
 use crate::config::Config;
 use crate::exit_codes::*;
-use crate::session::{build_ir_cached, compute_workspace_id, get_git_remote, WorkspaceScanner};
+use crate::session::{WorkspaceScanner, build_ir_cached, compute_workspace_id, get_git_remote};
 
 // Import patch types from unfault-core for parsing patch_json
 use unfault_core::types::{FilePatch, PatchRange};
@@ -141,7 +144,8 @@ impl UnfaultLsp {
         // 2. Config file's stored_base_url (if authenticated)
         // 3. Default production URL
         let config = crate::config::Config::load().ok();
-        let api_url = config.as_ref()
+        let api_url = config
+            .as_ref()
             .map(|c| c.base_url())
             .unwrap_or_else(crate::config::default_base_url);
 
@@ -198,9 +202,9 @@ impl UnfaultLsp {
         let project_root = find_project_root(&file_path, ide_workspace_root.as_ref())
             .unwrap_or_else(|| {
                 // Fall back to IDE workspace root if no project marker found
-                ide_workspace_root.clone().unwrap_or_else(|| {
-                    file_path.parent().unwrap_or(&file_path).to_path_buf()
-                })
+                ide_workspace_root
+                    .clone()
+                    .unwrap_or_else(|| file_path.parent().unwrap_or(&file_path).to_path_buf())
             });
 
         self.log_debug(&format!("Using project root: {:?}", project_root));
@@ -224,9 +228,7 @@ impl UnfaultLsp {
             Err(e) => {
                 let msg = format!("Failed to build IR: {}", e);
                 self.log_debug(&msg);
-                self.client
-                    .show_message(MessageType::WARNING, msg)
-                    .await;
+                self.client.show_message(MessageType::WARNING, msg).await;
                 return;
             }
         };
@@ -243,9 +245,7 @@ impl UnfaultLsp {
             Err(e) => {
                 let msg = format!("Failed to serialize IR: {}", e);
                 self.log_debug(&msg);
-                self.client
-                    .show_message(MessageType::WARNING, msg)
-                    .await;
+                self.client.show_message(MessageType::WARNING, msg).await;
                 return;
             }
         };
@@ -258,9 +258,7 @@ impl UnfaultLsp {
                 payload_size_mb
             );
             self.log_debug(&msg);
-            self.client
-                .show_message(MessageType::WARNING, msg)
-                .await;
+            self.client.show_message(MessageType::WARNING, msg).await;
         }
 
         // Compute workspace ID for this project
@@ -270,13 +268,10 @@ impl UnfaultLsp {
             .and_then(|n| n.to_str())
             .map(|s| s.to_string());
 
-        let workspace_id = compute_workspace_id(
-            git_remote.as_deref(),
-            None,
-            workspace_label.as_deref(),
-        )
-            .map(|r| r.id)
-            .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
+        let workspace_id =
+            compute_workspace_id(git_remote.as_deref(), None, workspace_label.as_deref())
+                .map(|r| r.id)
+                .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
 
         self.log_debug(&format!("Project workspace ID: {}", workspace_id));
 
@@ -287,9 +282,7 @@ impl UnfaultLsp {
             Err(e) => {
                 let msg = format!("Failed to scan project: {}", e);
                 self.log_debug(&msg);
-                self.client
-                    .show_message(MessageType::WARNING, msg)
-                    .await;
+                self.client.show_message(MessageType::WARNING, msg).await;
                 return;
             }
         };
@@ -309,7 +302,13 @@ impl UnfaultLsp {
 
         let response = match self
             .api_client
-            .analyze_ir(&api_key, &workspace_id, Some(workspace_label_str), &profiles, ir_json)
+            .analyze_ir(
+                &api_key,
+                &workspace_id,
+                Some(workspace_label_str),
+                &profiles,
+                ir_json,
+            )
             .await
         {
             Ok(response) => response,
@@ -389,8 +388,7 @@ impl UnfaultLsp {
 
         self.log_debug(&format!(
             "Published {} diagnostics for {}",
-            diagnostics_count,
-            uri
+            diagnostics_count, uri
         ));
     }
 
@@ -407,12 +405,21 @@ impl UnfaultLsp {
         } else {
             0
         };
-        let end_line = finding.end_line.map(|l| l.saturating_sub(1)).unwrap_or(start_line);
-        let end_col = finding.end_column.map(|c| c.saturating_sub(1)).unwrap_or_else(|| {
-            // If no end column, try to find the end of the line
-            let lines: Vec<&str> = source_text.lines().collect();
-            lines.get(end_line as usize).map(|l| l.len() as u32).unwrap_or(start_col + 10)
-        });
+        let end_line = finding
+            .end_line
+            .map(|l| l.saturating_sub(1))
+            .unwrap_or(start_line);
+        let end_col = finding
+            .end_column
+            .map(|c| c.saturating_sub(1))
+            .unwrap_or_else(|| {
+                // If no end column, try to find the end of the line
+                let lines: Vec<&str> = source_text.lines().collect();
+                lines
+                    .get(end_line as usize)
+                    .map(|l| l.len() as u32)
+                    .unwrap_or(start_col + 10)
+            });
 
         let range = Range {
             start: Position {
@@ -486,7 +493,10 @@ impl UnfaultLsp {
             };
             let finding_end = Position {
                 line: finding.end_line.unwrap_or(finding.line).saturating_sub(1),
-                character: finding.end_column.unwrap_or(finding.column + 10).saturating_sub(1),
+                character: finding
+                    .end_column
+                    .unwrap_or(finding.column + 10)
+                    .saturating_sub(1),
             };
 
             let finding_range = Range {
@@ -523,9 +533,7 @@ impl UnfaultLsp {
                     let action = CodeAction {
                         title: format!("Fix: {}", finding.title),
                         kind: Some(CodeActionKind::QUICKFIX),
-                        diagnostics: Some(vec![
-                            self.finding_to_diagnostic(finding, source_text)
-                        ]),
+                        diagnostics: Some(vec![self.finding_to_diagnostic(finding, source_text)]),
                         edit: Some(edit),
                         command: None,
                         is_preferred: Some(true),
@@ -535,12 +543,14 @@ impl UnfaultLsp {
                     actions.push(action);
                 } else if let Some(preview) = &finding.fix_preview {
                     // Fallback to fix_preview if patch_json parsing fails
-                    if let Some(edit) = self.create_edit_from_preview(uri, finding, preview, source_text) {
+                    if let Some(edit) =
+                        self.create_edit_from_preview(uri, finding, preview, source_text)
+                    {
                         let action = CodeAction {
                             title: format!("Fix: {}", finding.title),
                             kind: Some(CodeActionKind::QUICKFIX),
                             diagnostics: Some(vec![
-                                self.finding_to_diagnostic(finding, source_text)
+                                self.finding_to_diagnostic(finding, source_text),
                             ]),
                             edit: Some(edit),
                             command: None,
@@ -665,8 +675,14 @@ impl UnfaultLsp {
                         // Insert at the very beginning of the file
                         let edit = TextEdit {
                             range: Range {
-                                start: Position { line: 0, character: 0 },
-                                end: Position { line: 0, character: 0 },
+                                start: Position {
+                                    line: 0,
+                                    character: 0,
+                                },
+                                end: Position {
+                                    line: 0,
+                                    character: 0,
+                                },
                             },
                             new_text: hunk.replacement.clone(),
                         };
@@ -712,7 +728,9 @@ impl UnfaultLsp {
                 }
                 PatchRange::InsertAt { byte_offset } => {
                     // Convert byte offset to line/column
-                    if let Some((line, col)) = byte_offset_to_position(&line_starts, &source_lines, *byte_offset) {
+                    if let Some((line, col)) =
+                        byte_offset_to_position(&line_starts, &source_lines, *byte_offset)
+                    {
                         let edit = TextEdit {
                             range: Range {
                                 start: Position {
@@ -780,7 +798,10 @@ impl UnfaultLsp {
         let start_line = finding.line.saturating_sub(1);
         let start_col = finding.column.saturating_sub(1);
         let end_line = finding.end_line.unwrap_or(finding.line).saturating_sub(1);
-        let end_col = finding.end_column.unwrap_or(finding.column + 10).saturating_sub(1);
+        let end_col = finding
+            .end_column
+            .unwrap_or(finding.column + 10)
+            .saturating_sub(1);
 
         let edit = TextEdit {
             range: Range {
@@ -815,9 +836,10 @@ impl UnfaultLsp {
         {
             let cache = self.centrality_cache.read().await;
             if let Some(centralities) = cache.as_ref() {
-                if let Some(centrality) = centralities.iter().find(|c| {
-                    c.path.ends_with(file_path) || file_path.ends_with(&c.path)
-                }) {
+                if let Some(centrality) = centralities
+                    .iter()
+                    .find(|c| c.path.ends_with(file_path) || file_path.ends_with(&c.path))
+                {
                     let total_files = centralities.len() as i32;
                     return Some(self.centrality_to_notification(centrality, total_files));
                 }
@@ -828,7 +850,7 @@ impl UnfaultLsp {
         let request = CentralityRequest {
             session_id: None,
             workspace_id: Some(workspace_id),
-            limit: 50,  // Get top 50 files
+            limit: 50, // Get top 50 files
             sort_by: "in_degree".to_string(),
         };
 
@@ -895,7 +917,7 @@ impl UnfaultLsp {
             session_id: None,
             workspace_id: Some(workspace_id),
             file_path: file_path.to_string(),
-            max_depth: 3,  // Limit depth for performance
+            max_depth: 3, // Limit depth for performance
         };
 
         let response = match self.api_client.graph_impact(&api_key, &request).await {
@@ -913,7 +935,10 @@ impl UnfaultLsp {
         let summary = if total_count == 0 {
             "No other files depend on this file".to_string()
         } else if direct_count == 1 && total_count == 1 {
-            format!("1 file depends on this file: {}", response.direct_importers[0].path)
+            format!(
+                "1 file depends on this file: {}",
+                response.direct_importers[0].path
+            )
         } else if direct_count == total_count as usize {
             format!("{} files depend on this file", total_count)
         } else {
@@ -925,8 +950,16 @@ impl UnfaultLsp {
 
         Some(FileDependenciesNotification {
             path: file_path.to_string(),
-            direct_dependents: response.direct_importers.iter().map(|f| f.path.clone()).collect(),
-            all_dependents: response.transitive_importers.iter().map(|f| f.path.clone()).collect(),
+            direct_dependents: response
+                .direct_importers
+                .iter()
+                .map(|f| f.path.clone())
+                .collect(),
+            all_dependents: response
+                .transitive_importers
+                .iter()
+                .map(|f| f.path.clone())
+                .collect(),
             total_count,
             summary,
         })
@@ -944,8 +977,10 @@ impl UnfaultLsp {
         for func in functions.iter() {
             if position.line >= func.range.start.line
                 && position.line <= func.range.end.line
-                && (position.line > func.range.start.line || position.character >= func.range.start.character)
-                && (position.line < func.range.end.line || position.character <= func.range.end.character)
+                && (position.line > func.range.start.line
+                    || position.character >= func.range.start.character)
+                && (position.line < func.range.end.line
+                    || position.character <= func.range.end.character)
             {
                 return Some(func.name.clone());
             }
@@ -959,7 +994,10 @@ impl UnfaultLsp {
         let api_key = self.config.as_ref()?.api_key.clone();
         let workspace_id = self.workspace_id.read().await.clone()?;
 
-        self.log_debug(&format!("Fetching impact for function: {} in {}", function_name, file_path));
+        self.log_debug(&format!(
+            "Fetching impact for function: {} in {}",
+            function_name, file_path
+        ));
 
         // Call function impact API
         let request = FunctionImpactRequest {
@@ -970,7 +1008,11 @@ impl UnfaultLsp {
             max_depth: 5,
         };
 
-        let response = match self.api_client.graph_function_impact(&api_key, &request).await {
+        let response = match self
+            .api_client
+            .graph_function_impact(&api_key, &request)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 self.log_debug(&format!("Failed to fetch function impact: {:?}", e));
@@ -981,7 +1023,10 @@ impl UnfaultLsp {
         // Format as markdown
         let mut markdown = String::new();
         markdown.push_str(&format!("**Function Impact:** {}\n\n", response.function));
-        markdown.push_str(&format!("Total affected functions: {}\n\n", response.total_affected));
+        markdown.push_str(&format!(
+            "Total affected functions: {}\n\n",
+            response.total_affected
+        ));
 
         if !response.direct_callers.is_empty() {
             markdown.push_str("**Direct Callers:**\n");
@@ -1000,28 +1045,35 @@ impl UnfaultLsp {
 
 /// Convert a byte offset to (line, column) tuple
 /// Returns None if the offset is out of bounds
-fn byte_offset_to_position(line_starts: &[usize], source_lines: &[&str], offset: usize) -> Option<(usize, usize)> {
+fn byte_offset_to_position(
+    line_starts: &[usize],
+    source_lines: &[&str],
+    offset: usize,
+) -> Option<(usize, usize)> {
     // Find the line containing this offset using binary search
     let line_idx = match line_starts.binary_search(&offset) {
-        Ok(idx) => idx, // Exact match - start of a line
+        Ok(idx) => idx,                    // Exact match - start of a line
         Err(idx) => idx.saturating_sub(1), // In the middle of a line
     };
 
     if line_idx >= source_lines.len() {
         // Handle offset at or past EOF
         if offset >= *line_starts.last().unwrap_or(&0) {
-            return Some((source_lines.len().saturating_sub(1), source_lines.last().map(|l| l.len()).unwrap_or(0)));
+            return Some((
+                source_lines.len().saturating_sub(1),
+                source_lines.last().map(|l| l.len()).unwrap_or(0),
+            ));
         }
         return None;
     }
 
     let line_start = line_starts[line_idx];
     let col = offset.saturating_sub(line_start);
-    
+
     // Validate column is within line bounds
     let line_len = source_lines.get(line_idx).map(|l| l.len()).unwrap_or(0);
     let col = col.min(line_len);
-    
+
     Some((line_idx, col))
 }
 
@@ -1071,10 +1123,10 @@ const PROJECT_MARKERS: &[&str] = &[
 fn find_project_root(file_path: &Path, ide_workspace_root: Option<&PathBuf>) -> Option<PathBuf> {
     // Start from the file's parent directory
     let mut current = file_path.parent()?;
-    
+
     // Don't search beyond the IDE workspace root if provided
     let stop_at = ide_workspace_root.map(|p| p.as_path());
-    
+
     loop {
         // Check if this directory contains any project marker
         for marker in PROJECT_MARKERS {
@@ -1083,27 +1135,27 @@ fn find_project_root(file_path: &Path, ide_workspace_root: Option<&PathBuf>) -> 
                 return Some(current.to_path_buf());
             }
         }
-        
+
         // Also check for .git as a fallback project boundary
         let git_path = current.join(".git");
         if git_path.exists() {
             return Some(current.to_path_buf());
         }
-        
+
         // Stop if we've reached the IDE workspace root
         if let Some(stop) = stop_at {
             if current == stop {
                 break;
             }
         }
-        
+
         // Move up to the parent directory
         match current.parent() {
             Some(parent) => current = parent,
             None => break,
         }
     }
-    
+
     None
 }
 
@@ -1186,11 +1238,8 @@ impl LanguageServer for UnfaultLsp {
                     .and_then(|n| n.to_str())
                     .map(|s| s.to_string());
 
-                let workspace_id_result = compute_workspace_id(
-                    git_remote.as_deref(),
-                    None,
-                    workspace_label.as_deref(),
-                );
+                let workspace_id_result =
+                    compute_workspace_id(git_remote.as_deref(), None, workspace_label.as_deref());
 
                 let workspace_id = workspace_id_result
                     .map(|r| r.id)
@@ -1254,10 +1303,13 @@ impl LanguageServer for UnfaultLsp {
         self.log_debug(&format!("Document opened: {}", params.text_document.uri));
 
         // Cache the document content for code actions
-        let _ = self.document_cache.insert_async(
-            params.text_document.uri.clone(),
-            params.text_document.text.clone(),
-        ).await;
+        let _ = self
+            .document_cache
+            .insert_async(
+                params.text_document.uri.clone(),
+                params.text_document.text.clone(),
+            )
+            .await;
 
         self.analyze_document(
             &params.text_document.uri,
@@ -1280,7 +1332,11 @@ impl LanguageServer for UnfaultLsp {
                 .and_then(|root| abs_path.strip_prefix(root).ok())
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| {
-                    abs_path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string()
+                    abs_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string()
                 });
 
             // Send file centrality notification
@@ -1311,10 +1367,10 @@ impl LanguageServer for UnfaultLsp {
         // This fires on every edit including Ctrl-Z (undo), keeping the cache current
         if let Some(change) = params.content_changes.last() {
             // Update the document cache with the new content
-            let _ = self.document_cache.insert_async(
-                params.text_document.uri.clone(),
-                change.text.clone(),
-            ).await;
+            let _ = self
+                .document_cache
+                .insert_async(params.text_document.uri.clone(), change.text.clone())
+                .await;
 
             self.analyze_document(
                 &params.text_document.uri,
@@ -1330,7 +1386,8 @@ impl LanguageServer for UnfaultLsp {
 
         // Re-analyze on save with saved text if available
         if let Some(text) = params.text {
-            self.analyze_document(&params.text_document.uri, &text, 0).await;
+            self.analyze_document(&params.text_document.uri, &text, 0)
+                .await;
         }
     }
 
@@ -1341,7 +1398,10 @@ impl LanguageServer for UnfaultLsp {
         self.findings_cache.remove(&params.text_document.uri);
 
         // Clear cached document content
-        let _ = self.document_cache.remove_async(&params.text_document.uri).await;
+        let _ = self
+            .document_cache
+            .remove_async(&params.text_document.uri)
+            .await;
 
         // Clear diagnostics
         self.client
@@ -1350,7 +1410,10 @@ impl LanguageServer for UnfaultLsp {
     }
 
     async fn code_action(&self, params: CodeActionParams) -> RpcResult<Option<CodeActionResponse>> {
-        self.log_debug(&format!("Code action requested for: {}", params.text_document.uri));
+        self.log_debug(&format!(
+            "Code action requested for: {}",
+            params.text_document.uri
+        ));
 
         // Retrieve document content from cache for accurate edit position calculations
         let source_text = self
@@ -1360,16 +1423,18 @@ impl LanguageServer for UnfaultLsp {
             .map(|entry| entry.get().clone())
             .unwrap_or_default();
 
-        let actions = self.get_code_actions_for_range(
-            &params.text_document.uri,
-            &params.range,
-            &source_text,
-        );
+        let actions =
+            self.get_code_actions_for_range(&params.text_document.uri, &params.range, &source_text);
 
         if actions.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(actions.into_iter().map(CodeActionOrCommand::CodeAction).collect()))
+            Ok(Some(
+                actions
+                    .into_iter()
+                    .map(CodeActionOrCommand::CodeAction)
+                    .collect(),
+            ))
         }
     }
 }
@@ -1428,16 +1493,20 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path().join("myproject");
         fs::create_dir_all(&project_dir).unwrap();
-        
+
         // Create pyproject.toml in project directory
-        fs::write(project_dir.join("pyproject.toml"), "[project]\nname = \"test\"").unwrap();
-        
+        fs::write(
+            project_dir.join("pyproject.toml"),
+            "[project]\nname = \"test\"",
+        )
+        .unwrap();
+
         // Create a nested source file
         let src_dir = project_dir.join("src");
         fs::create_dir_all(&src_dir).unwrap();
         let file_path = src_dir.join("main.py");
         fs::write(&file_path, "print('hello')").unwrap();
-        
+
         // Find project root from the source file
         let result = find_project_root(&file_path, None);
         assert_eq!(result, Some(project_dir));
@@ -1448,16 +1517,16 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path().join("myproject");
         fs::create_dir_all(&project_dir).unwrap();
-        
+
         // Create package.json in project directory
         fs::write(project_dir.join("package.json"), r#"{"name": "test"}"#).unwrap();
-        
+
         // Create a nested source file
         let src_dir = project_dir.join("src");
         fs::create_dir_all(&src_dir).unwrap();
         let file_path = src_dir.join("index.ts");
         fs::write(&file_path, "console.log('hello')").unwrap();
-        
+
         // Find project root from the source file
         let result = find_project_root(&file_path, None);
         assert_eq!(result, Some(project_dir));
@@ -1466,22 +1535,30 @@ mod tests {
     #[test]
     fn test_find_project_root_monorepo() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create monorepo structure
         let monorepo_root = temp_dir.path();
-        fs::write(monorepo_root.join("package.json"), r#"{"name": "monorepo"}"#).unwrap();
-        
+        fs::write(
+            monorepo_root.join("package.json"),
+            r#"{"name": "monorepo"}"#,
+        )
+        .unwrap();
+
         // Create a sub-project
         let subproject_dir = monorepo_root.join("packages").join("myapp");
         fs::create_dir_all(&subproject_dir).unwrap();
-        fs::write(subproject_dir.join("pyproject.toml"), "[project]\nname = \"myapp\"").unwrap();
-        
+        fs::write(
+            subproject_dir.join("pyproject.toml"),
+            "[project]\nname = \"myapp\"",
+        )
+        .unwrap();
+
         // Create a source file in the sub-project
         let src_dir = subproject_dir.join("src");
         fs::create_dir_all(&src_dir).unwrap();
         let file_path = src_dir.join("main.py");
         fs::write(&file_path, "print('hello')").unwrap();
-        
+
         // Find project root should return the sub-project, not the monorepo root
         let result = find_project_root(&file_path, Some(&monorepo_root.to_path_buf()));
         assert_eq!(result, Some(subproject_dir));
@@ -1492,7 +1569,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("random.py");
         fs::write(&file_path, "print('hello')").unwrap();
-        
+
         // No project marker exists
         let result = find_project_root(&file_path, None);
         assert_eq!(result, None);
@@ -1503,14 +1580,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path().join("myproject");
         fs::create_dir_all(&project_dir).unwrap();
-        
+
         // Create .git directory (fallback marker)
         fs::create_dir_all(project_dir.join(".git")).unwrap();
-        
+
         // Create a source file
         let file_path = project_dir.join("main.py");
         fs::write(&file_path, "print('hello')").unwrap();
-        
+
         // Find project root from the source file
         let result = find_project_root(&file_path, None);
         assert_eq!(result, Some(project_dir));
@@ -1522,11 +1599,15 @@ mod tests {
     fn test_byte_offset_to_position_start_of_first_line() {
         let source = "line1\nline2\nline3";
         let line_starts: Vec<usize> = std::iter::once(0)
-            .chain(source.char_indices().filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }))
+            .chain(
+                source
+                    .char_indices()
+                    .filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }),
+            )
             .chain(std::iter::once(source.len()))
             .collect();
         let source_lines: Vec<&str> = source.lines().collect();
-        
+
         // Offset 0 should be line 0, col 0
         let result = byte_offset_to_position(&line_starts, &source_lines, 0);
         assert_eq!(result, Some((0, 0)));
@@ -1536,11 +1617,15 @@ mod tests {
     fn test_byte_offset_to_position_middle_of_first_line() {
         let source = "line1\nline2\nline3";
         let line_starts: Vec<usize> = std::iter::once(0)
-            .chain(source.char_indices().filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }))
+            .chain(
+                source
+                    .char_indices()
+                    .filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }),
+            )
             .chain(std::iter::once(source.len()))
             .collect();
         let source_lines: Vec<&str> = source.lines().collect();
-        
+
         // Offset 3 should be line 0, col 3
         let result = byte_offset_to_position(&line_starts, &source_lines, 3);
         assert_eq!(result, Some((0, 3)));
@@ -1550,11 +1635,15 @@ mod tests {
     fn test_byte_offset_to_position_start_of_second_line() {
         let source = "line1\nline2\nline3";
         let line_starts: Vec<usize> = std::iter::once(0)
-            .chain(source.char_indices().filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }))
+            .chain(
+                source
+                    .char_indices()
+                    .filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }),
+            )
             .chain(std::iter::once(source.len()))
             .collect();
         let source_lines: Vec<&str> = source.lines().collect();
-        
+
         // Offset 6 (after first \n) should be line 1, col 0
         let result = byte_offset_to_position(&line_starts, &source_lines, 6);
         assert_eq!(result, Some((1, 0)));
@@ -1564,11 +1653,15 @@ mod tests {
     fn test_byte_offset_to_position_middle_of_second_line() {
         let source = "line1\nline2\nline3";
         let line_starts: Vec<usize> = std::iter::once(0)
-            .chain(source.char_indices().filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }))
+            .chain(
+                source
+                    .char_indices()
+                    .filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }),
+            )
             .chain(std::iter::once(source.len()))
             .collect();
         let source_lines: Vec<&str> = source.lines().collect();
-        
+
         // Offset 8 should be line 1, col 2
         let result = byte_offset_to_position(&line_starts, &source_lines, 8);
         assert_eq!(result, Some((1, 2)));
@@ -1578,11 +1671,15 @@ mod tests {
     fn test_byte_offset_to_position_end_of_file() {
         let source = "line1\nline2\nline3";
         let line_starts: Vec<usize> = std::iter::once(0)
-            .chain(source.char_indices().filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }))
+            .chain(
+                source
+                    .char_indices()
+                    .filter_map(|(idx, ch)| if ch == '\n' { Some(idx + 1) } else { None }),
+            )
             .chain(std::iter::once(source.len()))
             .collect();
         let source_lines: Vec<&str> = source.lines().collect();
-        
+
         // Offset at EOF should be last line, last column
         let result = byte_offset_to_position(&line_starts, &source_lines, source.len());
         assert_eq!(result, Some((2, 5))); // line3 has 5 chars
@@ -1592,9 +1689,9 @@ mod tests {
 
     #[test]
     fn test_parse_file_patch_json_insert_after_line() {
-        use unfault_core::types::{FilePatch, PatchHunk, PatchRange};
         use unfault_core::parse::ast::FileId;
-        
+        use unfault_core::types::{FilePatch, PatchHunk, PatchRange};
+
         let patch = FilePatch {
             file_id: FileId(1),
             hunks: vec![
@@ -1608,10 +1705,10 @@ mod tests {
                 },
             ],
         };
-        
+
         let json = serde_json::to_string(&patch).unwrap();
         let parsed: FilePatch = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(parsed.hunks.len(), 2);
         match &parsed.hunks[0].range {
             PatchRange::InsertAfterLine { line } => assert_eq!(*line, 1),
@@ -1625,9 +1722,9 @@ mod tests {
 
     #[test]
     fn test_parse_file_patch_json_insert_before_line() {
-        use unfault_core::types::{FilePatch, PatchHunk, PatchRange};
         use unfault_core::parse::ast::FileId;
-        
+        use unfault_core::types::{FilePatch, PatchHunk, PatchRange};
+
         let patch = FilePatch {
             file_id: FileId(1),
             hunks: vec![PatchHunk {
@@ -1635,10 +1732,10 @@ mod tests {
                 replacement: "# Comment\n".to_string(),
             }],
         };
-        
+
         let json = serde_json::to_string(&patch).unwrap();
         let parsed: FilePatch = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(parsed.hunks.len(), 1);
         match &parsed.hunks[0].range {
             PatchRange::InsertBeforeLine { line } => assert_eq!(*line, 3),
@@ -1648,9 +1745,9 @@ mod tests {
 
     #[test]
     fn test_parse_file_patch_json_replace_bytes() {
-        use unfault_core::types::{FilePatch, PatchHunk, PatchRange};
         use unfault_core::parse::ast::FileId;
-        
+        use unfault_core::types::{FilePatch, PatchHunk, PatchRange};
+
         let patch = FilePatch {
             file_id: FileId(1),
             hunks: vec![PatchHunk {
@@ -1658,10 +1755,10 @@ mod tests {
                 replacement: "new_content".to_string(),
             }],
         };
-        
+
         let json = serde_json::to_string(&patch).unwrap();
         let parsed: FilePatch = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(parsed.hunks.len(), 1);
         match &parsed.hunks[0].range {
             PatchRange::ReplaceBytes { start, end } => {

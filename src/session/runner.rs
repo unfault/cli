@@ -172,14 +172,8 @@ impl<'a> SessionRunner<'a> {
         collected_files: &CollectedFiles,
         dimension: &str,
     ) -> Result<SessionRunResponse, ApiError> {
-        self.run_analysis_with_headers(
-            session_id,
-            workspace_info,
-            collected_files,
-            dimension,
-            None,
-        )
-        .await
+        self.run_analysis_with_headers(session_id, workspace_info, collected_files, dimension, None)
+            .await
     }
 
     /// Run analysis on a session with file headers for complete graph building.
@@ -565,13 +559,8 @@ impl<'a> SessionRunner<'a> {
         collected_files: &CollectedFiles,
         dimension: &str,
     ) -> Result<SessionResult, ApiError> {
-        self.execute_with_dimensions_and_graph(
-            workspace_info,
-            collected_files,
-            &[dimension],
-            true,
-        )
-        .await
+        self.execute_with_dimensions_and_graph(workspace_info, collected_files, &[dimension], true)
+            .await
     }
 }
 

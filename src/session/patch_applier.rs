@@ -86,8 +86,13 @@ impl Patch {
         // Use end_line/end_column if available, otherwise default to same line as start
         let end_line = finding.end_line.unwrap_or(finding.line);
         let end_column = finding.end_column.unwrap_or(finding.column + 1);
-        let (byte_start, byte_end) =
-            line_col_to_bytes(file_content, finding.line, finding.column, end_line, end_column)?;
+        let (byte_start, byte_end) = line_col_to_bytes(
+            file_content,
+            finding.line,
+            finding.column,
+            end_line,
+            end_column,
+        )?;
 
         Some(Patch {
             byte_start,
@@ -115,7 +120,9 @@ fn extract_replacement_from_diff(diff: &str) -> Option<String> {
 
     if additions.is_empty() {
         // Check if this is a deletion-only diff
-        let has_deletions = diff.lines().any(|l| l.starts_with('-') && !l.starts_with("---"));
+        let has_deletions = diff
+            .lines()
+            .any(|l| l.starts_with('-') && !l.starts_with("---"));
         if has_deletions {
             // Pure deletion - replace with empty string
             return Some(String::new());
@@ -436,11 +443,7 @@ mod tests {
     fn test_patch_applier_multiple_patches_same_file() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.py");
-        fs::write(
-            &file_path,
-            "requests.get(url1)\nrequests.get(url2)\n",
-        )
-        .unwrap();
+        fs::write(&file_path, "requests.get(url1)\nrequests.get(url2)\n").unwrap();
 
         let applier = PatchApplier::new(temp_dir.path());
 

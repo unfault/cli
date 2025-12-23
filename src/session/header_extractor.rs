@@ -1,7 +1,7 @@
 //! # Header Extractor
 //!
 //! Extracts import headers from source files for complete dependency graph building.
-//! 
+//!
 //! The header section is the portion of a file that contains import/use statements,
 //! typically at the top of the file. Extracting only headers allows us to build a
 //! complete import graph without sending entire file contents.
@@ -103,7 +103,7 @@ impl HeaderExtractor {
                 match fs::read_to_string(path) {
                     Ok(contents) => {
                         let header = self.extract_header(&contents, *language);
-                        
+
                         // Skip files with no imports
                         if header.is_empty() {
                             return None;
@@ -210,7 +210,7 @@ impl HeaderExtractor {
             {
                 header_started = true;
                 header_lines.push(line.to_string());
-                
+
                 // Handle multi-line imports with parentheses
                 if trimmed.contains('(') && !trimmed.contains(')') {
                     // Continue until we find closing paren
@@ -299,7 +299,7 @@ impl HeaderExtractor {
             // Include use statements (handle multi-line with braces)
             if trimmed.starts_with("use ") {
                 header_lines.push(line.to_string());
-                
+
                 // Count braces for multi-line use
                 for c in trimmed.chars() {
                     if c == '{' {
@@ -308,7 +308,7 @@ impl HeaderExtractor {
                         brace_depth -= 1;
                     }
                 }
-                
+
                 // Continue if braces not balanced
                 if brace_depth > 0 {
                     for next_line in contents.lines().skip(i + 1) {
@@ -518,7 +518,7 @@ impl HeaderExtractor {
             // Include import statements
             if trimmed.starts_with("import ") {
                 header_lines.push(line.to_string());
-                
+
                 // Handle multi-line imports
                 if (trimmed.contains('{') && !trimmed.contains('}'))
                     || (!trimmed.contains("from") && !trimmed.ends_with(';'))
@@ -535,9 +535,9 @@ impl HeaderExtractor {
             }
 
             // Include require statements
-            if trimmed.contains("require(") 
-                && (trimmed.starts_with("const ") 
-                    || trimmed.starts_with("let ") 
+            if trimmed.contains("require(")
+                && (trimmed.starts_with("const ")
+                    || trimmed.starts_with("let ")
                     || trimmed.starts_with("var "))
             {
                 header_lines.push(line.to_string());
@@ -928,22 +928,10 @@ public class Main {
     #[test]
     fn test_extract_all_parallel() {
         let temp_dir = TempDir::new().unwrap();
-        
-        let py_path = create_test_file(
-            temp_dir.path(),
-            "main.py",
-            "import os\n\ndef main(): pass",
-        );
-        let rs_path = create_test_file(
-            temp_dir.path(),
-            "main.rs",
-            "use std::io;\n\nfn main() {}",
-        );
-        let no_import_path = create_test_file(
-            temp_dir.path(),
-            "empty.py",
-            "def func(): pass",
-        );
+
+        let py_path = create_test_file(temp_dir.path(), "main.py", "import os\n\ndef main(): pass");
+        let rs_path = create_test_file(temp_dir.path(), "main.rs", "use std::io;\n\nfn main() {}");
+        let no_import_path = create_test_file(temp_dir.path(), "empty.py", "def func(): pass");
 
         let source_files = vec![
             (py_path, Language::Python),
@@ -956,7 +944,7 @@ public class Main {
 
         // Should have 2 headers (empty.py has no imports)
         assert_eq!(headers.len(), 2);
-        
+
         let py_header = headers.iter().find(|h| h.path == "main.py");
         assert!(py_header.is_some());
         assert!(py_header.unwrap().header.contains("import os"));
@@ -973,10 +961,10 @@ public class Main {
             max_header_bytes: 8 * 1024,
         };
         let extractor = HeaderExtractor::with_config("/tmp", config);
-        
+
         let contents = "import a\nimport b\nimport c\nimport d\nimport e\n";
         let header = extractor.extract_header(contents, Language::Python);
-        
+
         // Should only get first 3 lines
         assert!(header.contains("import a"));
         assert!(header.contains("import b"));
@@ -991,10 +979,10 @@ public class Main {
             max_header_bytes: 20, // Very small limit
         };
         let extractor = HeaderExtractor::with_config("/tmp", config);
-        
+
         let contents = "import verylongmodulename\nimport another\n";
         let header = extractor.extract_header(contents, Language::Python);
-        
+
         // Should be truncated
         assert!(header.len() <= 20);
     }

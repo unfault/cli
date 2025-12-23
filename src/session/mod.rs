@@ -45,12 +45,12 @@ pub mod workspace_id;
 pub mod workspace_settings;
 
 pub use file_collector::FileCollector;
-pub use graph_builder::{build_local_graph, SerializableGraph};
+pub use graph_builder::{SerializableGraph, build_local_graph};
 pub use header_extractor::{FileHeader, HeaderExtractor, HeaderExtractorConfig};
-pub use ir_builder::{build_ir, build_ir_cached, IrBuildResult};
-pub use semantics_cache::{CacheStats, SemanticsCache};
+pub use ir_builder::{IrBuildResult, build_ir, build_ir_cached};
 pub use patch_applier::{PatchApplier, PatchStats};
 pub use runner::SessionRunner;
+pub use semantics_cache::{CacheStats, SemanticsCache};
 pub use workspace::{
     DetectedFramework, ProgressCallback, ScanProgress, WorkspaceInfo, WorkspaceScanner,
 };

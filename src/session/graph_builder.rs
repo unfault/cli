@@ -9,14 +9,14 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use unfault_core::graph::{build_code_graph, CodeGraph, GraphNode, GraphEdgeKind};
+use unfault_core::graph::{CodeGraph, GraphEdgeKind, GraphNode, build_code_graph};
 use unfault_core::parse::ast::FileId;
-use unfault_core::parse::{python, go, rust as rust_parse, typescript};
-use unfault_core::semantics::python::model::PyFileSemantics;
+use unfault_core::parse::{go, python, rust as rust_parse, typescript};
+use unfault_core::semantics::SourceSemantics;
 use unfault_core::semantics::go::model::GoFileSemantics;
+use unfault_core::semantics::python::model::PyFileSemantics;
 use unfault_core::semantics::rust::{build_rust_semantics, model::RustFileSemantics};
 use unfault_core::semantics::typescript::model::TsFileSemantics;
-use unfault_core::semantics::SourceSemantics;
 use unfault_core::types::context::{Language, SourceFile};
 
 /// A serializable representation of the code graph for sending to the API.
@@ -270,7 +270,12 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
     for node_idx in graph.graph.node_indices() {
         let node = &graph.graph[node_idx];
         match node {
-            GraphNode::File { file_id, path, language, .. } => {
+            GraphNode::File {
+                file_id,
+                path,
+                language,
+                ..
+            } => {
                 file_id_to_path.insert(*file_id, path.clone());
                 files.push(FileNode {
                     path: path.clone(),
@@ -287,10 +292,7 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
                 http_path,
             } => {
                 // Find the file path for this function
-                let file_path = file_id_to_path
-                    .get(file_id)
-                    .cloned()
-                    .unwrap_or_default();
+                let file_path = file_id_to_path.get(file_id).cloned().unwrap_or_default();
 
                 functions.push(FunctionNode {
                     name: name.clone(),
@@ -447,11 +449,20 @@ mod tests {
 
     #[test]
     fn test_detect_language() {
-        assert_eq!(detect_language(Path::new("test.py")), Some(Language::Python));
+        assert_eq!(
+            detect_language(Path::new("test.py")),
+            Some(Language::Python)
+        );
         assert_eq!(detect_language(Path::new("test.go")), Some(Language::Go));
         assert_eq!(detect_language(Path::new("test.rs")), Some(Language::Rust));
-        assert_eq!(detect_language(Path::new("test.ts")), Some(Language::Typescript));
-        assert_eq!(detect_language(Path::new("test.tsx")), Some(Language::Typescript));
+        assert_eq!(
+            detect_language(Path::new("test.ts")),
+            Some(Language::Typescript)
+        );
+        assert_eq!(
+            detect_language(Path::new("test.tsx")),
+            Some(Language::Typescript)
+        );
         assert_eq!(detect_language(Path::new("test.txt")), None);
     }
 
@@ -469,22 +480,26 @@ mod tests {
     fn test_build_local_graph_python_file() {
         let temp_dir = TempDir::new().unwrap();
         let py_file = temp_dir.path().join("test.py");
-        fs::write(&py_file, r#"
+        fs::write(
+            &py_file,
+            r#"
 def hello():
     pass
 
 def caller():
     hello()
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let result = build_local_graph(temp_dir.path(), None, false);
         assert!(result.is_ok());
         let graph = result.unwrap();
-        
+
         // Should have 1 file
         assert_eq!(graph.files.len(), 1);
         assert_eq!(graph.files[0].path, "test.py");
-        
+
         // Should have 2 functions
         assert_eq!(graph.functions.len(), 2);
         let func_names: Vec<&str> = graph.functions.iter().map(|f| f.name.as_str()).collect();
@@ -495,30 +510,38 @@ def caller():
     #[test]
     fn test_build_local_graph_with_imports() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create a module structure
         let src_dir = temp_dir.path().join("src");
         fs::create_dir(&src_dir).unwrap();
-        
-        fs::write(src_dir.join("main.py"), r#"
+
+        fs::write(
+            src_dir.join("main.py"),
+            r#"
 from src.utils import helper
 
 def main():
     helper()
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
-        fs::write(src_dir.join("utils.py"), r#"
+        fs::write(
+            src_dir.join("utils.py"),
+            r#"
 def helper():
     print("hello")
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let result = build_local_graph(temp_dir.path(), None, false);
         assert!(result.is_ok());
         let graph = result.unwrap();
-        
+
         // Should have 2 files
         assert_eq!(graph.files.len(), 2);
-        
+
         // Should have functions
         assert!(graph.functions.len() >= 2);
     }
@@ -527,17 +550,21 @@ def helper():
     fn test_serializable_graph_json() {
         let temp_dir = TempDir::new().unwrap();
         let py_file = temp_dir.path().join("test.py");
-        fs::write(&py_file, r#"
+        fs::write(
+            &py_file,
+            r#"
 import requests
 
 def fetch_data():
     return requests.get("http://example.com")
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let result = build_local_graph(temp_dir.path(), None, false);
         assert!(result.is_ok());
         let graph = result.unwrap();
-        
+
         // Should be serializable to JSON
         let json = serde_json::to_string(&graph);
         assert!(json.is_ok());

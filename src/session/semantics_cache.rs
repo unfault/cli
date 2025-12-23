@@ -90,26 +90,32 @@ impl SemanticsCache {
     ///
     /// Creates `.unfault/cache/semantics/` if it doesn't exist.
     pub fn open(workspace_path: &Path) -> Result<Self> {
-        let cache_dir = workspace_path.join(".unfault").join("cache").join("semantics");
-        
+        let cache_dir = workspace_path
+            .join(".unfault")
+            .join("cache")
+            .join("semantics");
+
         // Create cache directory if it doesn't exist
         if !cache_dir.exists() {
-            fs::create_dir_all(&cache_dir)
-                .context("Failed to create cache directory")?;
+            fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
         }
-        
+
         // Check cache version
         let meta_path = cache_dir.join("meta.json");
         let should_clear = if meta_path.exists() {
-            let meta: CacheMeta = serde_json::from_reader(
-                BufReader::new(fs::File::open(&meta_path)?)
-            ).unwrap_or(CacheMeta { version: 0, created_at: 0 });
-            
+            let meta: CacheMeta = serde_json::from_reader(BufReader::new(fs::File::open(
+                &meta_path,
+            )?))
+            .unwrap_or(CacheMeta {
+                version: 0,
+                created_at: 0,
+            });
+
             meta.version != CACHE_VERSION
         } else {
             false
         };
-        
+
         if should_clear {
             // Clear old cache
             for entry in fs::read_dir(&cache_dir)? {
@@ -119,7 +125,7 @@ impl SemanticsCache {
                 }
             }
         }
-        
+
         // Write current version
         let meta = CacheMeta {
             version: CACHE_VERSION,
@@ -130,7 +136,7 @@ impl SemanticsCache {
         };
         let meta_file = fs::File::create(&meta_path)?;
         serde_json::to_writer(BufWriter::new(meta_file), &meta)?;
-        
+
         // Build index from existing cache files
         let mut index = HashMap::new();
         for entry in fs::read_dir(&cache_dir)? {
@@ -145,15 +151,18 @@ impl SemanticsCache {
                         u64::from_str_radix(parts[0], 16),
                         u64::from_str_radix(parts[1], 16),
                     ) {
-                        index.insert(path_hash, CacheEntry {
-                            cache_path: path.clone(),
-                            content_hash,
-                        });
+                        index.insert(
+                            path_hash,
+                            CacheEntry {
+                                cache_path: path.clone(),
+                                content_hash,
+                            },
+                        );
                     }
                 }
             }
         }
-        
+
         Ok(Self {
             cache_dir,
             index,
@@ -161,7 +170,7 @@ impl SemanticsCache {
             enabled: true,
         })
     }
-    
+
     /// Create a disabled cache (always returns None for lookups)
     pub fn disabled() -> Self {
         Self {
@@ -171,12 +180,12 @@ impl SemanticsCache {
             enabled: false,
         }
     }
-    
+
     /// Compute the content hash of file content.
     pub fn hash_content(content: &str) -> u64 {
         xxh3_64(content.as_bytes())
     }
-    
+
     /// Try to get cached semantics for a file.
     ///
     /// Returns `Some(semantics)` if the file is in the cache and the content
@@ -185,10 +194,10 @@ impl SemanticsCache {
         if !self.enabled {
             return None;
         }
-        
+
         // Compute path hash for lookup
         let path_hash = xxh3_64(relative_path.as_bytes());
-        
+
         let entry = match self.index.get(&path_hash) {
             Some(e) => e,
             None => {
@@ -197,17 +206,17 @@ impl SemanticsCache {
                 return None;
             }
         };
-        
+
         // Check if content hash matches
         if entry.content_hash != content_hash {
             self.stats.misses += 1;
             return None;
         }
-        
+
         // Try to read from cache file
         let file = fs::File::open(&entry.cache_path).ok()?;
         let reader = BufReader::new(file);
-        
+
         match rmp_serde::from_read(reader) {
             Ok(semantics) => {
                 self.stats.hits += 1;
@@ -220,52 +229,58 @@ impl SemanticsCache {
             }
         }
     }
-    
+
     /// Store semantics in the cache.
     pub fn set(&mut self, relative_path: &str, content_hash: u64, semantics: &SourceSemantics) {
         if !self.enabled {
             return;
         }
-        
+
         // Compute path hash for indexing
         let path_hash = xxh3_64(relative_path.as_bytes());
-        
+
         // Generate cache filename: <content_hash>_<path_hash>_<truncated_path>.msgpack
         // We include the truncated path for debugging/readability
         let safe_path = relative_path.replace(['/', '\\', ':'], "_");
         let truncated_path: String = safe_path.chars().take(50).collect();
-        let filename = format!("{:016x}_{:016x}_{}.msgpack", content_hash, path_hash, truncated_path);
+        let filename = format!(
+            "{:016x}_{:016x}_{}.msgpack",
+            content_hash, path_hash, truncated_path
+        );
         let cache_path = self.cache_dir.join(&filename);
-        
+
         // Serialize and write
         if let Ok(file) = fs::File::create(&cache_path) {
             let mut writer = BufWriter::new(file);
             if rmp_serde::encode::write(&mut writer, semantics).is_ok() {
                 // Update index using path_hash as key
-                self.index.insert(path_hash, CacheEntry {
-                    cache_path,
-                    content_hash,
-                });
+                self.index.insert(
+                    path_hash,
+                    CacheEntry {
+                        cache_path,
+                        content_hash,
+                    },
+                );
             }
         }
     }
-    
+
     /// Record a cache miss (for stats tracking when we skip the cache lookup)
     pub fn record_miss(&mut self) {
         self.stats.misses += 1;
     }
-    
+
     /// Get cache statistics.
     pub fn stats(&self) -> &CacheStats {
         &self.stats
     }
-    
+
     /// Clear the cache.
     pub fn clear(&self) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
-        
+
         for entry in fs::read_dir(&self.cache_dir)? {
             let entry = entry?;
             if entry.path().extension().map_or(false, |e| e == "msgpack") {
@@ -284,7 +299,7 @@ mod tests {
     use unfault_core::parse::python;
     use unfault_core::semantics::python::model::PyFileSemantics;
     use unfault_core::types::context::{Language, SourceFile};
-    
+
     /// Create a simple Python semantics for testing
     fn create_test_semantics() -> SourceSemantics {
         let source_file = SourceFile {
@@ -296,69 +311,69 @@ mod tests {
         let sem = PyFileSemantics::from_parsed(&parsed);
         SourceSemantics::Python(sem)
     }
-    
+
     #[test]
     fn test_hash_content() {
         let hash1 = SemanticsCache::hash_content("hello world");
         let hash2 = SemanticsCache::hash_content("hello world");
         let hash3 = SemanticsCache::hash_content("hello world!");
-        
+
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
     }
-    
+
     #[test]
     fn test_cache_miss_on_empty() {
         let temp_dir = TempDir::new().unwrap();
         let mut cache = SemanticsCache::open(temp_dir.path()).unwrap();
-        
+
         let result = cache.get("test.py", 12345);
         assert!(result.is_none());
         assert_eq!(cache.stats().misses, 1);
     }
-    
+
     #[test]
     fn test_cache_hit() {
         let temp_dir = TempDir::new().unwrap();
         let mut cache = SemanticsCache::open(temp_dir.path()).unwrap();
-        
+
         let semantics = create_test_semantics();
         let content_hash = 12345u64;
-        
+
         cache.set("test.py", content_hash, &semantics);
-        
+
         let result = cache.get("test.py", content_hash);
         assert!(result.is_some());
         assert_eq!(cache.stats().hits, 1);
     }
-    
+
     #[test]
     fn test_cache_miss_on_hash_change() {
         let temp_dir = TempDir::new().unwrap();
         let mut cache = SemanticsCache::open(temp_dir.path()).unwrap();
-        
+
         let semantics = create_test_semantics();
-        
+
         cache.set("test.py", 12345, &semantics);
-        
+
         // Different hash should miss
         let result = cache.get("test.py", 99999);
         assert!(result.is_none());
         assert_eq!(cache.stats().misses, 1);
     }
-    
+
     #[test]
     fn test_cache_persistence() {
         let temp_dir = TempDir::new().unwrap();
         let content_hash = 12345u64;
-        
+
         // Write to cache
         {
             let mut cache = SemanticsCache::open(temp_dir.path()).unwrap();
             let semantics = create_test_semantics();
             cache.set("test.py", content_hash, &semantics);
         }
-        
+
         // Read from cache with new instance
         {
             let mut cache = SemanticsCache::open(temp_dir.path()).unwrap();
@@ -366,7 +381,7 @@ mod tests {
             assert!(result.is_some());
         }
     }
-    
+
     #[test]
     fn test_hit_rate() {
         let stats = CacheStats {
@@ -376,14 +391,14 @@ mod tests {
         };
         assert!((stats.hit_rate() - 80.0).abs() < 0.01);
     }
-    
+
     #[test]
     fn test_disabled_cache() {
         let mut cache = SemanticsCache::disabled();
-        
+
         let semantics = create_test_semantics();
         cache.set("test.py", 12345, &semantics);
-        
+
         let result = cache.get("test.py", 12345);
         assert!(result.is_none());
     }

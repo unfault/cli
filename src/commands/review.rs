@@ -41,8 +41,8 @@ use crate::errors::{
 };
 use crate::exit_codes::*;
 use crate::session::{
-    build_ir_cached, compute_workspace_id, get_git_remote, FileCollector, PatchApplier, ScanProgress,
-    SessionRunner, WorkspaceScanner,
+    FileCollector, PatchApplier, ScanProgress, SessionRunner, WorkspaceScanner, build_ir_cached,
+    compute_workspace_id, get_git_remote,
 };
 
 /// Display a subscription warning banner (non-blocking nudge).
@@ -377,11 +377,7 @@ async fn execute_client_parse(
         Ok(result) => result,
         Err(e) => {
             pb.finish_and_clear();
-            eprintln!(
-                "{} Failed to parse source files: {}",
-                "✗".red().bold(),
-                e
-            );
+            eprintln!("{} Failed to parse source files: {}", "✗".red().bold(), e);
             return Ok(EXIT_CONFIG_ERROR);
         }
     };
@@ -390,7 +386,7 @@ async fn execute_client_parse(
     let ir = build_result.ir;
     let cache_stats = build_result.cache_stats;
     let file_count = ir.file_count();
-    
+
     if args.verbose {
         let stats = ir.graph.stats();
         eprintln!(
@@ -418,11 +414,7 @@ async fn execute_client_parse(
         Ok(json) => json,
         Err(e) => {
             pb.finish_and_clear();
-            eprintln!(
-                "{} Failed to serialize IR: {}",
-                "✗".red().bold(),
-                e
-            );
+            eprintln!("{} Failed to serialize IR: {}", "✗".red().bold(), e);
             return Ok(EXIT_CONFIG_ERROR);
         }
     };
@@ -473,11 +465,7 @@ async fn execute_client_parse(
         .collect();
 
     if args.verbose {
-        eprintln!(
-            "\n{} Detected profiles: {:?}",
-            "DEBUG".yellow(),
-            profiles
-        );
+        eprintln!("\n{} Detected profiles: {:?}", "DEBUG".yellow(), profiles);
     }
 
     let api_start = Instant::now();
@@ -532,7 +520,7 @@ async fn execute_client_parse(
     }
 
     let finding_count = response.findings.len();
-    
+
     if args.verbose {
         eprintln!(
             "\n{} Analysis response: {} findings from {} files",
@@ -577,7 +565,11 @@ fn apply_ir_patches(
                 stats.applied.to_string().bright_green(),
                 if stats.applied == 1 { "" } else { "es" },
                 stats.modified_files.len().to_string().bright_green(),
-                if stats.modified_files.len() == 1 { "" } else { "s" }
+                if stats.modified_files.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
             );
         }
     } else if stats.applied > 0 {
@@ -588,7 +580,11 @@ fn apply_ir_patches(
             stats.applied.to_string().bright_green(),
             if stats.applied == 1 { "" } else { "es" },
             stats.modified_files.len().to_string().bright_green(),
-            if stats.modified_files.len() == 1 { "" } else { "s" }
+            if stats.modified_files.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
         for file in &stats.modified_files {
             eprintln!("  {} {}", "→".dimmed(), file);

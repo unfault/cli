@@ -34,16 +34,16 @@ use anyhow::Result;
 use colored::Colorize;
 use rayon::prelude::*;
 
+use unfault_core::IntermediateRepresentation;
 use unfault_core::graph::build_code_graph;
 use unfault_core::parse::ast::FileId;
 use unfault_core::parse::{go, python, rust as rust_parse, typescript};
+use unfault_core::semantics::SourceSemantics;
 use unfault_core::semantics::go::model::GoFileSemantics;
 use unfault_core::semantics::python::model::PyFileSemantics;
 use unfault_core::semantics::rust::model::RustFileSemantics;
 use unfault_core::semantics::typescript::model::TsFileSemantics;
-use unfault_core::semantics::SourceSemantics;
 use unfault_core::types::context::{Language, SourceFile};
-use unfault_core::IntermediateRepresentation;
 
 use super::semantics_cache::{CacheStats, SemanticsCache};
 
@@ -294,13 +294,13 @@ pub fn build_ir_cached(
     verbose: bool,
 ) -> Result<IrBuildResult> {
     let _total_start = Instant::now();
-    
+
     // Open or create the cache
     let cache_start = Instant::now();
     let cache = SemanticsCache::open(workspace_path)?;
     let cache = Arc::new(Mutex::new(cache));
     let cache_open_ms = cache_start.elapsed().as_millis();
-    
+
     // Determine files to process
     let discover_start = Instant::now();
     let files = match file_paths {
@@ -311,7 +311,12 @@ pub fn build_ir_cached(
 
     if verbose {
         eprintln!("Building IR from {} files (with cache)...", files.len());
-        eprintln!("{} Cache open: {}ms, File discovery: {}ms", "TIMING".yellow(), cache_open_ms, discover_ms);
+        eprintln!(
+            "{} Cache open: {}ms, File discovery: {}ms",
+            "TIMING".yellow(),
+            cache_open_ms,
+            discover_ms
+        );
     }
 
     // Parse and extract semantics from each file in parallel, using cache
@@ -341,10 +346,10 @@ pub fn build_ir_cached(
                 .to_string();
 
             let file_id = FileId((index + 1) as u64);
-            
+
             // Compute content hash
             let content_hash = SemanticsCache::hash_content(&content);
-            
+
             // Try cache first
             {
                 let mut cache_guard = cache.lock().unwrap();
@@ -554,7 +559,10 @@ mod tests {
 
     #[test]
     fn test_detect_language() {
-        assert_eq!(detect_language(Path::new("test.py")), Some(Language::Python));
+        assert_eq!(
+            detect_language(Path::new("test.py")),
+            Some(Language::Python)
+        );
         assert_eq!(detect_language(Path::new("test.go")), Some(Language::Go));
         assert_eq!(detect_language(Path::new("test.rs")), Some(Language::Rust));
         assert_eq!(
