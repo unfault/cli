@@ -702,56 +702,67 @@ fn format_severity_breakdown(summary: &SeveritySummary) -> String {
     }
 }
 
+/// Max width for terminal output (80 chars standard)
+const MAX_WIDTH: usize = 80;
+
+/// Truncate a string to fit within max_len characters, adding "..." if truncated.
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else if max_len <= 3 {
+        "...".to_string()
+    } else {
+        format!("{}...", &s[..max_len - 3])
+    }
+}
+
 fn render_session_overview(context: &ReviewOutputContext) {
     // Line 1: Header with workspace name and total time
     println!(
-        "{} {} {}",
+        "{} Analyzing {}... {}",
         "→".cyan().bold(),
-        format!("Analyzing {}...", context.workspace_label).bright_white(),
+        context.workspace_label.bright_white(),
         format!("{}ms", context.elapsed_ms).dimmed()
     );
 
+    // Line 2: Languages
+    let langs = format_list(&context.languages, ", ");
+    println!("  {}: {}", "Languages".dimmed(), langs.cyan());
+
+    // Line 3: Frameworks
+    let frameworks = format_list(&context.frameworks, ", ");
+    println!("  {}: {}", "Frameworks".dimmed(), frameworks.cyan());
+
+    // Line 4: Dimensions
+    let dims = format_list(&context.dimensions, " · ");
+    println!("  {}: {}", "Dimensions".dimmed(), dims.cyan());
+
+    // Line 5: Profile (if overridden)
     if let Some(profile) = &context.profile {
-        println!(
-            "  {} {}",
-            "PROFILE".dimmed(),
-            profile.cyan()
-        );
+        println!("  {}: {}", "Profile".dimmed(), profile.cyan());
     }
 
-    // Line 2: LANGUAGES and FRAMEWORKS columns
-    println!(
-        "  {} {:24} {} {}",
-        "LANGUAGES".dimmed(),
-        format_list(&context.languages, ", ").cyan(),
-        "FRAMEWORKS".dimmed(),
-        format_list(&context.frameworks, ", ").cyan()
-    );
-
-    // Line 3: DIMENSIONS and FILES REVIEWED
+    // Line 6: Files reviewed with timing
     let file_word = if context.file_count == 1 { "file" } else { "files" };
-    let files_reviewed = format!(
-        "{} {} · parse {}ms · engine {}ms",
-        context.file_count, file_word, context.parse_ms, context.engine_ms
-    );
     println!(
-        "  {} {:24} {} {}",
-        "DIMENSIONS".dimmed(),
-        format_list(&context.dimensions, " · ").cyan(),
-        "FILES REVIEWED".dimmed(),
-        files_reviewed.cyan()
+        "  {}: {} {} · parse {}ms · engine {}ms",
+        "Reviewed".dimmed(),
+        context.file_count.to_string().bright_green(),
+        file_word,
+        context.parse_ms,
+        context.engine_ms
     );
 
-    // Line 4: cache and trace
+    // Line 7: Cache and trace info
     let cache_str = match context.cache_hit_rate {
-        Some(rate) => format!("cache: {:.0}%", rate),
-        None => "cache: —".to_string(),
+        Some(rate) => format!("{:.0}%", rate),
+        None => "—".to_string(),
     };
     println!(
-        "  {} {:48} {} {}",
+        "  {}: {}  {}: {}",
+        "Cache".dimmed(),
         cache_str.dimmed(),
-        "",
-        "trace:".dimmed(),
+        "Trace".dimmed(),
         context.trace_id.dimmed()
     );
 }
@@ -985,6 +996,7 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
         );
 
         // Display each rule as: [rule_id] title (matches landing page)
+        // Format: "   [rule_id] title" - truncate to fit 80 chars
         for (rule_id, rule_findings) in rules_by_id {
             let sample = rule_findings[0];
             let title = if !sample.title.is_empty() {
@@ -995,10 +1007,15 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
                 sample.rule_id.clone()
             };
 
+            // Calculate available space: 80 - "   [" - rule_id - "] " = 80 - 5 - rule_id.len()
+            let prefix_len = 5 + rule_id.len(); // "   [" + rule_id + "] "
+            let max_title_len = MAX_WIDTH.saturating_sub(prefix_len);
+            let truncated_title = truncate(&title, max_title_len);
+
             println!(
                 "   [{}] {}",
                 rule_id.cyan(),
-                title.dimmed()
+                truncated_title.dimmed()
             );
         }
     }
