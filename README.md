@@ -1,8 +1,8 @@
 # Unfault CLI
 
-**A calm reviewer for thoughtful engineers.**
+**A cognitive context engine for thoughtful engineers.**
 
-Unfault analyzes your code for clarity, boundaries, and behavior—highlighting places where decisions matter, before reality does. You write the code. Unfault helps you build it right.
+Unfault helps you understand what your code *means* and *does* — while you're writing it. It reveals the runtime impact of your changes, showing you which routes use a function, what safeguards are (or aren't) in place, and how your code fits into the bigger picture.
 
 [![Crates.io](https://img.shields.io/crates/v/unfault)](https://crates.io/crates/unfault)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -11,14 +11,15 @@ Unfault analyzes your code for clarity, boundaries, and behavior—highlighting 
 
 ## Why Unfault?
 
-Production issues don't announce themselves. That missing timeout? The unhandled edge case? The retry logic that isn't there? They surface at 3 AM, pages deep into an incident.
+Software complexity grows invisibly. That function you just changed? It might be called by five different API routes. That missing timeout? It's three layers deep in a request path with no retry logic.
 
-Unfault catches these patterns early—during development, not during outages. It's a linter for production-readiness, focused on:
+Unfault illuminates these connections. It builds a semantic graph of your codebase and gives you instant answers to questions like:
 
-- **Stability** — HTTP timeouts, circuit breakers, retry patterns
-- **Correctness** — Error handling, boundary conditions, type safety
-- **Performance** — N+1 queries, missing indexes, blocking calls
-- **Scalability** — Resource limits, connection pooling, caching patterns
+- **"Where is this function used?"** — See which routes, handlers, and background jobs depend on it
+- **"What safeguards exist in this path?"** — Know if there's structured logging, retries, or error boundaries
+- **"What's the impact of changing this?"** — Understand the blast radius before you commit
+
+This isn't about warnings or alerts. It's about **cognitive support** — keeping the runtime context visible so you can stay in flow while making informed decisions.
 
 ## Quick Start
 
@@ -29,11 +30,9 @@ cargo install unfault
 # Authenticate
 unfault login
 
-# Analyze your code
+# Understand your codebase
 unfault review
 ```
-
-That's it. Unfault scans your codebase, detects frameworks and languages, and reports findings in seconds.
 
 ## Installation
 
@@ -59,7 +58,7 @@ cargo build --release
 
 ### `unfault login`
 
-Authenticate using secure device flow—no API keys in your terminal history.
+Authenticate using secure device flow — no API keys in your terminal history.
 
 ```bash
 unfault login
@@ -68,13 +67,13 @@ unfault login
 
 ### `unfault review`
 
-Analyze your codebase for production-readiness issues.
+Analyze your codebase and surface behavioral insights.
 
 ```bash
-# Basic output (grouped by severity)
+# Standard analysis (grouped by dimension)
 unfault review
 
-# Full details with suggested fixes
+# Detailed insights with context
 unfault review --output full
 
 # JSON for integration with other tools
@@ -88,25 +87,25 @@ unfault review --dimension stability --dimension performance
 
 | Mode | Description |
 |------|-------------|
-| `basic` | Grouped by severity, rule counts (default) |
+| `basic` | Grouped by dimension, insight counts (default) |
 | `concise` | Summary statistics only |
-| `full` | Detailed findings with diffs |
+| `full` | Detailed insights with suggestions |
 | `json` | Machine-readable output |
-| `sarif` | SARIF 2.1.0 for GitHub Code Scanning / IDE integration |
+| `sarif` | SARIF 2.1.0 for IDE integration |
 
 ### `unfault ask`
 
-Query your project's health using natural language (requires prior `review` sessions).
+Query your codebase using natural language.
 
 ```bash
 # Ask about your codebase
-unfault ask "What are my main stability concerns?"
+unfault ask "What functions lack structured logging?"
 
 # Scope to a specific workspace
-unfault ask "Show recent issues" --workspace wks_abc123
+unfault ask "Show me the critical paths" --workspace wks_abc123
 
 # Get raw context without AI synthesis
-unfault ask "Performance problems" --no-llm
+unfault ask "Which routes have no retry logic?" --no-llm
 ```
 
 Configure an LLM for AI-powered answers:
@@ -121,6 +120,51 @@ unfault config llm anthropic --model claude-3-5-sonnet-latest
 # Local Ollama
 unfault config llm ollama --model llama3.2
 ```
+
+### `unfault graph`
+
+Query the code graph for impact analysis, dependencies, and relationships.
+
+```bash
+# Build/refresh the code graph
+unfault graph refresh
+
+# What's affected if I change this file?
+unfault graph impact auth/middleware.py
+
+# Find files that use a specific library
+unfault graph library requests
+
+# Find external dependencies of a file
+unfault graph deps main.py
+
+# Find the most connected files in the codebase
+unfault graph critical --limit 10
+
+# Get graph statistics
+unfault graph stats
+```
+
+**Understanding the Graph:**
+
+The code graph captures semantic relationships — imports, function calls, route handlers, middleware chains. When you ask "what's affected?", you're not just looking at file imports; you're seeing the full call graph that traces how a change propagates through your system.
+
+### `unfault lsp`
+
+Start the Language Server Protocol server for IDE integration.
+
+```bash
+# Start LSP server (used by VS Code extension)
+unfault lsp
+
+# With verbose logging for debugging
+unfault lsp --verbose
+```
+
+The LSP server provides:
+- **Real-time insights** as you type
+- **Hover information** showing function impact and context
+- **Quick fixes** with contextual suggestions
 
 ### `unfault status`
 
@@ -148,89 +192,45 @@ unfault config llm show
 unfault config llm remove
 ```
 
-### `unfault graph`
+## IDE Integration
 
-Query the code graph for impact analysis, dependencies, and critical files.
+The primary way to use Unfault is through your IDE. The VS Code extension connects to the CLI's LSP server, providing:
 
-```bash
-# Build/refresh the code graph for impact analysis and RAG queries
-unfault graph refresh
+- **Inline context** — Hover over a function to see where it's used and what safeguards exist
+- **File importance** — Status bar shows how central a file is to your codebase
+- **Dependency awareness** — Know which files will be affected by your changes
 
-# What breaks if I change this file?
-unfault graph impact auth/middleware.py
-
-# Find files that use a specific library
-unfault graph library requests
-
-# Find external dependencies of a file
-unfault graph deps main.py
-
-# Find the most critical files in the codebase
-unfault graph critical --limit 10
-
-# Get graph statistics
-unfault graph stats
-```
-
-**Note:** Run `unfault graph refresh` to build or update the code graph before using other graph commands. The graph is stored server-side and persists across sessions.
+Install the extension: [Unfault for VS Code](https://marketplace.visualstudio.com/items?itemName=unfault.unfault-vscode)
 
 ## CI/CD Integration
 
-Unfault is designed for CI pipelines. Use exit codes to gate deployments:
+While Unfault shines in the IDE, it's also valuable in CI pipelines for tracking codebase health:
 
 ```yaml
-# GitHub Actions with Code Scanning (SARIF)
-- name: Run Unfault Analysis
+# GitHub Actions
+- name: Analyze Codebase
   run: unfault review --output sarif > results.sarif
 
-- name: Upload SARIF to GitHub
+- name: Upload to GitHub Code Scanning
   uses: github/codeql-action/upload-sarif@v2
   with:
     sarif_file: results.sarif
-```
-
-```yaml
-# GitHub Actions (simple)
-- name: Production Readiness Check
-  run: unfault review
-  continue-on-error: false
-```
-
-```yaml
-# GitLab CI
-production_check:
-  script:
-    - unfault review --output json > unfault-report.json
-  artifacts:
-    reports:
-      codequality: unfault-report.json
-  allow_failure: false
 ```
 
 ### Exit Codes
 
 | Code | Meaning | Action |
 |------|---------|--------|
-| `0` | Success, no issues | ✅ Proceed |
+| `0` | Success | ✅ Proceed |
 | `1` | General error | 🔍 Check logs |
 | `2` | Configuration error | Run `unfault login` |
 | `3` | Authentication failed | Re-authenticate |
 | `4` | Network error | Check connectivity |
-| `5` | **Findings detected** | 🚨 Review issues |
+| `5` | **Insights detected** | 📊 Review insights |
 | `6` | Invalid input | Check arguments |
 | `7` | Service unavailable | Retry later |
 | `8` | Session error | Retry analysis |
 | `10` | Subscription required | Upgrade plan |
-
-**CI Example: Fail on findings**
-
-```bash
-unfault review
-if [ $? -eq 5 ]; then
-  echo "Production readiness issues found. Blocking deployment."
-  exit 1
-fi
-```
 
 ## Supported Languages & Frameworks
 
@@ -241,7 +241,7 @@ fi
 | Rust | reqwest, hyper, actix-web |
 | TypeScript | Express, fetch, axios |
 
-Unfault automatically detects your stack and applies relevant rules.
+Unfault automatically detects your stack and builds the appropriate semantic graph.
 
 ## Configuration
 
@@ -267,50 +267,43 @@ Configuration is stored in `~/.config/unfault/config.json`:
 | `OPENAI_API_KEY` | OpenAI API key (for `ask` command) |
 | `ANTHROPIC_API_KEY` | Anthropic API key (for `ask` command) |
 
-## What Unfault Finds
+## What Unfault Reveals
 
-### Stability Issues
+### Missing Safeguards
 
 ```python
-# ❌ Missing timeout
+# Unfault shows: "This function has no timeout.
+# Called by: /api/users endpoint, /api/orders endpoint
+# No retry logic in call chain."
 response = httpx.get("https://api.example.com/data")
-
-# ✅ Suggested fix
-response = httpx.get("https://api.example.com/data", timeout=30.0)
 ```
 
-### Error Handling Gaps
+### Error Handling Context
 
 ```go
-// ❌ Ignored error
+// Unfault shows: "Unchecked error.
+// This function is called by: ProcessOrder handler
+// Call chain has no structured logging."
 result, _ := riskyOperation()
-
-// ✅ Suggested fix
-result, err := riskyOperation()
-if err != nil {
-    return fmt.Errorf("risky operation failed: %w", err)
-}
 ```
 
-### Performance Concerns
+### Query Patterns
 
 ```python
-# ❌ N+1 query pattern
+# Unfault shows: "N+1 query pattern detected.
+# This loop is inside: get_user_dashboard route
+# 47 users in average request = 47 extra queries"
 for user in users:
     orders = db.query(Order).filter(Order.user_id == user.id).all()
-
-# ✅ Suggested fix
-orders = db.query(Order).filter(Order.user_id.in_([u.id for u in users])).all()
 ```
 
 ## Philosophy
 
-Unfault is opinionated but not dogmatic. It focuses on patterns that matter in production:
+Unfault is designed around three principles:
 
-- **Fast feedback** — Analysis completes in seconds, not minutes
-- **Actionable fixes** — Every finding includes a suggested patch
-- **Low noise** — Rules are tuned to minimize false positives
-- **Developer-first** — Designed for the terminal, not dashboards
+1. **Context, not warnings** — Information appears when you need it, not as a wall of alerts
+2. **Flow preservation** — Insights are quiet and inline; they don't interrupt your work
+3. **Runtime awareness** — Understand how your code behaves, not just how it's structured
 
 ## Troubleshooting
 
@@ -343,6 +336,6 @@ MIT License. See [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <strong>Write with joy. Ship with clarity.</strong><br>
+  <strong>Understand your code. Stay in flow.</strong><br>
   <a href="https://unfault.dev">unfault.dev</a>
 </p>

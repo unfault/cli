@@ -1,8 +1,8 @@
 //! # LSP Server Command
 //!
 //! Implements the Language Server Protocol (LSP) server for IDE integration.
-//! The LSP server provides real-time diagnostics and code actions by analyzing
-//! code using the same client-side parsing approach as `unfault review`.
+//! The LSP server provides real-time cognitive context by analyzing code using
+//! the same client-side parsing approach as `unfault review`.
 //!
 //! ## Architecture
 //!
@@ -12,6 +12,14 @@
 //! 2. Build IR for the workspace (cached for performance)
 //! 3. Send IR to the Unfault API for analysis
 //! 4. Convert findings to LSP diagnostics with code actions
+//!
+//! ## Features
+//!
+//! - **Function Impact Hovers**: Hover over a function to see where it's used,
+//!   which routes depend on it, and what safeguards exist in the call chain.
+//! - **Real-time Diagnostics**: Inline insights about code behavior and patterns.
+//! - **Quick Fixes**: Code actions to address missing safeguards.
+//! - **File Centrality**: Status bar integration showing file importance.
 //!
 //! ## Project Root Detection
 //!
@@ -61,6 +69,8 @@ use crate::exit_codes::*;
 use crate::session::{WorkspaceScanner, build_ir_cached, compute_workspace_id, get_git_remote};
 
 // Import patch types from unfault-core for parsing patch_json
+use unfault_core::IntermediateRepresentation;
+use unfault_core::graph::GraphNode;
 use unfault_core::types::{FilePatch, PatchRange};
 
 /// Arguments for the LSP command
@@ -129,7 +139,6 @@ struct UnfaultLsp {
     /// Used to convert byte offsets to line/column positions when generating edits
     document_cache: scc::HashMap<Url, String>,
     /// Cached function info (name and range) for hover, keyed by document URI
-    #[allow(dead_code)]
     function_cache: DashMap<Url, Vec<FunctionInfo>>,
     /// Cached file centrality data for the workspace
     centrality_cache: Arc<tokio::sync::RwLock<Option<Vec<FileCentrality>>>>,
@@ -178,7 +187,22 @@ impl UnfaultLsp {
     }
 
     /// Analyze a document and publish diagnostics
-    async fn analyze_document(&self, uri: &Url, text: &str, version: i32) {
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - The document URI
+    /// * `text` - The document content
+    /// * `version` - Document version for diagnostics
+    /// * `prebuilt_ir` - Optional pre-built IR to avoid rebuilding. If provided, skips the
+    ///   `build_ir_cached` call which is expensive. Used by `did_open` to reuse the IR
+    ///   already built for local dependency computation.
+    async fn analyze_document(
+        &self,
+        uri: &Url,
+        text: &str,
+        version: i32,
+        prebuilt_ir: Option<IntermediateRepresentation>,
+    ) {
         self.log_debug(&format!("Analyzing document: {}", uri));
 
         // Get file path from URI
@@ -222,25 +246,33 @@ impl UnfaultLsp {
             }
         };
 
-        // Build IR for the project (cached)
-        let build_result = match build_ir_cached(&project_root, None, self.verbose) {
-            Ok(result) => result,
-            Err(e) => {
-                let msg = format!("Failed to build IR: {}", e);
-                self.log_debug(&msg);
-                self.client.show_message(MessageType::WARNING, msg).await;
-                return;
+        // Use pre-built IR if provided, otherwise build it (with caching)
+        let ir = match prebuilt_ir {
+            Some(ir) => {
+                self.log_debug("Using pre-built IR (skipping rebuild)");
+                ir
+            }
+            None => {
+                match build_ir_cached(&project_root, None, self.verbose) {
+                    Ok(result) => result.ir,
+                    Err(e) => {
+                        let msg = format!("Failed to build IR: {}", e);
+                        self.log_debug(&msg);
+                        self.client.show_message(MessageType::WARNING, msg).await;
+                        return;
+                    }
+                }
             }
         };
 
         // Check if IR is too large (warn at 5MB, fail at 10MB)
-        let ir_size = build_result.ir.semantics.len();
+        let ir_size = ir.semantics.len();
         if ir_size > 500 {
             self.log_debug(&format!("Large project: {} files", ir_size));
         }
 
         // Serialize IR
-        let ir_json = match serde_json::to_string(&build_result.ir) {
+        let ir_json = match serde_json::to_string(&ir) {
             Ok(json) => json,
             Err(e) => {
                 let msg = format!("Failed to serialize IR: {}", e);
@@ -906,6 +938,11 @@ impl UnfaultLsp {
     }
 
     /// Get files that depend on a given file using the impact analysis API
+    ///
+    /// Note: This method is currently unused as we prefer computing dependencies
+    /// locally from the IR graph (compute_local_dependencies). It's kept for
+    /// potential future use when API-based dependency data is needed.
+    #[allow(dead_code)]
     async fn get_file_dependencies(&self, file_path: &str) -> Option<FileDependenciesNotification> {
         let api_key = self.config.as_ref()?.api_key.clone();
         let workspace_id = self.workspace_id.read().await.clone()?;
@@ -965,7 +1002,101 @@ impl UnfaultLsp {
         })
     }
 
-    #[allow(dead_code)]
+    /// Compute file dependencies directly from the local IR graph.
+    ///
+    /// This method extracts dependency information from the locally-built IR graph
+    /// without needing to query the API. This is essential for showing dependencies
+    /// immediately when a project is first opened, before any API session exists.
+    ///
+    /// # Arguments
+    ///
+    /// * `ir` - The IntermediateRepresentation containing the code graph
+    /// * `file_path` - Relative path to the file being analyzed
+    ///
+    /// # Returns
+    ///
+    /// A `FileDependenciesNotification` with all files that import the given file.
+    fn compute_local_dependencies(
+        &self,
+        ir: &IntermediateRepresentation,
+        file_path: &str,
+    ) -> Option<FileDependenciesNotification> {
+        let graph = &ir.graph;
+
+        // Find the file node by path
+        let file_idx = graph.find_file_by_path(file_path)?;
+        
+        // Get the file_id from the node
+        let file_id = match &graph.graph[file_idx] {
+            GraphNode::File { file_id, .. } => *file_id,
+            _ => return None,
+        };
+
+        // Get direct importers
+        let direct_importer_ids = graph.get_importers(file_id);
+        
+        // Convert FileIds to paths
+        let direct_dependents: Vec<String> = direct_importer_ids
+            .iter()
+            .filter_map(|&fid| {
+                let idx = graph.file_nodes.get(&fid)?;
+                if let GraphNode::File { path, .. } = &graph.graph[*idx] {
+                    Some(path.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Get transitive importers (up to depth 3 for consistency with API)
+        let transitive = graph.get_transitive_importers(file_id, 3);
+        let all_dependents: Vec<String> = transitive
+            .iter()
+            .filter_map(|&(fid, _depth)| {
+                let idx = graph.file_nodes.get(&fid)?;
+                if let GraphNode::File { path, .. } = &graph.graph[*idx] {
+                    Some(path.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let direct_count = direct_dependents.len();
+        let total_count = all_dependents.len() as i32;
+
+        // Generate human-readable summary
+        let summary = if total_count == 0 {
+            "No other files depend on this file".to_string()
+        } else if direct_count == 1 && total_count == 1 {
+            format!(
+                "1 file depends on this file: {}",
+                direct_dependents[0]
+            )
+        } else if direct_count == total_count as usize {
+            format!("{} files depend on this file", total_count)
+        } else {
+            format!(
+                "{} files directly import this file ({} total affected)",
+                direct_count, total_count
+            )
+        };
+
+        self.log_debug(&format!(
+            "Local graph: {} direct dependents, {} total for {}",
+            direct_count, total_count, file_path
+        ));
+
+        Some(FileDependenciesNotification {
+            path: file_path.to_string(),
+            direct_dependents,
+            all_dependents,
+            total_count,
+            summary,
+        })
+    }
+
+    /// Get the function name at a given position in a document
     async fn get_function_at_position(&self, uri: &Url, position: Position) -> Option<String> {
         // Get cached functions for this document
         let functions = match self.function_cache.get(uri) {
@@ -989,7 +1120,12 @@ impl UnfaultLsp {
         None
     }
 
-    #[allow(dead_code)]
+    /// Get function impact analysis as a markdown hover string
+    ///
+    /// Returns a formatted markdown string showing:
+    /// - Function callers (direct and transitive)
+    /// - Routes that use this function
+    /// - Safeguards present (or missing) in the call chain
     async fn get_function_impact(&self, file_path: &str, function_name: &str) -> Option<String> {
         let api_key = self.config.as_ref()?.api_key.clone();
         let workspace_id = self.workspace_id.read().await.clone()?;
@@ -1311,51 +1447,88 @@ impl LanguageServer for UnfaultLsp {
             )
             .await;
 
-        self.analyze_document(
-            &params.text_document.uri,
-            &params.text_document.text,
-            params.text_document.version,
-        )
-        .await;
-
         // Get workspace root to compute relative file path
         let workspace_root = {
             let root = self.workspace_root.read().await;
             root.clone()
         };
 
-        // Send file centrality and dependencies notifications
-        if let Ok(abs_path) = params.text_document.uri.to_file_path() {
-            // Compute relative path for API calls
-            let relative_path = workspace_root
-                .as_ref()
-                .and_then(|root| abs_path.strip_prefix(root).ok())
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| {
-                    abs_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string()
-                });
+        // Get file path and compute relative path early - we need it for local graph queries
+        let (abs_path, relative_path) = match params.text_document.uri.to_file_path() {
+            Ok(abs) => {
+                let rel = workspace_root
+                    .as_ref()
+                    .and_then(|root| abs.strip_prefix(root).ok())
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| {
+                        abs.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .to_string()
+                    });
+                (Some(abs), rel)
+            }
+            Err(_) => (None, String::new()),
+        };
 
-            // Send file centrality notification
+        // Build IR locally first - this gives us the graph for dependency analysis
+        // even before the API call completes (or if it fails)
+        let local_ir = if let Some(ref abs) = abs_path {
+            let ide_ws = workspace_root.as_ref();
+            let project_root = find_project_root(abs, ide_ws)
+                .unwrap_or_else(|| {
+                    ide_ws
+                        .cloned()
+                        .unwrap_or_else(|| abs.parent().unwrap_or(abs).to_path_buf())
+                });
+            
+            match build_ir_cached(&project_root, None, self.verbose) {
+                Ok(result) => Some(result.ir),
+                Err(e) => {
+                    self.log_debug(&format!("Failed to build IR for local graph: {}", e));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Send local dependencies notification IMMEDIATELY if we have the graph
+        // This provides instant feedback even on first open, before any API session exists
+        if let Some(ref ir) = local_ir {
+            if !relative_path.is_empty() {
+                if let Some(dependencies) = self.compute_local_dependencies(ir, &relative_path) {
+                    if dependencies.total_count > 0 {
+                        self.log_debug(&format!(
+                            "Sending local dependencies notification: {} dependents",
+                            dependencies.total_count
+                        ));
+                        let _ = self
+                            .client
+                            .send_notification::<FileDependenciesNotificationType>(dependencies)
+                            .await;
+                    }
+                }
+            }
+        }
+
+        // Now run the full analysis (includes API call)
+        // Pass the pre-built IR to avoid rebuilding it
+        self.analyze_document(
+            &params.text_document.uri,
+            &params.text_document.text,
+            params.text_document.version,
+            local_ir,
+        )
+        .await;
+
+        // Send file centrality notification (from API cache or fetch)
+        if !relative_path.is_empty() {
             if let Some(centrality) = self.get_file_centrality(&relative_path).await {
                 let _ = self
                     .client
                     .send_notification::<FileCentralityNotificationType>(centrality)
                     .await;
-            }
-
-            // Send file dependencies notification (what files depend on this file?)
-            if let Some(dependencies) = self.get_file_dependencies(&relative_path).await {
-                // Only send if there are dependents (avoid spam for leaf files)
-                if dependencies.total_count > 0 {
-                    let _ = self
-                        .client
-                        .send_notification::<FileDependenciesNotificationType>(dependencies)
-                        .await;
-                }
             }
         }
     }
@@ -1376,6 +1549,7 @@ impl LanguageServer for UnfaultLsp {
                 &params.text_document.uri,
                 &change.text,
                 params.text_document.version,
+                None, // No pre-built IR on change
             )
             .await;
         }
@@ -1386,7 +1560,7 @@ impl LanguageServer for UnfaultLsp {
 
         // Re-analyze on save with saved text if available
         if let Some(text) = params.text {
-            self.analyze_document(&params.text_document.uri, &text, 0)
+            self.analyze_document(&params.text_document.uri, &text, 0, None)
                 .await;
         }
     }
@@ -1436,6 +1610,105 @@ impl LanguageServer for UnfaultLsp {
                     .collect(),
             ))
         }
+    }
+
+    async fn hover(&self, params: HoverParams) -> RpcResult<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        self.log_debug(&format!(
+            "Hover requested at {}:{}:{}",
+            uri, position.line, position.character
+        ));
+
+        // Get file path from URI
+        let file_path = match uri.to_file_path() {
+            Ok(path) => path,
+            Err(_) => {
+                self.log_debug("Could not convert URI to file path for hover");
+                return Ok(None);
+            }
+        };
+
+        // Get workspace root to compute relative file path
+        let workspace_root = {
+            let root = self.workspace_root.read().await;
+            root.clone()
+        };
+
+        // Compute relative path for API calls
+        let relative_path = workspace_root
+            .as_ref()
+            .and_then(|root| file_path.strip_prefix(root).ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            });
+
+        // Try to get function at position from cache
+        if let Some(function_name) = self.get_function_at_position(uri, position).await {
+            self.log_debug(&format!("Found function at position: {}", function_name));
+
+            // Get function impact analysis
+            if let Some(markdown) = self.get_function_impact(&relative_path, &function_name).await {
+                return Ok(Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: markdown,
+                    }),
+                    range: None,
+                }));
+            }
+        }
+
+        // Check if there's a finding at this position and show context
+        if let Some(findings) = self.findings_cache.get(uri) {
+            for cached in findings.iter() {
+                let finding = &cached.finding;
+
+                // Check if position is within finding range
+                let finding_start_line = finding.line.saturating_sub(1);
+                let finding_end_line = finding.end_line.unwrap_or(finding.line).saturating_sub(1);
+
+                if position.line >= finding_start_line && position.line <= finding_end_line {
+                    // Build contextual hover content
+                    let mut markdown = String::new();
+                    markdown.push_str(&format!("**{}**\n\n", finding.title));
+                    markdown.push_str(&format!("{}\n\n", finding.description));
+
+                    if !finding.dimension.is_empty() {
+                        markdown.push_str(&format!("*Dimension:* {}\n", finding.dimension));
+                    }
+
+                    if finding.patch.is_some() || finding.patch_json.is_some() {
+                        markdown.push_str("\n💡 *Quick fix available*\n");
+                    }
+
+                    return Ok(Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: markdown,
+                        }),
+                        range: Some(Range {
+                            start: Position {
+                                line: finding_start_line,
+                                character: finding.column.saturating_sub(1),
+                            },
+                            end: Position {
+                                line: finding_end_line,
+                                character: finding.end_column.unwrap_or(finding.column + 10).saturating_sub(1),
+                            },
+                        }),
+                    }));
+                }
+            }
+        }
+
+        Ok(None)
     }
 }
 
