@@ -572,4 +572,55 @@ def fetch_data():
         assert!(json_str.contains("test.py"));
         assert!(json_str.contains("fetch_data"));
     }
+
+    #[test]
+    fn test_build_local_graph_relative_import() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create utils.py
+        fs::write(
+            temp_dir.path().join("utils.py"),
+            r#"
+def add(a, b):
+    return a + b
+"#,
+        )
+        .unwrap();
+
+        // Create app.py that imports from .utils
+        fs::write(
+            temp_dir.path().join("app.py"),
+            r#"
+from .utils import add
+
+def main():
+    return add(1, 2)
+"#,
+        )
+        .unwrap();
+
+        let result = build_local_graph(temp_dir.path(), None, true);
+        assert!(result.is_ok());
+        let graph = result.unwrap();
+
+        // Should have 2 files
+        assert_eq!(graph.files.len(), 2);
+
+        // Should have an import edge from app.py to utils.py
+        assert!(
+            graph.stats.import_edge_count >= 1,
+            "Expected at least 1 import edge from .utils import, got {}",
+            graph.stats.import_edge_count
+        );
+
+        // Check the import edge
+        let relative_import = graph.imports.iter().find(|i|
+            i.from_file == "app.py" && i.to_file == "utils.py"
+        );
+        assert!(
+            relative_import.is_some(),
+            "Expected import edge from app.py to utils.py, found: {:?}",
+            graph.imports
+        );
+    }
 }
