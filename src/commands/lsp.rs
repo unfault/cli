@@ -1827,18 +1827,26 @@ impl LanguageServer for UnfaultLsp {
             }
         };
 
-        // Get workspace root to compute relative file path
+        // Get workspace root
         let workspace_root = {
             let root = self.workspace_root.read().await;
             root.clone()
         };
 
-        // Compute relative path for API calls
-        let relative_path = workspace_root
-            .as_ref()
-            .and_then(|root| file_path.strip_prefix(root).ok())
-            .map(|p| p.to_string_lossy().to_string())
+        // Find the project root for this file (same logic as did_open)
+        // This is critical: paths in the graph are stored relative to project_root
+        let project_root = find_project_root(&file_path, workspace_root.as_ref())
             .unwrap_or_else(|| {
+                workspace_root
+                    .clone()
+                    .unwrap_or_else(|| file_path.parent().unwrap_or(&file_path).to_path_buf())
+            });
+
+        // Compute relative path from project_root (same as how graph stores paths)
+        let relative_path = file_path
+            .strip_prefix(&project_root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| {
                 file_path
                     .file_name()
                     .and_then(|n| n.to_str())
