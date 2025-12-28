@@ -1141,6 +1141,7 @@ impl UnfaultLsp {
                     }
                 }
                 SourceSemantics::Go(go_sem) => {
+                    // Go top-level functions (no receiver)
                     for func in &go_sem.functions {
                         let range = Range {
                             start: Position {
@@ -1157,8 +1158,27 @@ impl UnfaultLsp {
                             range,
                         });
                     }
+                    // Go methods - build qualified name: ReceiverType.methodName
+                    for method in &go_sem.methods {
+                        let range = Range {
+                            start: Position {
+                                line: method.location.range.start_line,
+                                character: method.location.range.start_col,
+                            },
+                            end: Position {
+                                line: method.location.range.end_line,
+                                character: method.location.range.end_col,
+                            },
+                        };
+                        let qualified_name = format!("{}.{}", method.receiver_type, method.name);
+                        functions.push(FunctionInfo {
+                            name: qualified_name,
+                            range,
+                        });
+                    }
                 }
                 SourceSemantics::Typescript(ts_sem) => {
+                    // Top-level functions
                     for func in &ts_sem.functions {
                         let range = Range {
                             start: Position {
@@ -1175,8 +1195,29 @@ impl UnfaultLsp {
                             range,
                         });
                     }
+                    // Class methods - build qualified name: ClassName.methodName
+                    for class in &ts_sem.classes {
+                        for method in &class.methods {
+                            let range = Range {
+                                start: Position {
+                                    line: method.location.range.start_line,
+                                    character: method.location.range.start_col,
+                                },
+                                end: Position {
+                                    line: method.location.range.end_line,
+                                    character: method.location.range.end_col,
+                                },
+                            };
+                            let qualified_name = format!("{}.{}", class.name, method.name);
+                            functions.push(FunctionInfo {
+                                name: qualified_name,
+                                range,
+                            });
+                        }
+                    }
                 }
                 SourceSemantics::Rust(rust_sem) => {
+                    // Top-level functions
                     for func in &rust_sem.functions {
                         let range = Range {
                             start: Position {
@@ -1192,6 +1233,26 @@ impl UnfaultLsp {
                             name: func.name.clone(),
                             range,
                         });
+                    }
+                    // Impl block methods - build qualified name: SelfType.methodName
+                    for impl_block in &rust_sem.impls {
+                        for method in &impl_block.methods {
+                            let range = Range {
+                                start: Position {
+                                    line: method.location.range.start_line,
+                                    character: method.location.range.start_col,
+                                },
+                                end: Position {
+                                    line: method.location.range.end_line,
+                                    character: method.location.range.end_col,
+                                },
+                            };
+                            let qualified_name = format!("{}.{}", impl_block.self_type, method.name);
+                            functions.push(FunctionInfo {
+                                name: qualified_name,
+                                range,
+                            });
+                        }
                     }
                 }
             }
