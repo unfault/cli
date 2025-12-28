@@ -1447,42 +1447,49 @@ impl LanguageServer for UnfaultLsp {
             )
             .await;
 
-        // Get workspace root to compute relative file path
+        // Get IDE workspace root
         let workspace_root = {
             let root = self.workspace_root.read().await;
             root.clone()
         };
 
-        // Get file path and compute relative path early - we need it for local graph queries
-        let (abs_path, relative_path) = match params.text_document.uri.to_file_path() {
-            Ok(abs) => {
-                let rel = workspace_root
-                    .as_ref()
-                    .and_then(|root| abs.strip_prefix(root).ok())
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| {
-                        abs.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .to_string()
-                    });
-                (Some(abs), rel)
-            }
-            Err(_) => (None, String::new()),
+        // Get absolute file path from URI
+        let abs_path = match params.text_document.uri.to_file_path() {
+            Ok(abs) => Some(abs),
+            Err(_) => None,
         };
 
-        // Build IR locally first - this gives us the graph for dependency analysis
-        // even before the API call completes (or if it fails)
-        let local_ir = if let Some(ref abs) = abs_path {
+        // Determine the project root for this file (may differ from IDE workspace in monorepos)
+        // and compute the relative path using the SAME root that build_ir_cached will use.
+        // This is critical: paths in the graph are stored relative to project_root, not IDE workspace.
+        let (project_root, relative_path) = if let Some(ref abs) = abs_path {
             let ide_ws = workspace_root.as_ref();
-            let project_root = find_project_root(abs, ide_ws)
+            let proj_root = find_project_root(abs, ide_ws)
                 .unwrap_or_else(|| {
                     ide_ws
                         .cloned()
                         .unwrap_or_else(|| abs.parent().unwrap_or(abs).to_path_buf())
                 });
             
-            match build_ir_cached(&project_root, None, self.verbose) {
+            // Compute relative path from project_root (same as build_ir_cached does)
+            let rel = abs.strip_prefix(&proj_root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| {
+                    abs.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string()
+                });
+            
+            (Some(proj_root), rel)
+        } else {
+            (None, String::new())
+        };
+
+        // Build IR locally first - this gives us the graph for dependency analysis
+        // even before the API call completes (or if it fails)
+        let local_ir = if let Some(ref proj_root) = project_root {
+            match build_ir_cached(proj_root, None, self.verbose) {
                 Ok(result) => Some(result.ir),
                 Err(e) => {
                     self.log_debug(&format!("Failed to build IR for local graph: {}", e));
@@ -1497,17 +1504,27 @@ impl LanguageServer for UnfaultLsp {
         // This provides instant feedback even on first open, before any API session exists
         if let Some(ref ir) = local_ir {
             if !relative_path.is_empty() {
+                self.log_debug(&format!(
+                    "Looking for file in graph: '{}' (graph has {} files)",
+                    relative_path,
+                    ir.graph.stats().file_count
+                ));
                 if let Some(dependencies) = self.compute_local_dependencies(ir, &relative_path) {
-                    if dependencies.total_count > 0 {
-                        self.log_debug(&format!(
-                            "Sending local dependencies notification: {} dependents",
-                            dependencies.total_count
-                        ));
-                        let _ = self
-                            .client
-                            .send_notification::<FileDependenciesNotificationType>(dependencies)
-                            .await;
-                    }
+                    self.log_debug(&format!(
+                        "Sending local dependencies notification: {} direct, {} total for {}",
+                        dependencies.direct_dependents.len(),
+                        dependencies.total_count,
+                        relative_path
+                    ));
+                    let _ = self
+                        .client
+                        .send_notification::<FileDependenciesNotificationType>(dependencies)
+                        .await;
+                } else {
+                    self.log_debug(&format!(
+                        "No file found in graph for path: '{}'",
+                        relative_path
+                    ));
                 }
             }
         }
