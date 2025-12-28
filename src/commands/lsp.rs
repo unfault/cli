@@ -1096,6 +1096,105 @@ impl UnfaultLsp {
         })
     }
 
+    /// Extract function info from IR semantics for a specific file.
+    ///
+    /// This extracts function names and their ranges from the language-specific
+    /// semantics stored in the IR, allowing the LSP to provide hover info
+    /// about functions being edited.
+    fn extract_functions_from_ir(
+        &self,
+        ir: &IntermediateRepresentation,
+        file_path: &str,
+    ) -> Vec<FunctionInfo> {
+        use unfault_core::semantics::SourceSemantics;
+
+        let mut functions = Vec::new();
+
+        // Find the semantics for this file
+        for sem in &ir.semantics {
+            if sem.file_path() != file_path {
+                continue;
+            }
+
+            match sem {
+                SourceSemantics::Python(py_sem) => {
+                    for func in &py_sem.functions {
+                        let range = Range {
+                            start: Position {
+                                line: func.location.range.start_line,
+                                character: func.location.range.start_col,
+                            },
+                            end: Position {
+                                line: func.location.range.end_line,
+                                character: func.location.range.end_col,
+                            },
+                        };
+                        functions.push(FunctionInfo {
+                            name: func.name.clone(),
+                            range,
+                        });
+                    }
+                }
+                SourceSemantics::Go(go_sem) => {
+                    for func in &go_sem.functions {
+                        let range = Range {
+                            start: Position {
+                                line: func.location.range.start_line,
+                                character: func.location.range.start_col,
+                            },
+                            end: Position {
+                                line: func.location.range.end_line,
+                                character: func.location.range.end_col,
+                            },
+                        };
+                        functions.push(FunctionInfo {
+                            name: func.name.clone(),
+                            range,
+                        });
+                    }
+                }
+                SourceSemantics::Typescript(ts_sem) => {
+                    for func in &ts_sem.functions {
+                        let range = Range {
+                            start: Position {
+                                line: func.location.range.start_line,
+                                character: func.location.range.start_col,
+                            },
+                            end: Position {
+                                line: func.location.range.end_line,
+                                character: func.location.range.end_col,
+                            },
+                        };
+                        functions.push(FunctionInfo {
+                            name: func.name.clone(),
+                            range,
+                        });
+                    }
+                }
+                SourceSemantics::Rust(rust_sem) => {
+                    for func in &rust_sem.functions {
+                        let range = Range {
+                            start: Position {
+                                line: func.location.range.start_line,
+                                character: func.location.range.start_col,
+                            },
+                            end: Position {
+                                line: func.location.range.end_line,
+                                character: func.location.range.end_col,
+                            },
+                        };
+                        functions.push(FunctionInfo {
+                            name: func.name.clone(),
+                            range,
+                        });
+                    }
+                }
+            }
+        }
+
+        functions
+    }
+
     /// Get the function name at a given position in a document
     async fn get_function_at_position(&self, uri: &Url, position: Position) -> Option<String> {
         // Get cached functions for this document
@@ -1526,6 +1625,18 @@ impl LanguageServer for UnfaultLsp {
                         relative_path
                     ));
                 }
+
+                // Extract functions from IR semantics and populate function_cache
+                // This enables function hover/impact analysis
+                let functions = self.extract_functions_from_ir(ir, &relative_path);
+                if !functions.is_empty() {
+                    self.log_debug(&format!(
+                        "Caching {} functions for hover from {}",
+                        functions.len(),
+                        relative_path
+                    ));
+                    self.function_cache.insert(params.text_document.uri.clone(), functions);
+                }
             }
         }
 
@@ -1593,6 +1704,9 @@ impl LanguageServer for UnfaultLsp {
             .document_cache
             .remove_async(&params.text_document.uri)
             .await;
+
+        // Clear cached function info
+        self.function_cache.remove(&params.text_document.uri);
 
         // Clear diagnostics
         self.client
