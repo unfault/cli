@@ -702,7 +702,7 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
     println!();
     println!(
         "{} {} {}",
-        "📊".cyan(),
+        "🔍".cyan(),
         "Impact Analysis:".bold(),
         response.file_path.bright_white()
     );
@@ -710,25 +710,50 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
 
     if response.total_affected == 0 {
         println!(
-            "  {} No files would be affected by changes to this file.",
+            "  {} This file is a leaf node — no other files depend on it.",
             "ℹ".blue()
+        );
+        println!(
+            "  {} Changes here are isolated and safe to refactor.",
+            "".dimmed()
         );
         println!();
         return;
     }
 
-    // Summary
+    // Summary with context
+    let direct_count = response.direct_importers.len();
+    let transitive_only: Vec<_> = response
+        .transitive_importers
+        .iter()
+        .filter(|f| f.depth.unwrap_or(1) > 1)
+        .collect();
+    let transitive_count = transitive_only.len();
+
     println!(
-        "  {} {} file(s) would be affected by changes to this file",
-        "⚠".yellow(),
+        "  {} This file is imported by {} file(s)",
+        "→".cyan(),
         response.total_affected.to_string().bold()
     );
+    if transitive_count > 0 {
+        println!(
+            "  {} {} direct, {} through transitive imports",
+            "".dimmed(),
+            direct_count,
+            transitive_count
+        );
+    }
     println!();
 
     // Direct importers
     if !response.direct_importers.is_empty() {
-        println!("{}", "Direct Importers".bold().underline());
-        println!("{}", "─".repeat(50).dimmed());
+        println!("{}", "Direct Dependencies".bold().underline());
+        println!(
+            "{}",
+            "Files that import this directly — changes here affect them first"
+                .dimmed()
+        );
+        println!("{}", "─".repeat(60).dimmed());
         for file in &response.direct_importers {
             let lang = file.language.as_deref().unwrap_or("?");
             println!(
@@ -742,34 +767,44 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
     }
 
     // Transitive importers (if different from direct)
-    let transitive_only: Vec<_> = response
-        .transitive_importers
-        .iter()
-        .filter(|f| f.depth.unwrap_or(1) > 1)
-        .collect();
-
     if !transitive_only.is_empty() {
-        println!("{}", "Transitive Importers".bold().underline());
-        println!("{}", "─".repeat(50).dimmed());
-        for file in transitive_only {
+        println!("{}", "Transitive Dependencies".bold().underline());
+        println!(
+            "{}",
+            "Files that depend on this indirectly — ripple effects"
+                .dimmed()
+        );
+        println!("{}", "─".repeat(60).dimmed());
+        for file in &transitive_only {
             let lang = file.language.as_deref().unwrap_or("?");
             let depth = file.depth.unwrap_or(0);
+            let depth_indicator = "→".repeat(depth as usize);
             println!(
                 "  {} {} {} {}",
-                "•".cyan(),
+                depth_indicator.dimmed(),
                 file.path.bright_white(),
                 format!("[{}]", lang).dimmed(),
-                format!("(depth: {})", depth).dimmed()
+                format!("({} hops)", depth).dimmed()
             );
         }
         println!();
     }
 
+    // Actionable insight
+    if response.total_affected >= 5 {
+        println!(
+            "  {} This is a hub file. Consider extra care when modifying.",
+            "💡".yellow()
+        );
+        println!();
+    }
+
     if verbose {
         println!(
-            "  {} Direct: {}, Total: {}",
+            "  {} Direct: {}, Transitive: {}, Total: {}",
             "Stats:".dimmed(),
-            response.direct_importers.len(),
+            direct_count,
+            transitive_count,
             response.total_affected
         );
         println!();
@@ -785,13 +820,13 @@ fn output_deps_json(response: &DependencyQueryResponse) -> Result<()> {
 fn output_library_formatted(
     response: &DependencyQueryResponse,
     library_name: &str,
-    _verbose: bool,
+    verbose: bool,
 ) {
     println!();
     println!(
         "{} {} {}",
         "📚".cyan(),
-        "Files using library:".bold(),
+        "Library Usage:".bold(),
         library_name.bright_white()
     );
     println!();
@@ -799,19 +834,28 @@ fn output_library_formatted(
     if let Some(files) = &response.files {
         if files.is_empty() {
             println!(
-                "  {} No files use the library '{}'",
+                "  {} '{}' is not used directly in any files.",
                 "ℹ".blue(),
                 library_name
             );
+            println!(
+                "  {} It may be a transitive dependency or not imported yet.",
+                "".dimmed()
+            );
         } else {
             println!(
-                "  {} Found {} file(s)",
-                "✓".green(),
+                "  {} '{}' is used in {} file(s)",
+                "→".cyan(),
+                library_name,
                 files.len().to_string().bold()
             );
             println!();
-            println!("{}", "Files".bold().underline());
-            println!("{}", "─".repeat(50).dimmed());
+            println!("{}", "Usage Locations".bold().underline());
+            println!(
+                "{}",
+                "These files import this library directly".dimmed()
+            );
+            println!("{}", "─".repeat(60).dimmed());
             for file in files {
                 let lang = file.language.as_deref().unwrap_or("?");
                 println!(
@@ -821,11 +865,28 @@ fn output_library_formatted(
                     format!("[{}]", lang).dimmed()
                 );
             }
+
+            // Provide context based on file count
+            if files.len() >= 10 {
+                println!();
+                println!(
+                    "  {} This library is used widely. Consider its stability and versioning.",
+                    "💡".yellow()
+                );
+            }
         }
     } else {
-        println!("  {} No files found", "ℹ".blue());
+        println!("  {} No usage data available", "ℹ".blue());
     }
     println!();
+
+    if verbose {
+        println!(
+            "  {} Use 'unfault graph deps <file>' to see all dependencies in a specific file.",
+            "Tip:".dimmed()
+        );
+        println!();
+    }
 }
 
 fn output_deps_formatted(response: &DependencyQueryResponse, file_path: &str, verbose: bool) {
@@ -833,50 +894,115 @@ fn output_deps_formatted(response: &DependencyQueryResponse, file_path: &str, ve
     println!(
         "{} {} {}",
         "📦".cyan(),
-        "External dependencies of:".bold(),
+        "External Dependencies:".bold(),
         file_path.bright_white()
     );
     println!();
 
     if let Some(deps) = &response.dependencies {
         if deps.is_empty() {
-            println!("  {} No external dependencies found", "ℹ".blue());
-        } else {
             println!(
-                "  {} Found {} external dependencies",
-                "✓".green(),
-                deps.len().to_string().bold()
+                "  {} This file doesn't import any external libraries directly.",
+                "ℹ".blue()
             );
-            println!();
-            println!("{}", "Dependencies".bold().underline());
-            println!("{}", "─".repeat(50).dimmed());
+            println!(
+                "  {} It may use standard library modules or local imports only.",
+                "".dimmed()
+            );
+        } else {
+            // Group dependencies by category
+            let mut by_category: std::collections::HashMap<&str, Vec<&crate::api::graph::ExternalModuleInfo>> =
+                std::collections::HashMap::new();
             for dep in deps {
                 let category = dep.category.as_deref().unwrap_or("Other");
-                let category_colored = match category {
-                    "HttpClient" => category.yellow(),
-                    "Database" => category.blue(),
-                    "WebFramework" => category.magenta(),
-                    "AsyncRuntime" => category.cyan(),
-                    "Logging" => category.green(),
-                    "Resilience" => category.red(),
-                    _ => category.normal(),
-                };
-                if verbose {
-                    println!(
-                        "  {} {} [{}]",
-                        "•".cyan(),
-                        dep.name.bright_white(),
-                        category_colored
-                    );
-                } else {
-                    println!("  {} {}", "•".cyan(), dep.name.bright_white());
+                by_category.entry(category).or_default().push(dep);
+            }
+
+            println!(
+                "  {} This file uses {} external {} across {} {}",
+                "→".cyan(),
+                deps.len().to_string().bold(),
+                if deps.len() == 1 { "library" } else { "libraries" },
+                by_category.len(),
+                if by_category.len() == 1 { "category" } else { "categories" }
+            );
+            println!();
+
+            println!("{}", "By Category".bold().underline());
+            println!(
+                "{}",
+                "Understanding what external code this file relies on".dimmed()
+            );
+            println!("{}", "─".repeat(60).dimmed());
+
+            // Order categories by importance
+            let category_order = [
+                "HttpClient",
+                "Database",
+                "WebFramework",
+                "AsyncRuntime",
+                "Logging",
+                "Resilience",
+                "Other",
+            ];
+
+            for category in category_order {
+                if let Some(category_deps) = by_category.get(category) {
+                    let category_label = match category {
+                        "HttpClient" => "🌐 HTTP/Network",
+                        "Database" => "🗄️  Database",
+                        "WebFramework" => "🖥️  Web Framework",
+                        "AsyncRuntime" => "⚡ Async Runtime",
+                        "Logging" => "📝 Logging",
+                        "Resilience" => "🛡️  Resilience",
+                        _ => "📦 Other",
+                    };
+
+                    println!("  {}", category_label.bold());
+                    for dep in category_deps {
+                        println!("    {} {}", "•".dimmed(), dep.name.bright_white());
+                    }
                 }
+            }
+
+            // Show any categories not in our predefined order
+            for (category, category_deps) in &by_category {
+                if !category_order.contains(category) {
+                    println!("  {} {}", "📦".dimmed(), category.bold());
+                    for dep in category_deps {
+                        println!("    {} {}", "•".dimmed(), dep.name.bright_white());
+                    }
+                }
+            }
+
+            // Provide insights
+            if deps.len() >= 8 {
+                println!();
+                println!(
+                    "  {} This file has many dependencies. Consider if all are needed.",
+                    "💡".yellow()
+                );
+            }
+            if by_category.contains_key("HttpClient") && !by_category.contains_key("Resilience") {
+                println!();
+                println!(
+                    "  {} Uses HTTP but has no resilience libraries (retry, circuit breaker).",
+                    "💡".yellow()
+                );
             }
         }
     } else {
-        println!("  {} No dependencies found", "ℹ".blue());
+        println!("  {} Dependency information not available", "ℹ".blue());
     }
     println!();
+
+    if verbose {
+        println!(
+            "  {} Use 'unfault graph library <name>' to find all files using a specific library.",
+            "Tip:".dimmed()
+        );
+        println!();
+    }
 }
 
 fn output_critical_json(response: &CentralityResponse) -> Result<()> {
@@ -888,24 +1014,27 @@ fn output_critical_json(response: &CentralityResponse) -> Result<()> {
 fn output_critical_formatted(response: &CentralityResponse, verbose: bool) {
     println!();
     println!(
-        "{} {} {}",
+        "{} {}",
         "🎯".cyan(),
-        "Most Critical Files".bold(),
-        format!("(sorted by {})", response.sort_by).dimmed()
+        "Hub Files Analysis".bold()
+    );
+    println!(
+        "{}",
+        "Files with the most connections — changes here have the widest impact".dimmed()
     );
     println!();
 
     if response.files.is_empty() {
-        println!("  {} No files found in the graph", "ℹ".blue());
+        println!("  {} No files analyzed yet. Run 'unfault review' first.", "ℹ".blue());
         println!();
         return;
     }
 
     println!(
-        "  {} Showing top {} of {} total files",
-        "ℹ".blue(),
-        response.files.len(),
-        response.total_files
+        "  {} Analyzing {} files, showing top {}",
+        "→".cyan(),
+        response.total_files,
+        response.files.len()
     );
     println!();
 
@@ -928,7 +1057,7 @@ fn output_critical_formatted(response: &CentralityResponse, verbose: bool) {
             file.path.clone()
         };
 
-        // Color-code the importance score
+        // Color-code the importance score with context
         let score_str = file.importance_score.to_string();
         let score_colored = if file.importance_score >= 20 {
             score_str.red().bold()
@@ -949,25 +1078,48 @@ fn output_critical_formatted(response: &CentralityResponse, verbose: bool) {
         );
 
         if verbose {
-            println!(
-                "      {} Total degree: {}",
-                "└".dimmed(),
-                file.total_degree.to_string().dimmed()
-            );
+            // Provide context for high-impact files
+            if file.in_degree >= 5 {
+                println!(
+                    "      {} {} files depend on this — changes ripple widely",
+                    "└".dimmed(),
+                    file.in_degree
+                );
+            }
         }
     }
     println!();
 
+    // Insights
+    if let Some(top) = response.files.first() {
+        if top.importance_score >= 20 {
+            println!(
+                "  {} '{}' is a major hub. Consider extra review for changes.",
+                "💡".yellow(),
+                top.path.split('/').last().unwrap_or(&top.path)
+            );
+            println!();
+        }
+    }
+
     // Legend
     println!(
-        "  {} In: files that import this | Out: files this imports | Libs: external deps",
+        "  {} In: dependents | Out: dependencies | Libs: external packages",
         "Legend:".dimmed()
     );
     println!(
-        "  {} Score = In×2 + Out + Libs (higher = more critical)",
+        "  {} Higher score = more central to the codebase",
         "".dimmed()
     );
     println!();
+
+    if verbose {
+        println!(
+            "  {} Use 'unfault graph impact <file>' to see full dependency details.",
+            "Tip:".dimmed()
+        );
+        println!();
+    }
 }
 
 fn output_stats_json(response: &GraphStatsResponse) -> Result<()> {
@@ -1059,32 +1211,57 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         println!();
         println!(
             "{} {} {}",
-            "📊".cyan(),
-            "Function Impact Analysis:".bold(),
+            "🔗".cyan(),
+            "Function Call Graph:".bold(),
             response.function.bright_white()
         );
         println!();
 
         if response.total_affected == 0 {
             println!(
-                "  {} No functions would be affected by changes to this function.",
+                "  {} This function is a leaf — not called by any other functions.",
                 "ℹ".blue()
+            );
+            println!(
+                "  {} Safe to refactor without affecting other call paths.",
+                "".dimmed()
             );
             println!();
             return Ok(EXIT_SUCCESS);
         }
 
+        // Calculate direct vs transitive
+        let direct_count = response.direct_callers.len();
+        let transitive_only: Vec<_> = response
+            .transitive_callers
+            .iter()
+            .filter(|c| c.get("depth").and_then(|d| d.parse::<i32>().ok()) > Some(1))
+            .collect();
+        let transitive_count = transitive_only.len();
+
         println!(
-            "  {} {} function(s) would be affected",
-            "⚠".yellow(),
+            "  {} This function is called from {} place(s)",
+            "→".cyan(),
             response.total_affected.to_string().bold()
         );
+        if transitive_count > 0 {
+            println!(
+                "  {} {} direct, {} through call chains",
+                "".dimmed(),
+                direct_count,
+                transitive_count
+            );
+        }
         println!();
 
         // Direct callers
         if !response.direct_callers.is_empty() {
             println!("{}", "Direct Callers".bold().underline());
-            println!("{}", "─".repeat(50).dimmed());
+            println!(
+                "{}",
+                "Functions that call this directly".dimmed()
+            );
+            println!("{}", "─".repeat(60).dimmed());
             for caller in &response.direct_callers {
                 let unknown = "unknown".to_string();
                 let path = caller.get("path").unwrap_or(&unknown);
@@ -1100,37 +1277,46 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         }
 
         // Transitive callers
-        let transitive_only: Vec<_> = response
-            .transitive_callers
-            .iter()
-            .filter(|c| c.get("depth").and_then(|d| d.parse::<i32>().ok()) > Some(1))
-            .collect();
-
         if !transitive_only.is_empty() {
-            println!("{}", "Transitive Callers".bold().underline());
-            println!("{}", "─".repeat(50).dimmed());
+            println!("{}", "Upstream Callers".bold().underline());
+            println!(
+                "{}",
+                "Functions that depend on this through call chains".dimmed()
+            );
+            println!("{}", "─".repeat(60).dimmed());
             for caller in transitive_only {
                 let unknown = "unknown".to_string();
                 let zero = "0".to_string();
                 let path = caller.get("path").unwrap_or(&unknown);
                 let func = caller.get("function").unwrap_or(&unknown);
                 let depth = caller.get("depth").unwrap_or(&zero);
+                let depth_indicator = "→".repeat(depth.parse().unwrap_or(0));
                 println!(
                     "  {} {} ({}) {}",
-                    "•".cyan(),
+                    depth_indicator.dimmed(),
                     func.bright_white(),
                     path.dimmed(),
-                    format!("(depth: {})", depth).dimmed()
+                    format!("({} hops)", depth).dimmed()
                 );
             }
             println!();
         }
 
+        // Insights
+        if response.total_affected >= 5 {
+            println!(
+                "  {} This is a core function. Changes affect many call paths.",
+                "💡".yellow()
+            );
+            println!();
+        }
+
         if args.verbose {
             println!(
-                "  {} Direct: {}, Total: {}",
+                "  {} Direct: {}, Upstream: {}, Total: {}",
                 "Stats:".dimmed(),
-                response.direct_callers.len(),
+                direct_count,
+                transitive_count,
                 response.total_affected
             );
             println!();
@@ -1140,72 +1326,119 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-fn output_stats_formatted(response: &GraphStatsResponse, _verbose: bool) {
+fn output_stats_formatted(response: &GraphStatsResponse, verbose: bool) {
     println!();
-    println!("{} {}", "📈".cyan(), "Code Graph Statistics".bold());
+    println!("{} {}", "🗺️".cyan(), "Code Graph Overview".bold());
+    println!(
+        "{}",
+        "A map of your codebase structure and connections".dimmed()
+    );
     println!();
 
-    // Nodes section
-    println!("{}", "Nodes".bold().underline());
-    println!("{}", "─".repeat(40).dimmed());
+    // Summary line
+    let total_code_units = response.function_count + response.class_count;
     println!(
-        "  {:25} {:>10}",
-        "Files".bright_white(),
+        "  {} {} code units across {} files",
+        "→".cyan(),
+        total_code_units.to_string().bold(),
+        response.file_count.to_string().bold()
+    );
+    println!();
+
+    // Nodes section with context
+    println!("{}", "Structure".bold().underline());
+    println!("{}", "─".repeat(45).dimmed());
+    println!(
+        "  {:28} {:>12}",
+        "📄 Files".bright_white(),
         response.file_count.to_string().cyan()
     );
     println!(
-        "  {:25} {:>10}",
-        "Functions".bright_white(),
+        "  {:28} {:>12}",
+        "⚙️  Functions".bright_white(),
         response.function_count.to_string().cyan()
     );
     println!(
-        "  {:25} {:>10}",
-        "Classes".bright_white(),
+        "  {:28} {:>12}",
+        "📦 Classes".bright_white(),
         response.class_count.to_string().cyan()
     );
     println!(
-        "  {:25} {:>10}",
-        "External Modules".bright_white(),
+        "  {:28} {:>12}",
+        "📚 External Libraries".bright_white(),
         response.external_module_count.to_string().cyan()
     );
-    println!("{}", "─".repeat(40).dimmed());
+    println!("{}", "─".repeat(45).dimmed());
     println!(
-        "  {:25} {:>10}",
-        "Total".bold(),
+        "  {:28} {:>12}",
+        "Total nodes".bold(),
         response.total_nodes.to_string().bold().cyan()
     );
     println!();
 
-    // Edges section
-    println!("{}", "Edges".bold().underline());
-    println!("{}", "─".repeat(40).dimmed());
+    // Connections section with context
+    println!("{}", "Connections".bold().underline());
+    println!("{}", "─".repeat(45).dimmed());
     println!(
-        "  {:25} {:>10}",
-        "Import relationships".bright_white(),
+        "  {:28} {:>12}",
+        "🔗 File imports".bright_white(),
         response.imports_edge_count.to_string().green()
     );
     println!(
-        "  {:25} {:>10}",
-        "Contains (file→fn/class)".bright_white(),
+        "  {:28} {:>12}",
+        "📍 File→function/class".bright_white(),
         response.contains_edge_count.to_string().green()
     );
     println!(
-        "  {:25} {:>10}",
-        "Library usage".bright_white(),
+        "  {:28} {:>12}",
+        "📚 Library usage".bright_white(),
         response.uses_library_edge_count.to_string().green()
     );
     println!(
-        "  {:25} {:>10}",
-        "Function calls".bright_white(),
+        "  {:28} {:>12}",
+        "➡️  Function calls".bright_white(),
         response.calls_edge_count.to_string().green()
     );
-    println!("{}", "─".repeat(40).dimmed());
+    println!("{}", "─".repeat(45).dimmed());
     println!(
-        "  {:25} {:>10}",
-        "Total".bold(),
+        "  {:28} {:>12}",
+        "Total edges".bold(),
         response.total_edges.to_string().bold().green()
     );
     println!();
+
+    // Insights
+    if response.file_count > 0 {
+        let avg_deps = response.imports_edge_count as f64 / response.file_count as f64;
+        let avg_funcs = response.function_count as f64 / response.file_count as f64;
+
+        if verbose {
+            println!(
+                "  {} ~{:.1} imports/file, ~{:.1} functions/file",
+                "📊".dimmed(),
+                avg_deps,
+                avg_funcs
+            );
+            println!();
+        }
+
+        if avg_funcs > 10.0 {
+            println!(
+                "  {} Files are quite dense ({:.0} avg functions). Consider splitting.",
+                "💡".yellow(),
+                avg_funcs
+            );
+            println!();
+        }
+    }
+
+    if verbose {
+        println!(
+            "  {} Use 'unfault graph critical' to find the most connected files.",
+            "Tip:".dimmed()
+        );
+        println!();
+    }
 }
 
 #[cfg(test)]
