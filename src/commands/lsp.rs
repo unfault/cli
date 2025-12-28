@@ -1129,8 +1129,13 @@ impl UnfaultLsp {
                                 character: func.location.range.end_col,
                             },
                         };
+                        // Build qualified name: Class.method for methods, just name for functions
+                        let qualified_name = match &func.class_name {
+                            Some(class) => format!("{}.{}", class, func.name),
+                            None => func.name.clone(),
+                        };
                         functions.push(FunctionInfo {
-                            name: func.name.clone(),
+                            name: qualified_name,
                             range,
                         });
                     }
