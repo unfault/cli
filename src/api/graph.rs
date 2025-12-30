@@ -18,8 +18,8 @@
 //! the `/api/v1/graph/analyze` endpoint.
 
 use crate::api::client::{ApiClient, ApiError};
+use log::debug;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tower_lsp::lsp_types::Range;
 
 // =============================================================================
@@ -329,15 +329,54 @@ pub struct FunctionImpactRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FunctionCaller {
+    /// Path to the file containing the caller
+    pub path: String,
+    /// Name of the calling function
+    pub function: String,
+    /// Distance from the target function
+    pub depth: i32,
+    /// Whether this caller is an HTTP route handler
+    #[serde(default)]
+    pub is_route_handler: bool,
+    /// The route path if this is a route handler (e.g., "/api/webhooks")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_path: Option<String>,
+    /// HTTP method if this is a route handler (e.g., "POST", "GET")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_method: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FunctionFinding {
+    /// Rule ID that generated this finding
+    pub rule_id: String,
+    /// Title of the finding
+    pub title: String,
+    /// Description of the finding
+    pub description: String,
+    /// Severity level
+    pub severity: String,
+    /// Dimension/category
+    pub dimension: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FunctionImpactResponse {
     /// The function being analyzed (file:function)
     pub function: String,
     /// Functions that directly call this function
-    pub direct_callers: Vec<HashMap<String, String>>,
+    pub direct_callers: Vec<FunctionCaller>,
     /// All functions affected (including direct)
-    pub transitive_callers: Vec<HashMap<String, String>>,
+    pub transitive_callers: Vec<FunctionCaller>,
     /// Total number of affected functions
     pub total_affected: i32,
+    /// Findings related to this function
+    #[serde(default)]
+    pub findings: Vec<FunctionFinding>,
+    /// Summary of the function's impact context
+    #[serde(default)]
+    pub impact_summary: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -440,8 +479,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
+        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
+            debug!("[API] Error response body: {}", error_text);
             return Err(to_http_error(status, error_text));
         }
 
@@ -471,8 +513,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
+        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
+            debug!("[API] Error response body: {}", error_text);
             return Err(to_http_error(status, error_text));
         }
 
@@ -502,8 +547,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
+        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
+            debug!("[API] Error response body: {}", error_text);
             return Err(to_http_error(status, error_text));
         }
 
@@ -533,14 +581,21 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
+        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
+            debug!("[API] Error response body: {}", error_text);
             return Err(to_http_error(status, error_text));
         }
 
+        // Get the response text for debugging
+        let response_text = response.text().await.unwrap_or_default();
+        debug!("[API] Function impact response body: {}", response_text);
+
         let impact_response: FunctionImpactResponse =
-            response.json().await.map_err(|e| ApiError::ParseError {
-                message: format!("Failed to parse function impact response: {}", e),
+            serde_json::from_str(&response_text).map_err(|e| ApiError::ParseError {
+                message: format!("Failed to parse function impact response: {} (body: {})", e, response_text.chars().take(200).collect::<String>()),
             })?;
 
         Ok(impact_response)
@@ -563,8 +618,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
+        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
+            debug!("[API] Error response body: {}", error_text);
             return Err(to_http_error(status, error_text));
         }
 
@@ -609,8 +667,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
+        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
+            debug!("[API] Error response body: {}", error_text);
             return Err(to_http_error(status, error_text));
         }
 
@@ -655,6 +716,8 @@ impl ApiClient {
             ir_json,
         };
 
+        debug!("[API] Sending POST request...");
+
         let response = self
             .client
             .post(&url)
@@ -665,8 +728,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
+        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
+            debug!("[API] Error response body: {}", error_text);
             return Err(to_http_error(status, error_text));
         }
 
@@ -674,6 +740,46 @@ impl ApiClient {
             response.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse IR analysis response: {}", e),
             })?;
+
+        debug!("[API] === Received IR Analysis Response ===");
+        debug!("[API] File count: {}", analyze_response.file_count);
+        debug!("[API] Processing time: {}ms", analyze_response.elapsed_ms);
+        debug!("[API] Findings count: {}", analyze_response.findings.len());
+
+        if let Some(ref graph_stats) = analyze_response.graph_stats {
+            debug!("[API] Graph statistics from API:");
+            debug!("  - Total nodes: {}", graph_stats.total_nodes);
+            debug!("  - Total edges: {}", graph_stats.total_edges);
+            debug!("  - Files: {}", graph_stats.file_count);
+            debug!("  - Functions: {}", graph_stats.function_count);
+            debug!("  - Classes: {}", graph_stats.class_count);
+            debug!("  - External modules: {}", graph_stats.external_module_count);
+            debug!("  - Import edges: {}", graph_stats.import_edge_count);
+            debug!("  - Contains edges: {}", graph_stats.contains_edge_count);
+            debug!("  - Uses library edges: {}", graph_stats.uses_library_edge_count);
+        }
+
+        if !analyze_response.findings.is_empty() {
+            debug!("[API] First 5 findings:");
+            for (i, finding) in analyze_response.findings.iter().take(5).enumerate() {
+                debug!("  {}. {} ({}) at {}:{}:{}",
+                    i + 1,
+                    finding.rule_id,
+                    finding.severity,
+                    finding.file_path,
+                    finding.line,
+                    finding.column
+                );
+                debug!("     Title: {}", finding.title);
+                debug!("     Dimension: {}", finding.dimension);
+                if finding.patch_json.is_some() || finding.patch.is_some() {
+                    debug!("     Has patch: Yes");
+                }
+            }
+            if analyze_response.findings.len() > 5 {
+                debug!("  ... and {} more findings", analyze_response.findings.len() - 5);
+            }
+        }
 
         Ok(analyze_response)
     }

@@ -42,13 +42,13 @@ pub struct SerializableGraph {
     pub stats: GraphStats,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct FileNode {
     pub path: String,
     pub language: String,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct FunctionNode {
     pub name: String,
     pub qualified_name: String,
@@ -63,7 +63,7 @@ pub struct FunctionNode {
     pub http_path: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ImportEdge {
     pub from_file: String,
     pub to_file: String,
@@ -71,27 +71,27 @@ pub struct ImportEdge {
     pub items: Vec<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ContainsEdge {
     pub file_path: String,
     pub item_name: String,
     pub item_type: String, // "function", "class", etc.
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CallEdge {
     pub caller: String,
     pub callee: String,
     pub caller_file: String,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct LibraryUsage {
     pub file_path: String,
     pub library: String,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct GraphStats {
     pub file_count: usize,
     pub function_count: usize,

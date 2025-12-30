@@ -1235,7 +1235,7 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         let transitive_only: Vec<_> = response
             .transitive_callers
             .iter()
-            .filter(|c| c.get("depth").and_then(|d| d.parse::<i32>().ok()) > Some(1))
+            .filter(|c| c.depth > 1)
             .collect();
         let transitive_count = transitive_only.len();
 
@@ -1263,14 +1263,11 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
             );
             println!("{}", "─".repeat(60).dimmed());
             for caller in &response.direct_callers {
-                let unknown = "unknown".to_string();
-                let path = caller.get("path").unwrap_or(&unknown);
-                let func = caller.get("function").unwrap_or(&unknown);
                 println!(
                     "  {} {} ({})",
                     "•".cyan(),
-                    func.bright_white(),
-                    path.dimmed()
+                    caller.function.bright_white(),
+                    caller.path.dimmed()
                 );
             }
             println!();
@@ -1285,18 +1282,13 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
             );
             println!("{}", "─".repeat(60).dimmed());
             for caller in transitive_only {
-                let unknown = "unknown".to_string();
-                let zero = "0".to_string();
-                let path = caller.get("path").unwrap_or(&unknown);
-                let func = caller.get("function").unwrap_or(&unknown);
-                let depth = caller.get("depth").unwrap_or(&zero);
-                let depth_indicator = "→".repeat(depth.parse().unwrap_or(0));
+                let depth_indicator = "→".repeat(caller.depth as usize);
                 println!(
                     "  {} {} ({}) {}",
                     depth_indicator.dimmed(),
-                    func.bright_white(),
-                    path.dimmed(),
-                    format!("({} hops)", depth).dimmed()
+                    caller.function.bright_white(),
+                    caller.path.dimmed(),
+                    format!("({} hops)", caller.depth).dimmed()
                 );
             }
             println!();
@@ -1439,6 +1431,122 @@ fn output_stats_formatted(response: &GraphStatsResponse, verbose: bool) {
         );
         println!();
     }
+}
+
+// =============================================================================
+// Graph Dump Command (Local)
+// =============================================================================
+
+/// Arguments for the graph dump command
+#[derive(Debug)]
+pub struct DumpArgs {
+    /// Workspace path to analyze (defaults to current directory)
+    pub workspace_path: Option<String>,
+    /// Output only call edges
+    pub calls_only: bool,
+    /// Output only specific file's information
+    pub file: Option<String>,
+    /// Verbose output
+    pub verbose: bool,
+}
+
+/// Execute the graph dump command - builds local graph and outputs JSON
+pub fn execute_dump(args: DumpArgs) -> Result<i32> {
+    use crate::session::graph_builder::build_local_graph;
+
+    // Determine workspace path
+    let workspace_path = match &args.workspace_path {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::env::current_dir()?,
+    };
+
+    if args.verbose {
+        eprintln!(
+            "{} Building local code graph for: {}",
+            "→".cyan(),
+            workspace_path.display()
+        );
+    }
+
+    // Build the local graph
+    let graph = build_local_graph(&workspace_path, None, args.verbose)?;
+
+    if args.verbose {
+        eprintln!(
+            "{} Graph built: {} files, {} functions, {} call edges",
+            "✓".green(),
+            graph.files.len(),
+            graph.functions.len(),
+            graph.calls.len()
+        );
+        eprintln!();
+    }
+
+    // Filter and output
+    if args.calls_only {
+        // Output only call edges, optionally filtered by file
+        let calls: Vec<_> = if let Some(ref file_filter) = args.file {
+            graph
+                .calls
+                .iter()
+                .filter(|c| c.caller_file.contains(file_filter))
+                .collect()
+        } else {
+            graph.calls.iter().collect()
+        };
+
+        println!("{}", serde_json::to_string_pretty(&calls)?);
+    } else if let Some(ref file_filter) = args.file {
+        // Output everything related to a specific file
+        #[derive(serde::Serialize)]
+        struct FileGraph {
+            file: Option<crate::session::graph_builder::FileNode>,
+            functions: Vec<crate::session::graph_builder::FunctionNode>,
+            outgoing_calls: Vec<crate::session::graph_builder::CallEdge>,
+            incoming_calls: Vec<crate::session::graph_builder::CallEdge>,
+            imports: Vec<crate::session::graph_builder::ImportEdge>,
+        }
+
+        let file_graph = FileGraph {
+            file: graph.files.iter().find(|f| f.path.contains(file_filter)).cloned(),
+            functions: graph
+                .functions
+                .iter()
+                .filter(|f| f.file_path.contains(file_filter))
+                .cloned()
+                .collect(),
+            outgoing_calls: graph
+                .calls
+                .iter()
+                .filter(|c| c.caller_file.contains(file_filter))
+                .cloned()
+                .collect(),
+            incoming_calls: graph
+                .calls
+                .iter()
+                .filter(|c| {
+                    // Find the callee's file
+                    graph.functions.iter().any(|f| {
+                        f.qualified_name == c.callee && f.file_path.contains(file_filter)
+                    })
+                })
+                .cloned()
+                .collect(),
+            imports: graph
+                .imports
+                .iter()
+                .filter(|i| i.from_file.contains(file_filter) || i.to_file.contains(file_filter))
+                .cloned()
+                .collect(),
+        };
+
+        println!("{}", serde_json::to_string_pretty(&file_graph)?);
+    } else {
+        // Output full graph
+        println!("{}", serde_json::to_string_pretty(&graph)?);
+    }
+
+    Ok(EXIT_SUCCESS)
 }
 
 #[cfg(test)]

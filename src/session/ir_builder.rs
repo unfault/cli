@@ -32,6 +32,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use colored::Colorize;
+use log::debug;
 use rayon::prelude::*;
 
 use unfault_core::IntermediateRepresentation;
@@ -497,8 +498,8 @@ pub fn build_ir_cached(
     let code_graph = build_code_graph(&semantics_entries);
     let graph_ms = graph_start.elapsed().as_millis();
 
+    let stats = code_graph.stats();
     if verbose {
-        let stats = code_graph.stats();
         eprintln!(
             "Built graph: {} files, {} functions, {} imports, {} library usages",
             stats.file_count,
@@ -509,8 +510,40 @@ pub fn build_ir_cached(
         eprintln!("{} Graph build: {}ms", "TIMING".yellow(), graph_ms);
     }
 
+    // Log detailed graph information
+    debug!("[GRAPH] Graph statistics:");
+    debug!("  - Total nodes: {}", code_graph.graph.node_count());
+    debug!("  - Total edges: {}", code_graph.graph.edge_count());
+    debug!("  - File nodes: {}", stats.file_count);
+    debug!("  - Function nodes: {}", stats.function_count);
+    debug!("  - Class nodes: {}", stats.class_count);
+    debug!("  - Import edges: {}", stats.import_edge_count);
+    debug!("  - Contains edges: {}", stats.contains_edge_count);
+    debug!("  - Uses library edges: {}", stats.uses_library_edge_count);
+    debug!("  - Calls edges: {}", stats.calls_edge_count);
+    debug!("  - External modules: {}", stats.external_module_count);
+
+    // Create IR and log serialization details
+    let ir = IntermediateRepresentation::new(all_semantics, code_graph);
+
+    let serialization_start = Instant::now();
+    match serde_json::to_string(&ir) {
+        Ok(json) => {
+            let json_size = json.len();
+            let json_size_mb = json_size as f64 / (1024.0 * 1024.0);
+            let serialization_ms = serialization_start.elapsed().as_millis();
+            debug!("[GRAPH] Serialization details:");
+            debug!("  - JSON size: {} bytes ({:.2} MB)", json_size, json_size_mb);
+            debug!("  - Serialization time: {}ms", serialization_ms);
+            debug!("  - Semantics count: {}", ir.semantics.len());
+        }
+        Err(e) => {
+            debug!("[GRAPH] Failed to serialize IR: {}", e);
+        }
+    }
+
     Ok(IrBuildResult {
-        ir: IntermediateRepresentation::new(all_semantics, code_graph),
+        ir,
         cache_stats,
     })
 }

@@ -21,6 +21,17 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use unfault::commands;
 
+/// Initialize logger based on verbose flag
+fn init_logger(verbose: bool) {
+    let mut log_builder = env_logger::Builder::from_default_env();
+    if verbose {
+        log_builder.filter_level(log::LevelFilter::Debug);
+    } else {
+        log_builder.filter_level(log::LevelFilter::Info);
+    }
+    log_builder.init();
+}
+
 /// Output format options for commands
 #[derive(Clone, Debug, ValueEnum)]
 pub enum OutputFormat {
@@ -246,6 +257,21 @@ enum GraphCommands {
         #[arg(long, short = 'v')]
         verbose: bool,
     },
+    /// Build and dump the local code graph (for debugging)
+    Dump {
+        /// Workspace path to analyze (defaults to current directory)
+        #[arg(long, short = 'w', value_name = "PATH")]
+        workspace: Option<String>,
+        /// Output only call edges (useful for debugging call graph issues)
+        #[arg(long)]
+        calls_only: bool,
+        /// Output only specific file's information
+        #[arg(long, value_name = "FILE")]
+        file: Option<String>,
+        /// Enable verbose output
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
 }
 
 /// Centrality sort metric options
@@ -376,6 +402,7 @@ async fn run_command(command: Commands) -> i32 {
                 no_llm,
                 verbose,
             };
+            init_logger(verbose);
             match commands::ask::execute(args).await {
                 Ok(exit_code) => exit_code,
                 Err(e) => {
@@ -394,6 +421,7 @@ async fn run_command(command: Commands) -> i32 {
             }
         },
         Commands::Lsp { verbose, stdio: _ } => {
+            init_logger(verbose);
             // stdio flag is just for compatibility with language clients, we always use stdio
             let args = commands::lsp::LspArgs { verbose };
             match commands::lsp::execute(args).await {
@@ -413,6 +441,7 @@ async fn run_command(command: Commands) -> i32 {
             dry_run,
             server_parse,
         } => {
+            init_logger(verbose);
             // Convert OutputFormat to string for backward compatibility
             let output_format = match output {
                 OutputFormat::Json => "json".to_string(),
@@ -653,6 +682,26 @@ async fn run_graph_command(command: GraphCommands) -> i32 {
                 Ok(exit_code) => exit_code,
                 Err(e) => {
                     eprintln!("Graph stats error: {}", e);
+                    EXIT_ERROR
+                }
+            }
+        }
+        GraphCommands::Dump {
+            workspace,
+            calls_only,
+            file,
+            verbose,
+        } => {
+            let args = commands::graph::DumpArgs {
+                workspace_path: workspace,
+                calls_only,
+                file,
+                verbose,
+            };
+            match commands::graph::execute_dump(args) {
+                Ok(exit_code) => exit_code,
+                Err(e) => {
+                    eprintln!("Graph dump error: {}", e);
                     EXIT_ERROR
                 }
             }

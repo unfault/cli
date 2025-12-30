@@ -53,6 +53,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use log::debug;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tower_lsp::jsonrpc::Result as RpcResult;
@@ -61,8 +62,8 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use crate::api::ApiClient;
 use crate::api::graph::{
-    CentralityRequest, FileCentrality, FunctionImpactRequest, FunctionInfo, ImpactAnalysisRequest,
-    IrFinding,
+    CentralityRequest, FileCentrality, FunctionImpactRequest, FunctionInfo,
+    ImpactAnalysisRequest, IrFinding,
 };
 use crate::config::Config;
 use crate::exit_codes::*;
@@ -271,9 +272,31 @@ impl UnfaultLsp {
             self.log_debug(&format!("Large project: {} files", ir_size));
         }
 
+        debug!("[LSP] === IR Statistics for Analysis ===");
+        debug!("[LSP] Semantics count: {}", ir.semantics.len());
+        let graph_stats = ir.graph.stats();
+        debug!("[LSP] Graph file_count: {}", graph_stats.file_count);
+        debug!("[LSP] Graph function_count: {}", graph_stats.function_count);
+        debug!("[LSP] Graph class_count: {}", graph_stats.class_count);
+        debug!("[LSP] Graph external_module_count: {}", graph_stats.external_module_count);
+        debug!("[LSP] Graph import_edge_count: {}", graph_stats.import_edge_count);
+        debug!("[LSP] Graph contains_edge_count: {}", graph_stats.contains_edge_count);
+        debug!("[LSP] Graph uses_library_edge_count: {}", graph_stats.uses_library_edge_count);
+        debug!("[LSP] Graph calls_edge_count: {}", graph_stats.calls_edge_count);
+        debug!("[LSP] Project root: {:?}", project_root);
+        debug!("[LSP] File being analyzed: {:?}", file_path);
+
         // Serialize IR
+        let serialize_start = std::time::Instant::now();
         let ir_json = match serde_json::to_string(&ir) {
-            Ok(json) => json,
+            Ok(json) => {
+                let json_size = json.len();
+                let json_size_mb = json_size as f64 / (1024.0 * 1024.0);
+                let serialize_ms = serialize_start.elapsed().as_millis();
+                debug!("[LSP] Serialization time: {}ms", serialize_ms);
+                debug!("[LSP] IR JSON payload size: {} bytes ({:.2} MB)", json_size, json_size_mb);
+                json
+            },
             Err(e) => {
                 let msg = format!("Failed to serialize IR: {}", e);
                 self.log_debug(&msg);
@@ -284,6 +307,7 @@ impl UnfaultLsp {
 
         // Check payload size and warn if too large
         let payload_size_mb = ir_json.len() as f64 / (1024.0 * 1024.0);
+        debug!("[LSP] IR JSON payload size: {} bytes ({:.2} MB)", ir_json.len(), payload_size_mb);
         if payload_size_mb > 5.0 {
             let msg = format!(
                 "Project is large ({:.1}MB). Analysis may be slow or fail. Consider using a smaller workspace.",
@@ -305,7 +329,7 @@ impl UnfaultLsp {
                 .map(|r| r.id)
                 .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
 
-        self.log_debug(&format!("Project workspace ID: {}", workspace_id));
+        debug!("[LSP] Workspace ID: {}", workspace_id);
 
         // Detect profiles from project
         let mut scanner = WorkspaceScanner::new(&project_root);
@@ -326,11 +350,15 @@ impl UnfaultLsp {
             .map(|p| p.id.clone())
             .collect();
 
+        debug!("[LSP] Profiles to use: {:?}", profiles);
+
         // Call API
         let workspace_label_str = project_root
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("project");
+
+        debug!("[LSP] Calling analyze_ir API...");
 
         let response = match self
             .api_client
@@ -346,6 +374,7 @@ impl UnfaultLsp {
             Ok(response) => response,
             Err(e) => {
                 // Provide user-friendly error message
+                debug!("[LSP] API error: {:?}", e);
                 let user_msg = match &e {
                     crate::api::ApiError::Network { message } if message.contains("parse") => {
                         format!(
@@ -1023,17 +1052,27 @@ impl UnfaultLsp {
     ) -> Option<FileDependenciesNotification> {
         let graph = &ir.graph;
 
+        debug!("[LSP] === Computing Local Dependencies ===");
+        debug!("[LSP] Looking for file: {}", file_path);
+        debug!("[LSP] Graph has {} files", graph.stats().file_count);
+
         // Find the file node by path
         let file_idx = graph.find_file_by_path(file_path)?;
         
         // Get the file_id from the node
         let file_id = match &graph.graph[file_idx] {
             GraphNode::File { file_id, .. } => *file_id,
-            _ => return None,
+            _ => {
+                debug!("[LSP] Node is not a File node, skipping");
+                return None;
+            }
         };
+
+        debug!("[LSP] File ID: {:?}", file_id);
 
         // Get direct importers
         let direct_importer_ids = graph.get_importers(file_id);
+        debug!("[LSP] Direct importer IDs: {:?}", direct_importer_ids);
         
         // Convert FileIds to paths
         let direct_dependents: Vec<String> = direct_importer_ids
@@ -1048,8 +1087,11 @@ impl UnfaultLsp {
             })
             .collect();
 
+        debug!("[LSP] Direct dependent files: {:?}", direct_dependents);
+
         // Get transitive importers (up to depth 3 for consistency with API)
         let transitive = graph.get_transitive_importers(file_id, 3);
+        debug!("[LSP] Transitive importers (depth 3): {} entries", transitive.len());
         let all_dependents: Vec<String> = transitive
             .iter()
             .filter_map(|&(fid, _depth)| {
@@ -1061,6 +1103,8 @@ impl UnfaultLsp {
                 }
             })
             .collect();
+
+        debug!("[LSP] All dependent files (including transitive): {:?}", all_dependents);
 
         let direct_count = direct_dependents.len();
         let total_count = all_dependents.len() as i32;
@@ -1081,6 +1125,9 @@ impl UnfaultLsp {
                 direct_count, total_count
             )
         };
+
+        debug!("[LSP] Dependency summary: {}", summary);
+        debug!("[LSP] Direct dependents: {}, Total affected: {}", direct_count, total_count);
 
         self.log_debug(&format!(
             "Local graph: {} direct dependents, {} total for {}",
@@ -1291,6 +1338,7 @@ impl UnfaultLsp {
     /// - Function callers (direct and transitive)
     /// - Routes that use this function
     /// - Safeguards present (or missing) in the call chain
+    /// - Code review findings for the function
     async fn get_function_impact(&self, file_path: &str, function_name: &str) -> Option<String> {
         let api_key = self.config.as_ref()?.api_key.clone();
         let workspace_id = self.workspace_id.read().await.clone()?;
@@ -1324,18 +1372,104 @@ impl UnfaultLsp {
         // Format as markdown
         let mut markdown = String::new();
         markdown.push_str(&format!("**Function Impact:** {}\n\n", response.function));
+
+        // Show impact summary if available
+        if !response.impact_summary.is_empty() {
+            markdown.push_str(&format!("{}\n\n", response.impact_summary));
+        }
+
         markdown.push_str(&format!(
             "Total affected functions: {}\n\n",
             response.total_affected
         ));
 
-        if !response.direct_callers.is_empty() {
-            markdown.push_str("**Direct Callers:**\n");
-            for caller in &response.direct_callers {
-                let unknown = "unknown".to_string();
-                let path = caller.get("path").unwrap_or(&unknown);
-                let func = caller.get("function").unwrap_or(&unknown);
-                markdown.push_str(&format!("- {} ({})\n", func, path));
+        // Collect route handlers from both direct and transitive callers
+        // Only include handlers that have actual route info (non-empty method or path)
+        let all_callers: Vec<_> = response
+            .direct_callers
+            .iter()
+            .chain(response.transitive_callers.iter())
+            .filter(|c| c.is_route_handler)
+            .filter(|c| c.route_method.is_some() || c.route_path.is_some())
+            .collect();
+
+        // Deduplicate route handlers by (method, path)
+        let mut seen_routes = std::collections::HashSet::new();
+        let unique_route_handlers: Vec<_> = all_callers
+            .iter()
+            .filter(|c| {
+                let key = (
+                    c.route_method.as_deref().unwrap_or(""),
+                    c.route_path.as_deref().unwrap_or("")
+                );
+                if seen_routes.contains(&key) {
+                    false
+                } else {
+                    seen_routes.insert(key);
+                    true
+                }
+            })
+            .collect();
+
+        if !unique_route_handlers.is_empty() {
+            markdown.push_str("**HTTP Route Handlers:**\n");
+            for handler in unique_route_handlers {
+                let method = handler.route_method.as_deref().unwrap_or("").to_uppercase();
+                let path = handler.route_path.as_deref().unwrap_or("");
+                let depth = if handler.depth > 1 {
+                    format!(" (via {} hops)", handler.depth)
+                } else {
+                    String::new()
+                };
+                markdown.push_str(&format!(
+                    "- `{} {}` → {}{}\n",
+                    method,
+                    path,
+                    handler.function,
+                    depth
+                ));
+            }
+            markdown.push('\n');
+        }
+
+        // Show all callers (direct first, then transitive if any)
+        let all_non_route_callers: Vec<_> = response
+            .direct_callers
+            .iter()
+            .chain(response.transitive_callers.iter())
+            .filter(|c| !c.is_route_handler)
+            .collect();
+
+        if !all_non_route_callers.is_empty() {
+            markdown.push_str("**Call Chain:**\n");
+            for caller in all_non_route_callers {
+                let depth_label = if caller.depth > 1 {
+                    format!(" (depth {})", caller.depth)
+                } else {
+                    String::new()
+                };
+                markdown.push_str(&format!("- {}{}\n", caller.function, depth_label));
+            }
+            markdown.push('\n');
+        }
+
+        // Show code review findings for this function
+        if !response.findings.is_empty() {
+            markdown.push_str("**Code Review Insights:**\n");
+            for finding in &response.findings {
+                let icon = match finding.severity.to_lowercase().as_str() {
+                    "critical" | "high" => "💡",
+                    "medium" => "✨",
+                    "low" | "info" => "✓",
+                    _ => "○",
+                };
+                markdown.push_str(&format!(
+                    "- {} **{}** ({})\n  {}\n",
+                    icon,
+                    finding.title,
+                    finding.dimension,
+                    finding.description.lines().next().unwrap_or("")
+                ));
             }
             markdown.push('\n');
         }
@@ -1827,36 +1961,33 @@ impl LanguageServer for UnfaultLsp {
             }
         };
 
-        // Get workspace root
+        // Find the project root for this file (same logic as did_open)
+        // Graph paths are stored relative to the workspace root, not project root
         let workspace_root = {
             let root = self.workspace_root.read().await;
             root.clone()
         };
 
-        // Find the project root for this file (same logic as did_open)
-        // This is critical: paths in the graph are stored relative to project_root
-        let project_root = find_project_root(&file_path, workspace_root.as_ref())
-            .unwrap_or_else(|| {
-                workspace_root
-                    .clone()
-                    .unwrap_or_else(|| file_path.parent().unwrap_or(&file_path).to_path_buf())
-            });
+        self.log_debug(&format!("Workspace root: {:?}", workspace_root));
+        self.log_debug(&format!("File path: {:?}", file_path));
 
-        // Compute relative path from project_root (same as how graph stores paths)
-        let relative_path = file_path
-            .strip_prefix(&project_root)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| {
-                file_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string()
-            });
+        // Use workspace root for computing relative path
+        let relative_path = if let Some(ws_root) = workspace_root.as_ref() {
+            if let Ok(rel) = file_path.strip_prefix(ws_root) {
+                rel.to_string_lossy().to_string()
+            } else {
+                self.log_debug(&format!("Failed to strip workspace root, using full path"));
+                file_path.to_string_lossy().to_string()
+            }
+        } else {
+            self.log_debug(&format!("No workspace root available, using full path"));
+            file_path.to_string_lossy().to_string()
+        };
 
         // Try to get function at position from cache
         if let Some(function_name) = self.get_function_at_position(uri, position).await {
             self.log_debug(&format!("Found function at position: {}", function_name));
+            self.log_debug(&format!("Using relative path: {}", relative_path));
 
             // Get function impact analysis
             if let Some(markdown) = self.get_function_impact(&relative_path, &function_name).await {
