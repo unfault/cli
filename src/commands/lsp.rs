@@ -122,6 +122,57 @@ pub struct FileDependenciesNotification {
     pub summary: String,
 }
 
+/// Caller information for function impact response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionImpactCaller {
+    pub name: String,
+    pub file: String,
+    pub depth: i32,
+}
+
+/// Route information for function impact response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionImpactRoute {
+    pub method: String,
+    pub path: String,
+}
+
+/// Finding information for function impact response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionImpactFinding {
+    pub severity: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "learnMore")]
+    pub learn_more: Option<String>,
+}
+
+/// Request for unfault/getFunctionImpact
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetFunctionImpactRequest {
+    pub uri: String,
+    #[serde(rename = "functionName")]
+    pub function_name: String,
+    pub position: Position,
+}
+
+/// Response for unfault/getFunctionImpact
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetFunctionImpactResponse {
+    pub name: String,
+    pub callers: Vec<FunctionImpactCaller>,
+    pub routes: Vec<FunctionImpactRoute>,
+    pub findings: Vec<FunctionImpactFinding>,
+}
+
+fn normalize_severity(severity: &str) -> String {
+    match severity.to_lowercase().as_str() {
+        "critical" | "high" => "error".to_string(),
+        "medium" => "warning".to_string(),
+        _ => "info".to_string(),
+    }
+}
+
 /// The Unfault LSP backend
 struct UnfaultLsp {
     /// LSP client for sending notifications
@@ -1702,6 +1753,10 @@ impl LanguageServer for UnfaultLsp {
                 )),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec!["unfault/getFunctionImpact".to_string()],
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -2046,6 +2101,66 @@ impl LanguageServer for UnfaultLsp {
 
         Ok(None)
     }
+
+    async fn execute_command(&self, params: ExecuteCommandParams) -> RpcResult<Option<serde_json::Value>> {
+        if params.command != "unfault/getFunctionImpact" {
+            return Err(tower_lsp::jsonrpc::Error::method_not_found());
+        }
+        if params.arguments.is_empty() {
+            return Ok(None);
+        }
+        let args_value = params.arguments.first().cloned().unwrap_or(serde_json::Value::Null);
+        let req: GetFunctionImpactRequest = serde_json::from_value(args_value)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+        let uri = Url::parse(&req.uri).ok();
+        let file_path = uri.as_ref().and_then(|u| u.to_file_path().ok());
+        let workspace_root = { self.workspace_root.read().await.clone() };
+        let relative_path = match (&file_path, &workspace_root) {
+            (Some(fp), Some(ws)) => fp.strip_prefix(ws).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| fp.to_string_lossy().to_string()),
+            (Some(fp), None) => fp.to_string_lossy().to_string(),
+            _ => return Ok(None),
+        };
+        let api_key = match &self.config { Some(c) => c.api_key.clone(), None => return Ok(None) };
+        let workspace_id = match self.workspace_id.read().await.clone() { Some(id) => id, None => return Ok(None) };
+
+        let impact_request = crate::api::graph::FunctionImpactRequest {
+            session_id: None,
+            workspace_id: Some(workspace_id),
+            file_path: relative_path,
+            function_name: req.function_name.clone(),
+            max_depth: 5,
+        };
+        let response = match self.api_client.graph_function_impact(&api_key, &impact_request).await {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+
+        let mut callers = Vec::new();
+        for c in response.direct_callers.iter().chain(response.transitive_callers.iter()) {
+            if !c.is_route_handler {
+                callers.push(FunctionImpactCaller { name: c.function.clone(), file: c.path.clone(), depth: c.depth });
+            }
+        }
+        let mut routes = Vec::new();
+        for c in response.direct_callers.iter().chain(response.transitive_callers.iter()).filter(|c| c.is_route_handler) {
+            if let (Some(m), Some(p)) = (&c.route_method, &c.route_path) {
+                routes.push(FunctionImpactRoute { method: m.to_uppercase(), path: p.clone() });
+            }
+        }
+        let findings: Vec<FunctionImpactFinding> = response.findings.into_iter().map(|f| FunctionImpactFinding {
+            severity: normalize_severity(&f.severity),
+            message: format!("{}: {}", f.title, f.description.lines().next().unwrap_or("")),
+            learn_more: Some(format!("https://docs.unfault.dev/rules/{}", f.rule_id.replace('.', "/"))),
+        }).collect();
+
+        Ok(Some(serde_json::to_value(GetFunctionImpactResponse {
+            name: response.function,
+            callers,
+            routes,
+            findings,
+        }).unwrap()))
+    }
 }
 
 /// Custom notification type for file centrality
@@ -2062,6 +2177,61 @@ struct FileDependenciesNotificationType;
 impl tower_lsp::lsp_types::notification::Notification for FileDependenciesNotificationType {
     type Params = FileDependenciesNotification;
     const METHOD: &'static str = "unfault/fileDependencies";
+}
+
+impl UnfaultLsp {
+    async fn handle_get_function_impact(&self, params: serde_json::Value) -> RpcResult<Option<GetFunctionImpactResponse>> {
+        let req: GetFunctionImpactRequest = serde_json::from_value(params)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+        let uri = Url::parse(&req.uri).ok();
+        let file_path = uri.as_ref().and_then(|u| u.to_file_path().ok());
+        let workspace_root = { self.workspace_root.read().await.clone() };
+        let relative_path = match (&file_path, &workspace_root) {
+            (Some(fp), Some(ws)) => fp.strip_prefix(ws).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| fp.to_string_lossy().to_string()),
+            (Some(fp), None) => fp.to_string_lossy().to_string(),
+            _ => return Ok(None),
+        };
+        let api_key = match &self.config { Some(c) => c.api_key.clone(), None => return Ok(None) };
+        let workspace_id = match self.workspace_id.read().await.clone() { Some(id) => id, None => return Ok(None) };
+
+        let impact_request = crate::api::graph::FunctionImpactRequest {
+            session_id: None,
+            workspace_id: Some(workspace_id),
+            file_path: relative_path,
+            function_name: req.function_name.clone(),
+            max_depth: 5,
+        };
+        let response = match self.api_client.graph_function_impact(&api_key, &impact_request).await {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+
+        let mut callers = Vec::new();
+        for c in response.direct_callers.iter().chain(response.transitive_callers.iter()) {
+            if !c.is_route_handler {
+                callers.push(FunctionImpactCaller { name: c.function.clone(), file: c.path.clone(), depth: c.depth });
+            }
+        }
+        let mut routes = Vec::new();
+        for c in response.direct_callers.iter().chain(response.transitive_callers.iter()).filter(|c| c.is_route_handler) {
+            if let (Some(m), Some(p)) = (&c.route_method, &c.route_path) {
+                routes.push(FunctionImpactRoute { method: m.to_uppercase(), path: p.clone() });
+            }
+        }
+        let findings: Vec<FunctionImpactFinding> = response.findings.into_iter().map(|f| FunctionImpactFinding {
+            severity: normalize_severity(&f.severity),
+            message: format!("{}: {}", f.title, f.description.lines().next().unwrap_or("")),
+            learn_more: Some(format!("https://docs.unfault.dev/rules/{}", f.rule_id.replace('.', "/"))),
+        }).collect();
+
+        Ok(Some(GetFunctionImpactResponse {
+            name: response.function,
+            callers,
+            routes,
+            findings,
+        }))
+    }
 }
 
 /// Execute the LSP command
@@ -2084,7 +2254,9 @@ pub async fn execute(args: LspArgs) -> anyhow::Result<i32> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::new(|client| UnfaultLsp::new(client, args.verbose));
+    let (service, socket) = LspService::build(|client| UnfaultLsp::new(client, args.verbose))
+        .custom_method("unfault/getFunctionImpact", UnfaultLsp::handle_get_function_impact)
+        .finish();
 
     Server::new(stdin, stdout, socket).serve(service).await;
 
@@ -2376,5 +2548,76 @@ mod tests {
             }
             _ => panic!("Expected ReplaceBytes"),
         }
+    }
+
+    #[test]
+    fn test_get_function_impact_request_serialization() {
+        let req = GetFunctionImpactRequest {
+            uri: "file:///path/to/file.py".to_string(),
+            function_name: "my_func".to_string(),
+            position: Position { line: 10, character: 0 },
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"functionName\":\"my_func\""));
+        assert!(json.contains("\"uri\":\"file:///path/to/file.py\""));
+    }
+
+    #[test]
+    fn test_get_function_impact_response_serialization() {
+        let resp = GetFunctionImpactResponse {
+            name: "my_func".to_string(),
+            callers: vec![FunctionImpactCaller {
+                name: "caller_func".to_string(),
+                file: "main.py".to_string(),
+                depth: 1,
+            }],
+            routes: vec![FunctionImpactRoute {
+                method: "POST".to_string(),
+                path: "/api/test".to_string(),
+            }],
+            findings: vec![FunctionImpactFinding {
+                severity: "warning".to_string(),
+                message: "Test finding".to_string(),
+                learn_more: Some("https://example.com".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"name\":\"my_func\""));
+        assert!(json.contains("\"callers\""));
+        assert!(json.contains("\"caller_func\""));
+        assert!(json.contains("\"routes\""));
+        assert!(json.contains("\"POST\""));
+        assert!(json.contains("\"findings\""));
+        assert!(json.contains("\"learnMore\""));
+    }
+
+    #[test]
+    fn test_get_function_impact_response_deserialization() {
+        let json = r#"{
+            "name": "add",
+            "callers": [{"name": "main", "file": "app.py", "depth": 1}],
+            "routes": [{"method": "GET", "path": "/api"}],
+            "findings": [{"severity": "error", "message": "issue", "learnMore": "http://x"}]
+        }"#;
+        let resp: GetFunctionImpactResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.name, "add");
+        assert_eq!(resp.callers.len(), 1);
+        assert_eq!(resp.callers[0].name, "main");
+        assert_eq!(resp.routes.len(), 1);
+        assert_eq!(resp.routes[0].method, "GET");
+        assert_eq!(resp.findings.len(), 1);
+        assert_eq!(resp.findings[0].learn_more, Some("http://x".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_severity() {
+        assert_eq!(normalize_severity("critical"), "error");
+        assert_eq!(normalize_severity("high"), "error");
+        assert_eq!(normalize_severity("HIGH"), "error");
+        assert_eq!(normalize_severity("medium"), "warning");
+        assert_eq!(normalize_severity("MEDIUM"), "warning");
+        assert_eq!(normalize_severity("low"), "info");
+        assert_eq!(normalize_severity("info"), "info");
+        assert_eq!(normalize_severity("unknown"), "info");
     }
 }
