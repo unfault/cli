@@ -666,6 +666,7 @@ impl ApiClient {
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
+            .body(Vec::<u8>::new())
             .send()
             .await
             .map_err(to_network_error)?;

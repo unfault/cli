@@ -799,6 +799,7 @@ impl ApiClient {
             .client
             .post(&start_url)
             .header("Authorization", format!("Bearer {}", api_key))
+            .body(Vec::<u8>::new())
             .send()
             .await
             .map_err(to_network_error)?;
@@ -889,6 +890,7 @@ impl ApiClient {
                 .client
                 .post(&trans_url)
                 .header("Authorization", format!("Bearer {}", api_key))
+                .body(Vec::<u8>::new())
                 .send()
                 .await
                 .map_err(to_network_error)?;
@@ -967,6 +969,7 @@ impl ApiClient {
                 .client
                 .post(&done_url)
                 .header("Authorization", format!("Bearer {}", api_key))
+                .body(Vec::<u8>::new())
                 .send()
                 .await
                 .map_err(to_network_error)?;
