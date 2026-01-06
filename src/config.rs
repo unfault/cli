@@ -334,6 +334,7 @@ fn dirs_config_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::env;
     use tempfile::TempDir;
 
@@ -344,6 +345,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_new_with_url() {
         // Clear env var to test stored URL
         // SAFETY: Test code runs serially with serial_test, no other threads access this env var
@@ -368,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_deserialization() {
         // Clear env var to test stored URL
         // SAFETY: Test code runs serially with serial_test, no other threads access this env var
@@ -387,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_default_base_url_without_env() {
         // Clear the env var if set
         // SAFETY: Test code runs serially with serial_test, no other threads access this env var
@@ -396,6 +400,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_default_base_url_with_env() {
         // SAFETY: Test code runs serially with serial_test, no other threads access this env var
         unsafe { env::set_var(BASE_URL_ENV_VAR, "http://localhost:9000") };
@@ -406,6 +411,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_save_and_load() {
         // Clear env var to test stored URL
         // SAFETY: Test code runs serially with serial_test, no other threads access this env var
@@ -434,6 +440,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_env_var_takes_precedence() {
         let config = Config::new_with_url(
             "sk_live_test123".to_string(),
