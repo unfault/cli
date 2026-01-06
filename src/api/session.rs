@@ -299,7 +299,7 @@ pub struct SessionNewResponse {
     pub subscription_warning: Option<SubscriptionWarning>,
 }
 
-/// Source location for a finding
+/// Source location for a finding (legacy format)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FindingLocation {
     /// File path relative to workspace root
@@ -336,7 +336,22 @@ pub struct Finding {
     pub confidence: f64,
     /// Dimension this finding relates to
     pub dimension: String,
-    /// Source location (file, line range)
+    /// File path where this finding was detected (new format)
+    #[serde(default)]
+    pub file_path: Option<String>,
+    /// Line number (1-based) where the finding starts (new format)
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// Column number (1-based) where the finding starts (new format)
+    #[serde(default)]
+    pub column: Option<u32>,
+    /// Line number (1-based) where the finding ends (new format)
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    /// Column number (1-based) where the finding ends (new format)
+    #[serde(default)]
+    pub end_column: Option<u32>,
+    /// Source location (file, line range) - legacy format
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<FindingLocation>,
     /// Unified diff for auto-fix
@@ -426,6 +441,31 @@ pub struct SessionEmbedResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HealthResponse {
     // Empty response indicates healthy
+}
+
+/// Response from session findings endpoint
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionFindingsResponse {
+    /// Session identifier
+    pub session_id: String,
+    /// Human-readable workspace label
+    pub workspace_label: Option<String>,
+    /// Total number of findings
+    pub total_count: i32,
+    /// Number of Critical severity findings
+    pub critical_count: i32,
+    /// Number of High severity findings
+    pub high_count: i32,
+    /// Number of Medium severity findings
+    pub medium_count: i32,
+    /// Number of Low severity findings
+    pub low_count: i32,
+    /// Number of Info severity findings
+    pub info_count: i32,
+    /// Number of findings with auto-fix diffs available
+    pub with_diff_count: i32,
+    /// All findings from the session
+    pub findings: Vec<Finding>,
 }
 
 // =============================================================================
@@ -704,6 +744,46 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         Ok(response.status().is_success())
+    }
+
+    /// Fetch findings for a completed session.
+    ///
+    /// This retrieves findings from the `findings` table (chunked analysis path)
+    /// or falls back to `result_data` for backward compatibility.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - API key for authentication
+    /// * `session_id` - Session identifier
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SessionFindingsResponse)` - Findings retrieved
+    /// * `Err(ApiError)` - Request failed
+    pub async fn get_session_findings(
+        &self,
+        api_key: &str,
+        session_id: &str,
+    ) -> Result<SessionFindingsResponse, ApiError> {
+        let url = format!("{}/api/v1/session/{}/findings", self.base_url, session_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        response.json().await.map_err(|e| ApiError::ParseError {
+            message: format!("Failed to parse session findings response: {}", e),
+        })
     }
 }
 

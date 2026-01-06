@@ -223,6 +223,58 @@ pub struct IrAnalyzeResponse {
     pub graph_stats: Option<IrGraphStats>,
 }
 
+// =============================================================================
+// Chunked Semantics Analysis Types
+// =============================================================================
+
+/// Request to start chunked semantics analysis
+#[derive(Debug, Clone, Serialize)]
+pub struct AnalyzeStartRequest {
+    /// Session ID created by POST /api/v1/graph/ingest
+    pub session_id: String,
+    /// Optional list of rule IDs to run
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_ids: Option<Vec<String>>,
+    /// Optional list of profiles to resolve to rules
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<Vec<String>>,
+}
+
+/// Response from starting chunked analysis
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnalyzeStartResponse {
+    pub session_id: String,
+    pub next_seq: i64,
+}
+
+/// Response from uploading an analysis chunk
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnalyzeChunkResponse {
+    pub session_id: String,
+    pub seq: i64,
+    pub next_seq: i64,
+    pub files_processed_total: i64,
+    pub findings_added_in_chunk: i64,
+    pub findings_total_so_far: i64,
+}
+
+/// Response from analysis status endpoint
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnalyzeStatusResponse {
+    pub session_id: String,
+    pub next_seq: i64,
+    pub files_processed_total: i64,
+    pub findings_total_so_far: i64,
+}
+
+/// Response from finalizing chunked analysis
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnalyzeFinalizeResponse {
+    pub session_id: String,
+    pub files_processed_total: i64,
+    pub findings_total_so_far: i64,
+}
+
 /// Graph statistics from IR analysis (matches API IrGraphStats)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IrGraphStats {
@@ -1090,6 +1142,186 @@ impl ApiClient {
         }
 
         Ok(analyze_response)
+    }
+
+    // =========================================================================
+    // Chunked Semantics Analysis Methods
+    // =========================================================================
+
+    /// Start a chunked semantics analysis session.
+    ///
+    /// This initializes analysis state for streaming semantics to the server.
+    /// Call this after `ingest_graph` and before sending semantics chunks.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - API key for authentication
+    /// * `session_id` - Session ID from graph ingest
+    /// * `profiles` - List of profiles to resolve to rules (e.g., ["stability"])
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(AnalyzeStartResponse)` - Contains next_seq for first chunk
+    /// * `Err(ApiError)` - Request failed
+    pub async fn analyze_start(
+        &self,
+        api_key: &str,
+        session_id: &str,
+        profiles: &[String],
+    ) -> Result<AnalyzeStartResponse, ApiError> {
+        let url = format!("{}/api/v1/graph/analyze/start", self.base_url);
+
+        let request = AnalyzeStartRequest {
+            session_id: session_id.to_string(),
+            rule_ids: None,
+            profiles: if profiles.is_empty() {
+                None
+            } else {
+                Some(profiles.to_vec())
+            },
+        };
+
+        debug!("[API] Starting chunked analysis for session {}", session_id);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&request)
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        response.json().await.map_err(|e| ApiError::ParseError {
+            message: format!("Failed to parse analyze start response: {}", e),
+        })
+    }
+
+    /// Get the current status of a chunked analysis.
+    ///
+    /// Use this to check progress or resume after a failed chunk upload.
+    pub async fn analyze_status(
+        &self,
+        api_key: &str,
+        session_id: &str,
+    ) -> Result<AnalyzeStatusResponse, ApiError> {
+        let url = format!(
+            "{}/api/v1/graph/analyze/status?session_id={}",
+            self.base_url,
+            urlencoding::encode(session_id)
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        response.json().await.map_err(|e| ApiError::ParseError {
+            message: format!("Failed to parse analyze status response: {}", e),
+        })
+    }
+
+    /// Upload a chunk of semantics for analysis.
+    ///
+    /// Each chunk is zstd-compressed framed msgpack containing per-file semantics
+    /// records and a final control record with checksum.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - API key for authentication
+    /// * `session_id` - Session ID from graph ingest
+    /// * `seq` - Chunk sequence number (must match server's expected next_seq)
+    /// * `chunk_data` - Compressed chunk bytes from `encode_semantics_chunk`
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(AnalyzeChunkResponse)` - Contains updated findings count
+    /// * `Err(ApiError)` - Request failed (409 if seq mismatch)
+    pub async fn analyze_chunk(
+        &self,
+        api_key: &str,
+        session_id: &str,
+        seq: u32,
+        chunk_data: Vec<u8>,
+    ) -> Result<AnalyzeChunkResponse, ApiError> {
+        let url = format!(
+            "{}/api/v1/graph/analyze/chunk?session_id={}&seq={}",
+            self.base_url,
+            urlencoding::encode(session_id),
+            seq
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/x-msgpack")
+            .header("Content-Encoding", "zstd")
+            .body(chunk_data)
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        response.json().await.map_err(|e| ApiError::ParseError {
+            message: format!("Failed to parse analyze chunk response: {}", e),
+        })
+    }
+
+    /// Finalize a chunked analysis session.
+    ///
+    /// Call this after all semantics chunks have been uploaded.
+    /// This marks the session as complete and returns final totals.
+    pub async fn analyze_finalize(
+        &self,
+        api_key: &str,
+        session_id: &str,
+    ) -> Result<AnalyzeFinalizeResponse, ApiError> {
+        let url = format!(
+            "{}/api/v1/graph/analyze/finalize?session_id={}",
+            self.base_url,
+            urlencoding::encode(session_id)
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Length", 0)
+            .body(Vec::<u8>::new())
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        response.json().await.map_err(|e| ApiError::ParseError {
+            message: format!("Failed to parse analyze finalize response: {}", e),
+        })
     }
 }
 

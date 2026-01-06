@@ -381,8 +381,9 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
 ///
 /// 1. Parse source files locally using tree-sitter
 /// 2. Build IR (semantics + graph)
-/// 3. Serialize and send IR to API
-/// 4. Receive findings and optionally apply patches
+/// 3. Ingest graph to API (chunked, resumable)
+/// 4. Stream semantics in chunks to API for rule evaluation
+/// 5. Fetch findings and optionally apply patches
 #[allow(clippy::too_many_arguments)]
 async fn execute_client_parse(
     args: &ReviewArgs,
@@ -395,6 +396,8 @@ async fn execute_client_parse(
     workspace_info: &crate::session::WorkspaceInfo,
     session_start: Instant,
 ) -> Result<i32> {
+    use crate::api::SemanticsChunker;
+
     // Create progress bar for operations
     let pb = ProgressBar::new_spinner();
     pb.set_style(
@@ -482,30 +485,6 @@ async fn execute_client_parse(
         eprintln!("{} Session ID: {}", "DEBUG".yellow(), ingest.session_id);
     }
 
-    // Graph is moved into the ingestion request
-
-    // Step 4: Serialize semantics for rule analysis
-    pb.set_message("Serializing semantics...");
-
-    let serialize_start = Instant::now();
-    let semantics_json = match serde_json::to_string(&semantics) {
-        Ok(json) => json,
-        Err(e) => {
-            pb.finish_and_clear();
-            eprintln!("{} Failed to serialize semantics: {}", "✗".red().bold(), e);
-            return Ok(EXIT_CONFIG_ERROR);
-        }
-    };
-
-    if args.verbose {
-        eprintln!(
-            "\n{} Semantics JSON size: {} bytes ({}ms)",
-            "DEBUG".yellow(),
-            semantics_json.len(),
-            serialize_start.elapsed().as_millis()
-        );
-    }
-
     if args.verbose {
         if let Some(ref result) = workspace_id_result {
             eprintln!(
@@ -516,9 +495,6 @@ async fn execute_client_parse(
             );
         }
     }
-
-    // Step 5: Run semantics-only rule analysis
-    pb.set_message("Analyzing semantics...");
 
     // Build profiles from detected frameworks (e.g., "python_fastapi_backend", "go_gin_service")
     // The API resolves these profile IDs to specific rules
@@ -533,30 +509,165 @@ async fn execute_client_parse(
         eprintln!("\n{} Detected profiles: {:?}", "DEBUG".yellow(), profiles);
     }
 
+    // Step 4: Initialize chunked analysis
+    pb.set_message("Starting analysis...");
+
     let api_start = Instant::now();
-    let response = match api_client
-        .analyze_ir(
-            &config.api_key,
-            &ingest.session_id,
-            &profiles,
-            semantics_json,
-        )
+    let _start_resp = match api_client
+        .analyze_start(&config.api_key, &ingest.session_id, &profiles)
         .await
     {
-        Ok(response) => response,
+        Ok(resp) => resp,
         Err(e) => {
             pb.finish_and_clear();
             return Ok(handle_api_error(e));
         }
     };
-    let _api_ms = api_start.elapsed().as_millis();
+
+    // Step 5: Stream semantics in chunks
+    let mut chunker = SemanticsChunker::new(&semantics);
+    let total_files = chunker.total_files();
+    let mut findings_total: i64 = 0;
+    let mut chunk_count: u32 = 0;
+
+    while let Some(encoded_chunk) = chunker.next_chunk()? {
+        let files_processed = chunker.files_processed();
+        pb.set_message(format!(
+            "Analyzing... {} insights found ({}/{})",
+            findings_total, files_processed, total_files
+        ));
+
+        let chunk_resp = match api_client
+            .analyze_chunk(
+                &config.api_key,
+                &ingest.session_id,
+                chunk_count,
+                encoded_chunk.data,
+            )
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                // On error, try to get status and potentially resume
+                if args.verbose {
+                    eprintln!(
+                        "\n{} Chunk {} failed: {:?}",
+                        "DEBUG".yellow(),
+                        chunk_count,
+                        e
+                    );
+                }
+                pb.finish_and_clear();
+                return Ok(handle_api_error(e));
+            }
+        };
+
+        findings_total = chunk_resp.findings_total_so_far;
+        chunk_count += 1;
+
+        if args.verbose && encoded_chunk.is_last {
+            eprintln!(
+                "\n{} Sent {} chunks, {} files, {} findings",
+                "DEBUG".yellow(),
+                chunk_count,
+                chunk_resp.files_processed_total,
+                findings_total
+            );
+        }
+    }
+
+    // Step 6: Finalize analysis
+    pb.set_message("Finalizing analysis...");
+
+    let finalize_resp = match api_client
+        .analyze_finalize(&config.api_key, &ingest.session_id)
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            pb.finish_and_clear();
+            return Ok(handle_api_error(e));
+        }
+    };
+
+    let engine_ms = api_start.elapsed().as_millis() as u64;
+
+    if args.verbose {
+        eprintln!(
+            "\n{} Finalized: {} files, {} findings",
+            "DEBUG".yellow(),
+            finalize_resp.files_processed_total,
+            finalize_resp.findings_total_so_far
+        );
+    }
+
+    // Step 7: Fetch findings from the findings table
+    pb.set_message("Fetching results...");
+
+    let findings_resp = match api_client
+        .get_session_findings(&config.api_key, &ingest.session_id)
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            pb.finish_and_clear();
+            return Ok(handle_api_error(e));
+        }
+    };
 
     pb.finish_and_clear();
+
+    // Convert Finding to IrFinding for display
+    // Supports both new (file_path/line/column) and legacy (location) formats
+    let findings: Vec<IrFinding> = findings_resp
+        .findings
+        .iter()
+        .map(|f| {
+            // Prefer new format fields, fall back to legacy location
+            let (file_path, line, column, end_line, end_column) = if f.file_path.is_some() {
+                (
+                    f.file_path.clone().unwrap_or_default(),
+                    f.line.unwrap_or(0),
+                    f.column.unwrap_or(0),
+                    f.end_line,
+                    f.end_column,
+                )
+            } else if let Some(ref loc) = f.location {
+                (
+                    loc.file.clone(),
+                    loc.start_line,
+                    loc.start_column.unwrap_or(0),
+                    loc.end_line,
+                    loc.end_column,
+                )
+            } else {
+                (String::new(), 0, 0, None, None)
+            };
+
+            IrFinding {
+                rule_id: f.rule_id.clone(),
+                title: f.title.clone(),
+                description: f.description.clone(),
+                severity: f.severity.clone(),
+                dimension: f.dimension.clone(),
+                file_path,
+                line,
+                column,
+                end_line,
+                end_column,
+                message: f.description.clone(),
+                patch_json: None,
+                fix_preview: f.fix_preview.clone(),
+                patch: f.diff.clone(),
+                byte_start: None,
+                byte_end: None,
+            }
+        })
+        .collect();
 
     // Calculate elapsed time
     let elapsed = session_start.elapsed();
     let elapsed_ms = elapsed.as_millis() as u64;
-    let engine_ms = response.elapsed_ms as u64;
 
     // Get cache hit rate for display context
     let cache_hit_rate = cache_stats.hit_rate();
@@ -566,20 +677,20 @@ async fn execute_client_parse(
         None
     };
 
-    let finding_count = response.findings.len();
+    let finding_count = findings.len();
 
     if args.verbose {
         eprintln!(
             "\n{} Analysis response: {} findings from {} files",
             "DEBUG".yellow(),
             finding_count,
-            response.file_count
+            file_count
         );
     }
 
     // Handle fix/dry-run mode
     let applied_patches = if args.fix || args.dry_run {
-        apply_ir_patches(args, current_dir, &response.findings)?
+        apply_ir_patches(args, current_dir, &findings)?
     } else {
         0
     };
@@ -599,7 +710,7 @@ async fn execute_client_parse(
         profile: args.profile.clone(),
     };
 
-    display_ir_findings(args, &response.findings, applied_patches, &display_context);
+    display_ir_findings(args, &findings, applied_patches, &display_context);
 
     if finding_count > 0 {
         Ok(EXIT_FINDINGS_FOUND)
@@ -1732,6 +1843,11 @@ mod tests {
             severity: "Medium".to_string(),
             confidence: 0.85,
             dimension: "Stability".to_string(),
+            file_path: None,
+            line: None,
+            column: None,
+            end_line: None,
+            end_column: None,
             location: None,
             diff: None,
             fix_preview: None,
@@ -1751,6 +1867,11 @@ mod tests {
                 severity: "High".to_string(),
                 confidence: 0.9,
                 dimension: "Stability".to_string(),
+                file_path: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
                 location: None,
                 diff: None,
                 fix_preview: None,
@@ -1764,6 +1885,11 @@ mod tests {
                 severity: "High".to_string(),
                 confidence: 0.9,
                 dimension: "Stability".to_string(),
+                file_path: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
                 location: None,
                 diff: None,
                 fix_preview: None,
@@ -1777,6 +1903,11 @@ mod tests {
                 severity: "Medium".to_string(),
                 confidence: 0.85,
                 dimension: "Correctness".to_string(),
+                file_path: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
                 location: None,
                 diff: None,
                 fix_preview: None,
@@ -1790,6 +1921,11 @@ mod tests {
                 severity: "Critical".to_string(),
                 confidence: 0.95,
                 dimension: "Stability".to_string(),
+                file_path: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
                 location: None,
                 diff: None,
                 fix_preview: None,
@@ -1817,6 +1953,11 @@ mod tests {
                     severity: "High".to_string(),
                     confidence: 0.9,
                     dimension: "Stability".to_string(),
+                    file_path: None,
+                    line: None,
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     location: Some(crate::api::FindingLocation {
                         file: "src/main.py".to_string(),
                         start_line: 10,
