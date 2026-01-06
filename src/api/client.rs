@@ -175,11 +175,7 @@ impl ApiClient {
             headers.insert("X-Cloud-Trace-Context", header_value);
         }
 
-        // Force HTTP/1.1 for WAF compatibility.
-        // Some intermediaries incorrectly reject HTTP/2 requests that omit the
-        // `Content-Length` header (even when the body length is known).
         let client = Client::builder()
-            .http1_only()
             .default_headers(headers)
             .build()
             .unwrap_or_else(|_| Client::new());

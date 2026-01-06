@@ -666,6 +666,7 @@ impl ApiClient {
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Length", 0)
             .body(Vec::<u8>::new())
             .send()
             .await

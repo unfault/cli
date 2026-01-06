@@ -799,6 +799,7 @@ impl ApiClient {
             .client
             .post(&start_url)
             .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Length", 0)
             .body(Vec::<u8>::new())
             .send()
             .await
@@ -890,6 +891,7 @@ impl ApiClient {
                 .client
                 .post(&trans_url)
                 .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Length", 0)
                 .body(Vec::<u8>::new())
                 .send()
                 .await
@@ -969,6 +971,7 @@ impl ApiClient {
                 .client
                 .post(&done_url)
                 .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Length", 0)
                 .body(Vec::<u8>::new())
                 .send()
                 .await
