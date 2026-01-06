@@ -371,6 +371,14 @@ enum LlmCommands {
 
 #[tokio::main]
 async fn main() {
+    // Initialize rayon with larger stack size for tree-sitter parsing
+    // Tree-sitter uses deep recursion which can overflow the default 2MB stack
+    // especially for large codebases like kubernetes
+    rayon::ThreadPoolBuilder::new()
+        .stack_size(8 * 1024 * 1024) // 8MB per thread
+        .build_global()
+        .unwrap();
+
     let cli = Cli::parse();
     let exit_code = run_command(cli.command).await;
     std::process::exit(exit_code);

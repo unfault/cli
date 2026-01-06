@@ -750,8 +750,7 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
         println!("{}", "Direct Dependencies".bold().underline());
         println!(
             "{}",
-            "Files that import this directly — changes here affect them first"
-                .dimmed()
+            "Files that import this directly — changes here affect them first".dimmed()
         );
         println!("{}", "─".repeat(60).dimmed());
         for file in &response.direct_importers {
@@ -771,8 +770,7 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
         println!("{}", "Transitive Dependencies".bold().underline());
         println!(
             "{}",
-            "Files that depend on this indirectly — ripple effects"
-                .dimmed()
+            "Files that depend on this indirectly — ripple effects".dimmed()
         );
         println!("{}", "─".repeat(60).dimmed());
         for file in &transitive_only {
@@ -817,11 +815,7 @@ fn output_deps_json(response: &DependencyQueryResponse) -> Result<()> {
     Ok(())
 }
 
-fn output_library_formatted(
-    response: &DependencyQueryResponse,
-    library_name: &str,
-    verbose: bool,
-) {
+fn output_library_formatted(response: &DependencyQueryResponse, library_name: &str, verbose: bool) {
     println!();
     println!(
         "{} {} {}",
@@ -851,10 +845,7 @@ fn output_library_formatted(
             );
             println!();
             println!("{}", "Usage Locations".bold().underline());
-            println!(
-                "{}",
-                "These files import this library directly".dimmed()
-            );
+            println!("{}", "These files import this library directly".dimmed());
             println!("{}", "─".repeat(60).dimmed());
             for file in files {
                 let lang = file.language.as_deref().unwrap_or("?");
@@ -911,8 +902,10 @@ fn output_deps_formatted(response: &DependencyQueryResponse, file_path: &str, ve
             );
         } else {
             // Group dependencies by category
-            let mut by_category: std::collections::HashMap<&str, Vec<&crate::api::graph::ExternalModuleInfo>> =
-                std::collections::HashMap::new();
+            let mut by_category: std::collections::HashMap<
+                &str,
+                Vec<&crate::api::graph::ExternalModuleInfo>,
+            > = std::collections::HashMap::new();
             for dep in deps {
                 let category = dep.category.as_deref().unwrap_or("Other");
                 by_category.entry(category).or_default().push(dep);
@@ -922,9 +915,17 @@ fn output_deps_formatted(response: &DependencyQueryResponse, file_path: &str, ve
                 "  {} This file uses {} external {} across {} {}",
                 "→".cyan(),
                 deps.len().to_string().bold(),
-                if deps.len() == 1 { "library" } else { "libraries" },
+                if deps.len() == 1 {
+                    "library"
+                } else {
+                    "libraries"
+                },
                 by_category.len(),
-                if by_category.len() == 1 { "category" } else { "categories" }
+                if by_category.len() == 1 {
+                    "category"
+                } else {
+                    "categories"
+                }
             );
             println!();
 
@@ -1013,11 +1014,7 @@ fn output_critical_json(response: &CentralityResponse) -> Result<()> {
 
 fn output_critical_formatted(response: &CentralityResponse, verbose: bool) {
     println!();
-    println!(
-        "{} {}",
-        "🎯".cyan(),
-        "Hub Files Analysis".bold()
-    );
+    println!("{} {}", "🎯".cyan(), "Hub Files Analysis".bold());
     println!(
         "{}",
         "Files with the most connections — changes here have the widest impact".dimmed()
@@ -1025,7 +1022,10 @@ fn output_critical_formatted(response: &CentralityResponse, verbose: bool) {
     println!();
 
     if response.files.is_empty() {
-        println!("  {} No files analyzed yet. Run 'unfault review' first.", "ℹ".blue());
+        println!(
+            "  {} No files analyzed yet. Run 'unfault review' first.",
+            "ℹ".blue()
+        );
         println!();
         return;
     }
@@ -1257,10 +1257,7 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         // Direct callers
         if !response.direct_callers.is_empty() {
             println!("{}", "Direct Callers".bold().underline());
-            println!(
-                "{}",
-                "Functions that call this directly".dimmed()
-            );
+            println!("{}", "Functions that call this directly".dimmed());
             println!("{}", "─".repeat(60).dimmed());
             for caller in &response.direct_callers {
                 println!(
@@ -1508,7 +1505,11 @@ pub fn execute_dump(args: DumpArgs) -> Result<i32> {
         }
 
         let file_graph = FileGraph {
-            file: graph.files.iter().find(|f| f.path.contains(file_filter)).cloned(),
+            file: graph
+                .files
+                .iter()
+                .find(|f| f.path.contains(file_filter))
+                .cloned(),
             functions: graph
                 .functions
                 .iter()
@@ -1526,9 +1527,10 @@ pub fn execute_dump(args: DumpArgs) -> Result<i32> {
                 .iter()
                 .filter(|c| {
                     // Find the callee's file
-                    graph.functions.iter().any(|f| {
-                        f.qualified_name == c.callee && f.file_path.contains(file_filter)
-                    })
+                    graph
+                        .functions
+                        .iter()
+                        .any(|f| f.qualified_name == c.callee && f.file_path.contains(file_filter))
                 })
                 .cloned()
                 .collect(),

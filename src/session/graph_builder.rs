@@ -614,9 +614,10 @@ def main():
         );
 
         // Check the import edge
-        let relative_import = graph.imports.iter().find(|i|
-            i.from_file == "app.py" && i.to_file == "utils.py"
-        );
+        let relative_import = graph
+            .imports
+            .iter()
+            .find(|i| i.from_file == "app.py" && i.to_file == "utils.py");
         assert!(
             relative_import.is_some(),
             "Expected import edge from app.py to utils.py, found: {:?}",

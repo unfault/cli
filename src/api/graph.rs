@@ -5,7 +5,8 @@
 //!
 //! ## Endpoints
 //!
-//! - `POST /api/v1/graph/analyze` - Analyze IR with rules (client-side parsing, builds full graph)
+//! - `POST /api/v1/graph/ingest` - Ingest full graph stream (chunked)
+//! - `POST /api/v1/graph/analyze` - Analyze semantics with rules (no graph payload)
 //! - `POST /api/v1/graph/impact` - Impact analysis ("What breaks if I change X?")
 //! - `POST /api/v1/graph/dependencies` - Dependency queries
 //! - `POST /api/v1/graph/centrality` - Centrality analysis ("What are the most critical files?")
@@ -13,11 +14,11 @@
 //!
 //! ## Note
 //!
-//! The code graph is automatically built when running `unfault review`, which uses
-//! client-side parsing to build the full IR (semantics + graph) and sends it to
-//! the `/api/v1/graph/analyze` endpoint.
+//! The code graph is ingested via `/api/v1/graph/ingest` and then the CLI sends
+//! the per-file semantics via `/api/v1/graph/analyze` for rule evaluation.
 
 use crate::api::client::{ApiClient, ApiError};
+use futures_util::TryStreamExt;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::Range;
@@ -119,24 +120,20 @@ pub struct CentralityRequest {
 ///
 /// let ir = build_ir(&workspace_path, &files)?;
 /// let request = IrAnalyzeRequest {
-///     workspace_id: "wks_abc123".to_string(),
-///     workspace_label: Some("my-project".to_string()),
+///     session_id: "...".to_string(),
 ///     profiles: vec!["stability".to_string()],
-///     ir_json: serde_json::to_string(&ir)?,
+///     semantics_json: serde_json::to_string(&ir.semantics)?,
 /// };
 /// let response = client.analyze_ir(&api_key, &request).await?;
 /// ```
 #[derive(Debug, Clone, Serialize)]
 pub struct IrAnalyzeRequest {
-    /// Workspace ID (computed from git remote or manifest)
-    pub workspace_id: String,
-    /// Human-readable workspace label (usually directory name)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_label: Option<String>,
+    /// Session ID returned by POST /api/v1/graph/ingest
+    pub session_id: String,
     /// Profiles to use for analysis (e.g., ["stability", "security"])
     pub profiles: Vec<String>,
-    /// JSON-serialized IntermediateRepresentation from unfault-core
-    pub ir_json: String,
+    /// JSON-serialized semantics array from unfault-core IR
+    pub semantics_json: String,
 }
 
 /// A single finding from rule evaluation (API response format)
@@ -187,6 +184,15 @@ pub struct IrFinding {
     /// Byte offset end (for precise patching)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub byte_end: Option<usize>,
+}
+
+/// Response from graph ingestion endpoint
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GraphIngestResponse {
+    pub session_id: String,
+    pub nodes_created: i64,
+    pub edges_created: i64,
+    pub elapsed_ms: i64,
 }
 
 /// Response from IR analysis endpoint (matches API IrAnalysisResponse)
@@ -479,7 +485,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
-        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+        debug!(
+            "[API] Response status: {} ({})",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
+        );
 
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -513,7 +523,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
-        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+        debug!(
+            "[API] Response status: {} ({})",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
+        );
 
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -547,7 +561,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
-        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+        debug!(
+            "[API] Response status: {} ({})",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
+        );
 
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -581,7 +599,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
-        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+        debug!(
+            "[API] Response status: {} ({})",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
+        );
 
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -593,9 +615,13 @@ impl ApiClient {
         let response_text = response.text().await.unwrap_or_default();
         debug!("[API] Function impact response body: {}", response_text);
 
-        let impact_response: FunctionImpactResponse =
-            serde_json::from_str(&response_text).map_err(|e| ApiError::ParseError {
-                message: format!("Failed to parse function impact response: {} (body: {})", e, response_text.chars().take(200).collect::<String>()),
+        let impact_response: FunctionImpactResponse = serde_json::from_str(&response_text)
+            .map_err(|e| ApiError::ParseError {
+                message: format!(
+                    "Failed to parse function impact response: {} (body: {})",
+                    e,
+                    response_text.chars().take(200).collect::<String>()
+                ),
             })?;
 
         Ok(impact_response)
@@ -618,7 +644,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
-        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+        debug!(
+            "[API] Response status: {} ({})",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
+        );
 
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -667,7 +697,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
-        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+        debug!(
+            "[API] Response status: {} ({})",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
+        );
 
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -683,37 +717,105 @@ impl ApiClient {
         Ok(stats_response)
     }
 
-    /// Analyze code using client-side parsed Intermediate Representation
+    /// Ingest a full code graph into the API.
     ///
-    /// Sends a JSON request body with the IR JSON and metadata.
+    /// The body is streamed as zstd-compressed NDJSON to avoid materializing the
+    /// full graph payload in memory.
     ///
     /// # Arguments
     ///
     /// * `api_key` - API key for authentication
     /// * `workspace_id` - Workspace ID
     /// * `workspace_label` - Workspace label
-    /// * `profiles` - Profiles to analyze
-    /// * `ir_json` - JSON-serialized IntermediateRepresentation
+    /// * `graph` - In-memory graph built by unfault-core
     ///
     /// # Returns
     ///
-    /// * `Ok(IrAnalyzeResponse)` - Analysis completed with findings
+    /// * `Ok(GraphIngestResponse)` - Ingestion completed with session_id
     /// * `Err(ApiError)` - Request failed
-    pub async fn analyze_ir(
+    pub async fn ingest_graph(
         &self,
         api_key: &str,
         workspace_id: &str,
         workspace_label: Option<&str>,
+        graph: &unfault_core::graph::CodeGraph,
+    ) -> Result<GraphIngestResponse, ApiError> {
+        use crate::api::graph_stream::write_graph_as_zstd_ndjson;
+
+        let url = format!(
+            "{}/api/v1/graph/ingest?workspace_id={}&workspace_label={}",
+            self.base_url,
+            urlencoding::encode(workspace_id),
+            urlencoding::encode(workspace_label.unwrap_or("")),
+        );
+
+        // reqwest requires a 'static body stream; write to a temp file then stream it.
+        let mut tmp_path = std::env::temp_dir();
+        tmp_path.push(format!("unfault_graph_{}.zst", uuid::Uuid::new_v4()));
+
+        {
+            let mut f = std::fs::File::create(&tmp_path)
+                .map_err(|e| ApiError::Network { message: e.to_string() })?;
+            write_graph_as_zstd_ndjson(graph, &mut f)
+                .map_err(|e| ApiError::Network { message: e.to_string() })?;
+        }
+
+        let file = tokio::fs::File::open(&tmp_path)
+            .await
+            .map_err(|e| ApiError::Network { message: e.to_string() })?;
+        let reader_stream = tokio_util::io::ReaderStream::new(file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/x-ndjson")
+            .header("Content-Encoding", "zstd")
+            .body(reqwest::Body::wrap_stream(reader_stream))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let status = response.status();
+        debug!(
+            "[API] Response status: {} ({})",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
+        );
+
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            debug!("[API] Error response body: {}", error_text);
+            return Err(to_http_error(status, error_text));
+        }
+
+        let ingest_response: GraphIngestResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
+                message: format!("Failed to parse ingest response: {}", e),
+            })?;
+
+        Ok(ingest_response)
+    }
+
+    /// Analyze code using client-side parsed semantics.
+    ///
+    /// The graph must have already been ingested via `ingest_graph`.
+    pub async fn analyze_ir(
+        &self,
+        api_key: &str,
+        session_id: &str,
         profiles: &[String],
-        ir_json: String,
+        semantics_json: String,
     ) -> Result<IrAnalyzeResponse, ApiError> {
         let url = format!("{}/api/v1/graph/analyze", self.base_url);
 
         let request = IrAnalyzeRequest {
-            workspace_id: workspace_id.to_string(),
-            workspace_label: workspace_label.map(|s| s.to_string()),
+            session_id: session_id.to_string(),
             profiles: profiles.to_vec(),
-            ir_json,
+            semantics_json,
         };
 
         debug!("[API] Sending POST request...");
@@ -728,7 +830,11 @@ impl ApiClient {
             .map_err(to_network_error)?;
 
         let status = response.status();
-        debug!("[API] Response status: {} ({})", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"));
+        debug!(
+            "[API] Response status: {} ({})",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
+        );
 
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
@@ -753,16 +859,23 @@ impl ApiClient {
             debug!("  - Files: {}", graph_stats.file_count);
             debug!("  - Functions: {}", graph_stats.function_count);
             debug!("  - Classes: {}", graph_stats.class_count);
-            debug!("  - External modules: {}", graph_stats.external_module_count);
+            debug!(
+                "  - External modules: {}",
+                graph_stats.external_module_count
+            );
             debug!("  - Import edges: {}", graph_stats.import_edge_count);
             debug!("  - Contains edges: {}", graph_stats.contains_edge_count);
-            debug!("  - Uses library edges: {}", graph_stats.uses_library_edge_count);
+            debug!(
+                "  - Uses library edges: {}",
+                graph_stats.uses_library_edge_count
+            );
         }
 
         if !analyze_response.findings.is_empty() {
             debug!("[API] First 5 findings:");
             for (i, finding) in analyze_response.findings.iter().take(5).enumerate() {
-                debug!("  {}. {} ({}) at {}:{}:{}",
+                debug!(
+                    "  {}. {} ({}) at {}:{}:{}",
                     i + 1,
                     finding.rule_id,
                     finding.severity,
@@ -777,7 +890,10 @@ impl ApiClient {
                 }
             }
             if analyze_response.findings.len() > 5 {
-                debug!("  ... and {} more findings", analyze_response.findings.len() - 5);
+                debug!(
+                    "  ... and {} more findings",
+                    analyze_response.findings.len() - 5
+                );
             }
         }
 
@@ -981,30 +1097,26 @@ mod tests {
     #[test]
     fn test_ir_analyze_request_serialization() {
         let request = IrAnalyzeRequest {
-            workspace_id: "wks_abc123".to_string(),
-            workspace_label: Some("my-project".to_string()),
+            session_id: "00000000-0000-0000-0000-000000000000".to_string(),
             profiles: vec!["stability".to_string(), "security".to_string()],
-            ir_json: r#"{"semantics":[],"graph":{}}"#.to_string(),
+            semantics_json: "[]".to_string(),
         };
         let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("wks_abc123"));
-        assert!(json.contains("my-project"));
+        assert!(json.contains("00000000-0000-0000-0000-000000000000"));
         assert!(json.contains("stability"));
         assert!(json.contains("security"));
-        assert!(json.contains("ir_json"));
+        assert!(json.contains("semantics_json"));
     }
 
     #[test]
     fn test_ir_analyze_request_without_label() {
         let request = IrAnalyzeRequest {
-            workspace_id: "wks_xyz".to_string(),
-            workspace_label: None,
+            session_id: "00000000-0000-0000-0000-000000000001".to_string(),
             profiles: vec!["stability".to_string()],
-            ir_json: "{}".to_string(),
+            semantics_json: "[]".to_string(),
         };
         let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("wks_xyz"));
-        assert!(!json.contains("workspace_label"));
+        assert!(json.contains("00000000-0000-0000-0000-000000000001"));
     }
 
     #[test]

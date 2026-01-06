@@ -533,7 +533,10 @@ pub fn build_ir_cached(
             let json_size_mb = json_size as f64 / (1024.0 * 1024.0);
             let serialization_ms = serialization_start.elapsed().as_millis();
             debug!("[GRAPH] Serialization details:");
-            debug!("  - JSON size: {} bytes ({:.2} MB)", json_size, json_size_mb);
+            debug!(
+                "  - JSON size: {} bytes ({:.2} MB)",
+                json_size, json_size_mb
+            );
             debug!("  - Serialization time: {}ms", serialization_ms);
             debug!("  - Semantics count: {}", ir.semantics.len());
         }
@@ -542,10 +545,7 @@ pub fn build_ir_cached(
         }
     }
 
-    Ok(IrBuildResult {
-        ir,
-        cache_stats,
-    })
+    Ok(IrBuildResult { ir, cache_stats })
 }
 
 /// Discover source files in a directory using ignore patterns.

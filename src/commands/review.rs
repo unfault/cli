@@ -230,7 +230,11 @@ impl ScanDisplayState {
         lines += 1;
 
         // File count line (always show, even if 0)
-        let file_word = if self.file_count == 1 { "file" } else { "files" };
+        let file_word = if self.file_count == 1 {
+            "file"
+        } else {
+            "files"
+        };
         eprintln!(
             "  Found {} matching source {}",
             self.file_count.to_string().bright_green(),
@@ -436,30 +440,7 @@ async fn execute_client_parse(
         );
     }
 
-    // Step 2: Serialize IR to JSON
-    pb.set_message("Serializing code graph...");
-
-    let serialize_start = Instant::now();
-    let ir_json = match serde_json::to_string(&ir) {
-        Ok(json) => json,
-        Err(e) => {
-            pb.finish_and_clear();
-            eprintln!("{} Failed to serialize IR: {}", "✗".red().bold(), e);
-            return Ok(EXIT_CONFIG_ERROR);
-        }
-    };
-    let serialize_ms = serialize_start.elapsed().as_millis() as u64;
-
-    if args.verbose {
-        eprintln!(
-            "\n{} IR JSON size: {} bytes ({}ms)",
-            "DEBUG".yellow(),
-            ir_json.len(),
-            serialize_ms
-        );
-    }
-
-    // Step 3: Compute workspace ID
+    // Step 2: Compute workspace ID
     let git_remote = get_git_remote(current_dir);
     let workspace_id_result = compute_workspace_id(
         git_remote.as_deref(),
@@ -470,6 +451,69 @@ async fn execute_client_parse(
         .as_ref()
         .map(|r| r.id.clone())
         .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
+
+    // Split IR into components so we can free memory early
+    let unfault_core::IntermediateRepresentation { semantics, graph } = ir;
+
+    // Step 3: Ingest full graph to API (streaming, compressed)
+    pb.set_message("Uploading code graph...");
+
+    let ingest_start = Instant::now();
+    let ingest = match api_client
+        .ingest_graph(
+            &config.api_key,
+            &workspace_id,
+            Some(&workspace_label),
+            &graph,
+        )
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            pb.finish_and_clear();
+            return Ok(handle_api_error(e));
+        }
+    };
+
+    if args.verbose {
+        eprintln!(
+            "\n{} Graph ingested: {} nodes, {} edges ({}ms)",
+            "DEBUG".yellow(),
+            ingest.nodes_created,
+            ingest.edges_created,
+            ingest_start.elapsed().as_millis()
+        );
+        eprintln!("{} Session ID: {}", "DEBUG".yellow(), ingest.session_id);
+    }
+
+    // Drop the in-memory graph before rule analysis
+    drop(graph);
+
+    // Step 4: Serialize semantics for rule analysis
+    pb.set_message("Serializing semantics...");
+
+    let serialize_start = Instant::now();
+    let semantics_json = match serde_json::to_string(&semantics) {
+        Ok(json) => json,
+        Err(e) => {
+            pb.finish_and_clear();
+            eprintln!(
+                "{} Failed to serialize semantics: {}",
+                "✗".red().bold(),
+                e
+            );
+            return Ok(EXIT_CONFIG_ERROR);
+        }
+    };
+
+    if args.verbose {
+        eprintln!(
+            "\n{} Semantics JSON size: {} bytes ({}ms)",
+            "DEBUG".yellow(),
+            semantics_json.len(),
+            serialize_start.elapsed().as_millis()
+        );
+    }
 
     if args.verbose {
         if let Some(ref result) = workspace_id_result {
@@ -482,8 +526,8 @@ async fn execute_client_parse(
         }
     }
 
-    // Step 4: Send IR to API
-    pb.set_message("Analyzing code graph...");
+    // Step 5: Run semantics-only rule analysis
+    pb.set_message("Analyzing semantics...");
 
     // Build profiles from detected frameworks (e.g., "python_fastapi_backend", "go_gin_service")
     // The API resolves these profile IDs to specific rules
@@ -500,13 +544,7 @@ async fn execute_client_parse(
 
     let api_start = Instant::now();
     let response = match api_client
-        .analyze_ir(
-            &config.api_key,
-            &workspace_id,
-            Some(&workspace_label),
-            &profiles,
-            ir_json,
-        )
+        .analyze_ir(&config.api_key, &ingest.session_id, &profiles, semantics_json)
         .await
     {
         Ok(response) => response,
@@ -710,27 +748,27 @@ const MAX_WIDTH: usize = 80;
 fn wrap_text(s: &str, first_line_max: usize, continuation_indent: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let words: Vec<&str> = s.split_whitespace().collect();
-    
+
     if words.is_empty() {
         return vec![String::new()];
     }
-    
+
     let cont_max = MAX_WIDTH.saturating_sub(continuation_indent.len());
-    
+
     let mut current_line = String::new();
     let mut current_max = first_line_max;
-    
+
     for word in words {
         let word_len = word.len();
         let current_len = current_line.len();
-        
+
         // Check if we need to start a new line
         let would_fit = if current_len == 0 {
             word_len <= current_max
         } else {
             current_len + 1 + word_len <= current_max
         };
-        
+
         if !would_fit && current_len > 0 {
             // Push the current line
             lines.push(current_line);
@@ -738,7 +776,7 @@ fn wrap_text(s: &str, first_line_max: usize, continuation_indent: &str) -> Vec<S
             current_line = String::new();
             current_max = cont_max;
         }
-        
+
         // Add the word to the current line
         if current_line.is_empty() {
             // If word is longer than max width, we need to hard-break it
@@ -759,12 +797,12 @@ fn wrap_text(s: &str, first_line_max: usize, continuation_indent: &str) -> Vec<S
             current_line.push_str(word);
         }
     }
-    
+
     // Don't forget the last line
     if !current_line.is_empty() {
         lines.push(current_line);
     }
-    
+
     lines
 }
 
@@ -795,7 +833,11 @@ fn render_session_overview(context: &ReviewOutputContext) {
     }
 
     // Line 6: Files reviewed with timing
-    let file_word = if context.file_count == 1 { "file" } else { "files" };
+    let file_word = if context.file_count == 1 {
+        "file"
+    } else {
+        "files"
+    };
     println!(
         "  {}: {} {} · parse {}ms · engine {}ms",
         "Reviewed".dimmed(),
@@ -867,7 +909,7 @@ fn display_ir_findings(
     } else {
         String::new()
     };
-    
+
     // Find terminal width for right-alignment (default to 80)
     let found_text = format!(
         "{} Found {} issue{}",
@@ -875,7 +917,7 @@ fn display_ir_findings(
         total_findings,
         if total_findings == 1 { "" } else { "s" }
     );
-    
+
     if fix_hint.is_empty() {
         println!(
             "{} Found {} issue{}",
@@ -896,7 +938,7 @@ fn display_ir_findings(
             width = padding
         );
     }
-    
+
     // Severity breakdown line (like landing page: "4 high · 10 medium · 5 low")
     let summary = compute_severity_summary(findings);
     println!("{}", format_severity_breakdown(&summary));
@@ -1063,18 +1105,14 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
             let prefix_len = 5 + rule_id.len(); // "   [" + rule_id + "] "
             let first_line_max = MAX_WIDTH.saturating_sub(prefix_len);
             let continuation_indent = "      "; // 6 spaces for continuation lines
-            
+
             let wrapped_lines = wrap_text(&title, first_line_max, continuation_indent);
-            
+
             // Print first line with the rule_id prefix
             if let Some(first_line) = wrapped_lines.first() {
-                println!(
-                    "   [{}] {}",
-                    rule_id.cyan(),
-                    first_line.dimmed()
-                );
+                println!("   [{}] {}", rule_id.cyan(), first_line.dimmed());
             }
-            
+
             // Print continuation lines with indent
             for line in wrapped_lines.iter().skip(1) {
                 println!("{}{}", continuation_indent, line.dimmed());
