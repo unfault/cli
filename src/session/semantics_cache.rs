@@ -120,7 +120,7 @@ impl SemanticsCache {
             // Clear old cache
             for entry in fs::read_dir(&cache_dir)? {
                 let entry = entry?;
-                if entry.path().extension().map_or(false, |e| e == "msgpack") {
+                if entry.path().extension().is_some_and(|e| e == "msgpack") {
                     let _ = fs::remove_file(entry.path());
                 }
             }
@@ -142,7 +142,7 @@ impl SemanticsCache {
         for entry in fs::read_dir(&cache_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "msgpack") {
+            if path.extension().is_some_and(|e| e == "msgpack") {
                 // Parse filename: <content_hash>_<path_hash>_<truncated_path>.msgpack
                 let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let parts: Vec<&str> = filename.splitn(3, '_').collect();
@@ -283,7 +283,7 @@ impl SemanticsCache {
 
         for entry in fs::read_dir(&self.cache_dir)? {
             let entry = entry?;
-            if entry.path().extension().map_or(false, |e| e == "msgpack") {
+            if entry.path().extension().is_some_and(|e| e == "msgpack") {
                 fs::remove_file(entry.path())?;
             }
         }

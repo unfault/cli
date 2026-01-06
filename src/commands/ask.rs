@@ -725,14 +725,11 @@ fn render_flow_context(flow_context: &RAGFlowContext, verbose: bool) {
         // For names like "get_user", extract "user" and capitalize
         let topic = if name.starts_with("get_") || name.starts_with("set_") {
             &name[4..]
-        } else if name.starts_with("handle_") {
-            &name[7..]
-        } else if name.starts_with("create_") {
-            &name[7..]
-        } else if name.starts_with("delete_") {
-            &name[7..]
-        } else if name.starts_with("update_") {
-            &name[7..]
+        } else if let Some(prefix) = ["handle_", "create_", "delete_", "update_"]
+            .iter()
+            .find(|p| name.starts_with(**p))
+        {
+            &name[prefix.len()..]
         } else {
             name.as_str()
         };

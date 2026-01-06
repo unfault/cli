@@ -163,9 +163,9 @@ impl HeaderExtractor {
             // Handle multi-line strings (docstrings)
             if in_multiline_string {
                 header_lines.push(line.to_string());
-                if trimmed.contains(multiline_delim) && !trimmed.starts_with(multiline_delim) {
-                    in_multiline_string = false;
-                } else if trimmed.ends_with(multiline_delim) {
+                if (trimmed.contains(multiline_delim) && !trimmed.starts_with(multiline_delim))
+                    || trimmed.ends_with(multiline_delim)
+                {
                     in_multiline_string = false;
                 }
                 continue;

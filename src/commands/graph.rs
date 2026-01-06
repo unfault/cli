@@ -1096,7 +1096,7 @@ fn output_critical_formatted(response: &CentralityResponse, verbose: bool) {
             println!(
                 "  {} '{}' is a major hub. Consider extra review for changes.",
                 "💡".yellow(),
-                top.path.split('/').last().unwrap_or(&top.path)
+                top.path.split('/').next_back().unwrap_or(&top.path)
             );
             println!();
         }

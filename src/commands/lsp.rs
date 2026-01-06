@@ -503,7 +503,7 @@ impl UnfaultLsp {
             }
 
             // Create diagnostic
-            let diagnostic = self.finding_to_diagnostic(&finding, text);
+            let diagnostic = self.finding_to_diagnostic(finding, text);
             diagnostics.push(diagnostic);
 
             // Cache for code actions
@@ -827,7 +827,7 @@ impl UnfaultLsp {
                         // Insert after the specified line
                         // LSP lines are 0-indexed, so line N (1-indexed) becomes line N-1 (0-indexed)
                         // We want to insert at the START of the next line (line N 0-indexed)
-                        let target_line = *line as u32;
+                        let target_line = *line;
                         let edit = TextEdit {
                             range: Range {
                                 start: Position {
@@ -846,7 +846,7 @@ impl UnfaultLsp {
                 }
                 PatchRange::InsertBeforeLine { line } => {
                     // line is 1-based; insert before line N means insert at start of line N-1 (0-indexed)
-                    let target_line = line.saturating_sub(1) as u32;
+                    let target_line = line.saturating_sub(1);
                     let edit = TextEdit {
                         range: Range {
                             start: Position {
@@ -1836,10 +1836,7 @@ impl LanguageServer for UnfaultLsp {
         };
 
         // Get absolute file path from URI
-        let abs_path = match params.text_document.uri.to_file_path() {
-            Ok(abs) => Some(abs),
-            Err(_) => None,
-        };
+        let abs_path = params.text_document.uri.to_file_path().ok();
 
         // Determine the project root for this file (may differ from IDE workspace in monorepos)
         // and compute the relative path using the SAME root that build_ir_cached will use.
@@ -2060,11 +2057,11 @@ impl LanguageServer for UnfaultLsp {
             if let Ok(rel) = file_path.strip_prefix(ws_root) {
                 rel.to_string_lossy().to_string()
             } else {
-                self.log_debug(&format!("Failed to strip workspace root, using full path"));
+                self.log_debug("Failed to strip workspace root, using full path");
                 file_path.to_string_lossy().to_string()
             }
         } else {
-            self.log_debug(&format!("No workspace root available, using full path"));
+            self.log_debug("No workspace root available, using full path");
             file_path.to_string_lossy().to_string()
         };
 

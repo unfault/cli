@@ -383,6 +383,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
 /// 2. Build IR (semantics + graph)
 /// 3. Serialize and send IR to API
 /// 4. Receive findings and optionally apply patches
+#[allow(clippy::too_many_arguments)]
 async fn execute_client_parse(
     args: &ReviewArgs,
     config: &Config,
@@ -460,12 +461,7 @@ async fn execute_client_parse(
 
     let ingest_start = Instant::now();
     let ingest = match api_client
-        .ingest_graph(
-            &config.api_key,
-            &workspace_id,
-            Some(&workspace_label),
-            graph,
-        )
+        .ingest_graph(&config.api_key, &workspace_id, Some(workspace_label), graph)
         .await
     {
         Ok(resp) => resp,
@@ -1124,6 +1120,7 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
 /// Execute review with server-side parsing (legacy mode).
 ///
 /// This is the original implementation that sends source code to the server.
+#[allow(clippy::too_many_arguments)]
 async fn execute_server_parse(
     args: &ReviewArgs,
     config: &Config,

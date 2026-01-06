@@ -109,9 +109,7 @@ pub fn build_ir(
         .par_iter()
         .enumerate()
         .map(|(index, file_path)| {
-            let Some(language) = detect_language(file_path) else {
-                return None;
-            };
+            let language = detect_language(file_path)?;
 
             let content = match std::fs::read_to_string(file_path) {
                 Ok(c) => c,
@@ -236,11 +234,9 @@ pub fn build_ir(
     let mut semantics_entries: Vec<(FileId, Arc<SourceSemantics>)> = Vec::new();
     let mut all_semantics: Vec<SourceSemantics> = Vec::new();
 
-    for result in results {
-        if let Some((file_id, semantics)) = result {
-            all_semantics.push(semantics.clone());
-            semantics_entries.push((file_id, Arc::new(semantics)));
-        }
+    for (file_id, semantics) in results.into_iter().flatten() {
+        all_semantics.push(semantics.clone());
+        semantics_entries.push((file_id, Arc::new(semantics)));
     }
 
     if verbose {
@@ -326,9 +322,7 @@ pub fn build_ir_cached(
         .par_iter()
         .enumerate()
         .map(|(index, file_path)| {
-            let Some(language) = detect_language(file_path) else {
-                return None;
-            };
+            let language = detect_language(file_path)?;
 
             let content = match std::fs::read_to_string(file_path) {
                 Ok(c) => c,
@@ -472,11 +466,9 @@ pub fn build_ir_cached(
     let mut semantics_entries: Vec<(FileId, Arc<SourceSemantics>)> = Vec::new();
     let mut all_semantics: Vec<SourceSemantics> = Vec::new();
 
-    for result in results {
-        if let Some((file_id, semantics)) = result {
-            all_semantics.push(semantics.clone());
-            semantics_entries.push((file_id, Arc::new(semantics)));
-        }
+    for (file_id, semantics) in results.into_iter().flatten() {
+        all_semantics.push(semantics.clone());
+        semantics_entries.push((file_id, Arc::new(semantics)));
     }
 
     // Get final cache stats
