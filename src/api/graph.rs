@@ -18,7 +18,6 @@
 //! the per-file semantics via `/api/v1/graph/analyze` for rule evaluation.
 
 use crate::api::client::{ApiClient, ApiError};
-use futures_util::TryStreamExt;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::Range;
@@ -192,8 +191,17 @@ pub struct GraphIngestStartResponse {
     pub session_id: String,
 }
 
-/// Response from graph ingestion endpoint
+/// Response from ingest status endpoint
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GraphIngestStatusResponse {
+    pub session_id: String,
+    pub phase: String,
+    pub nodes_next_seq: i64,
+    pub edges_next_seq: i64,
+    pub nodes_received: i64,
+    pub edges_received: i64,
+}
+
 pub struct GraphIngestResponse {
     pub session_id: String,
     pub nodes_created: i64,
@@ -739,6 +747,39 @@ impl ApiClient {
     ///
     /// * `Ok(GraphIngestResponse)` - Ingestion completed with session_id
     /// * `Err(ApiError)` - Request failed
+    async fn ingest_status(
+        &self,
+        api_key: &str,
+        session_id: &str,
+    ) -> Result<GraphIngestStatusResponse, ApiError> {
+        let url = format!(
+            "{}/api/v1/graph/ingest/status?session_id={}",
+            self.base_url,
+            urlencoding::encode(session_id)
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| ApiError::ParseError {
+                message: format!("Failed to parse ingest status response: {}", e),
+            })
+    }
+
     pub async fn ingest_graph(
         &self,
         api_key: &str,
@@ -765,10 +806,10 @@ impl ApiClient {
             .await
             .map_err(to_network_error)?;
 
-        let status = start_resp.status();
-        if !status.is_success() {
+        let http_status = start_resp.status();
+        if !http_status.is_success() {
             let error_text = start_resp.text().await.unwrap_or_default();
-            return Err(to_http_error(status, error_text));
+            return Err(to_http_error(http_status, error_text));
         }
 
         let start: GraphIngestStartResponse = start_resp
@@ -783,12 +824,20 @@ impl ApiClient {
         const NODE_CHUNK: usize = 50_000;
         const EDGE_CHUNK: usize = 200_000;
 
-        // Upload nodes
         let node_total = graph.graph.node_count();
-        let mut seq = 0;
-        let mut node_start = 0;
-        while node_start < node_total {
-            let chunk_bytes = encode_nodes_chunk(&graph, node_start, NODE_CHUNK, seq)
+        let edge_total = graph.graph.edge_count();
+
+        let mut ingest_status = self.ingest_status(api_key, &session_id).await?;
+
+        // Upload nodes (resume on 409 or transient request failures)
+        while ingest_status.phase == "nodes" {
+            let next_seq = ingest_status.nodes_next_seq.max(0) as usize;
+            let start_idx = next_seq.saturating_mul(NODE_CHUNK);
+            if start_idx >= node_total {
+                break;
+            }
+
+            let chunk_bytes = encode_nodes_chunk(&graph, start_idx, NODE_CHUNK, next_seq as u32)
                 .map_err(|e| ApiError::Network {
                     message: format!("Failed to encode node chunk: {}", e),
                 })?;
@@ -797,10 +846,10 @@ impl ApiClient {
                 "{}/api/v1/graph/ingest/chunk?session_id={}&phase=nodes&seq={}",
                 self.base_url,
                 urlencoding::encode(&session_id),
-                seq
+                next_seq
             );
 
-            let resp = self
+            let resp = match self
                 .client
                 .post(&chunk_url)
                 .header("Authorization", format!("Bearer {}", api_key))
@@ -809,45 +858,64 @@ impl ApiClient {
                 .body(chunk_bytes)
                 .send()
                 .await
-                .map_err(to_network_error)?;
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    ingest_status = self.ingest_status(api_key, &session_id).await?;
+                    continue;
+                }
+            };
 
-            let status = resp.status();
-            if !status.is_success() {
-                let error_text = resp.text().await.unwrap_or_default();
-                return Err(to_http_error(status, error_text));
+            let http_status = resp.status();
+            if http_status.as_u16() == 409 {
+                ingest_status = self.ingest_status(api_key, &session_id).await?;
+                continue;
             }
 
-            seq += 1;
-            node_start += NODE_CHUNK;
+            if !http_status.is_success() {
+                let error_text = resp.text().await.unwrap_or_default();
+                return Err(to_http_error(http_status, error_text));
+            }
+
+            ingest_status = self.ingest_status(api_key, &session_id).await?;
         }
 
-        // Transition to edges
-        let trans_url = format!(
-            "{}/api/v1/graph/ingest/transition?session_id={}&to_phase=edges",
-            self.base_url,
-            urlencoding::encode(&session_id)
-        );
+        ingest_status = self.ingest_status(api_key, &session_id).await?;
 
-        let resp = self
-            .client
-            .post(&trans_url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .send()
-            .await
-            .map_err(to_network_error)?;
+        // Transition nodes → edges if needed
+        if ingest_status.phase == "nodes" {
+            let trans_url = format!(
+                "{}/api/v1/graph/ingest/transition?session_id={}&to_phase=edges",
+                self.base_url,
+                urlencoding::encode(&session_id)
+            );
 
-        let status = resp.status();
-        if !status.is_success() {
-            let error_text = resp.text().await.unwrap_or_default();
-            return Err(to_http_error(status, error_text));
+            let resp = self
+                .client
+                .post(&trans_url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .send()
+                .await
+                .map_err(to_network_error)?;
+
+            let http_status = resp.status();
+            if !http_status.is_success() {
+                let error_text = resp.text().await.unwrap_or_default();
+                return Err(to_http_error(http_status, error_text));
+            }
+
+            ingest_status = self.ingest_status(api_key, &session_id).await?;
         }
 
         // Upload edges
-        let edge_total = graph.graph.edge_count();
-        let mut edge_seq = 0;
-        let mut edge_start = 0;
-        while edge_start < edge_total {
-            let chunk_bytes = encode_edges_chunk(&graph, edge_start, EDGE_CHUNK, edge_seq)
+        while ingest_status.phase == "edges" {
+            let next_seq = ingest_status.edges_next_seq.max(0) as usize;
+            let start_idx = next_seq.saturating_mul(EDGE_CHUNK);
+            if start_idx >= edge_total {
+                break;
+            }
+
+            let chunk_bytes = encode_edges_chunk(&graph, start_idx, EDGE_CHUNK, next_seq as u32)
                 .map_err(|e| ApiError::Network {
                     message: format!("Failed to encode edge chunk: {}", e),
                 })?;
@@ -856,10 +924,10 @@ impl ApiClient {
                 "{}/api/v1/graph/ingest/chunk?session_id={}&phase=edges&seq={}",
                 self.base_url,
                 urlencoding::encode(&session_id),
-                edge_seq
+                next_seq
             );
 
-            let resp = self
+            let resp = match self
                 .client
                 .post(&chunk_url)
                 .header("Authorization", format!("Bearer {}", api_key))
@@ -868,37 +936,51 @@ impl ApiClient {
                 .body(chunk_bytes)
                 .send()
                 .await
-                .map_err(to_network_error)?;
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    ingest_status = self.ingest_status(api_key, &session_id).await?;
+                    continue;
+                }
+            };
 
-            let status = resp.status();
-            if !status.is_success() {
-                let error_text = resp.text().await.unwrap_or_default();
-                return Err(to_http_error(status, error_text));
+            let http_status = resp.status();
+            if http_status.as_u16() == 409 {
+                ingest_status = self.ingest_status(api_key, &session_id).await?;
+                continue;
             }
 
-            edge_seq += 1;
-            edge_start += EDGE_CHUNK;
+            if !http_status.is_success() {
+                let error_text = resp.text().await.unwrap_or_default();
+                return Err(to_http_error(http_status, error_text));
+            }
+
+            ingest_status = self.ingest_status(api_key, &session_id).await?;
         }
 
-        // Mark done
-        let done_url = format!(
-            "{}/api/v1/graph/ingest/transition?session_id={}&to_phase=done",
-            self.base_url,
-            urlencoding::encode(&session_id)
-        );
+        ingest_status = self.ingest_status(api_key, &session_id).await?;
 
-        let resp = self
-            .client
-            .post(&done_url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .send()
-            .await
-            .map_err(to_network_error)?;
+        // Transition edges → done if needed
+        if ingest_status.phase == "edges" {
+            let done_url = format!(
+                "{}/api/v1/graph/ingest/transition?session_id={}&to_phase=done",
+                self.base_url,
+                urlencoding::encode(&session_id)
+            );
 
-        let status = resp.status();
-        if !status.is_success() {
-            let error_text = resp.text().await.unwrap_or_default();
-            return Err(to_http_error(status, error_text));
+            let resp = self
+                .client
+                .post(&done_url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .send()
+                .await
+                .map_err(to_network_error)?;
+
+            let http_status = resp.status();
+            if !http_status.is_success() {
+                let error_text = resp.text().await.unwrap_or_default();
+                return Err(to_http_error(http_status, error_text));
+            }
         }
 
         Ok(GraphIngestResponse {
