@@ -464,7 +464,7 @@ async fn execute_client_parse(
             &config.api_key,
             &workspace_id,
             Some(&workspace_label),
-            &graph,
+            graph,
         )
         .await
     {
@@ -486,8 +486,7 @@ async fn execute_client_parse(
         eprintln!("{} Session ID: {}", "DEBUG".yellow(), ingest.session_id);
     }
 
-    // Drop the in-memory graph before rule analysis
-    drop(graph);
+    // Graph is moved into the ingestion request
 
     // Step 4: Serialize semantics for rule analysis
     pb.set_message("Serializing semantics...");

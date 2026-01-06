@@ -738,9 +738,9 @@ impl ApiClient {
         api_key: &str,
         workspace_id: &str,
         workspace_label: Option<&str>,
-        graph: &unfault_core::graph::CodeGraph,
+        graph: unfault_core::graph::CodeGraph,
     ) -> Result<GraphIngestResponse, ApiError> {
-        use crate::api::graph_stream::write_graph_as_zstd_ndjson;
+        use crate::api::graph_stream::stream_graph_as_zstd_msgpack;
 
         let url = format!(
             "{}/api/v1/graph/ingest?workspace_id={}&workspace_label={}",
@@ -749,35 +749,20 @@ impl ApiClient {
             urlencoding::encode(workspace_label.unwrap_or("")),
         );
 
-        // reqwest requires a 'static body stream; write to a temp file then stream it.
-        let mut tmp_path = std::env::temp_dir();
-        tmp_path.push(format!("unfault_graph_{}.zst", uuid::Uuid::new_v4()));
-
-        {
-            let mut f = std::fs::File::create(&tmp_path)
-                .map_err(|e| ApiError::Network { message: e.to_string() })?;
-            write_graph_as_zstd_ndjson(graph, &mut f)
-                .map_err(|e| ApiError::Network { message: e.to_string() })?;
-        }
-
-        let file = tokio::fs::File::open(&tmp_path)
-            .await
-            .map_err(|e| ApiError::Network { message: e.to_string() })?;
-        let reader_stream = tokio_util::io::ReaderStream::new(file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        let body_stream = stream_graph_as_zstd_msgpack(graph).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+        });
 
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/x-ndjson")
+            .header("Content-Type", "application/x-msgpack")
             .header("Content-Encoding", "zstd")
-            .body(reqwest::Body::wrap_stream(reader_stream))
+            .body(reqwest::Body::wrap_stream(body_stream))
             .send()
             .await
             .map_err(to_network_error)?;
-
-        let _ = std::fs::remove_file(&tmp_path);
 
         let status = response.status();
         debug!(

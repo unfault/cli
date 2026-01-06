@@ -43,7 +43,6 @@ textwrap = "0.16"
 thiserror = "2"
 toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-std", "fs"] }
-tokio-util = { version = "0.7", features = ["io"] }
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 

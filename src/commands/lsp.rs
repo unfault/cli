@@ -397,7 +397,7 @@ impl UnfaultLsp {
         debug!("[LSP] Uploading graph for analysis...");
         let ingest = match self
             .api_client
-            .ingest_graph(&api_key, &workspace_id, Some(workspace_label_str), &graph)
+            .ingest_graph(&api_key, &workspace_id, Some(workspace_label_str), graph)
             .await
         {
             Ok(resp) => resp,
@@ -419,7 +419,7 @@ impl UnfaultLsp {
             }
         };
 
-        drop(graph);
+        // Graph is moved into the ingestion request
 
         // Serialize semantics (smaller than full IR)
         let serialize_start = std::time::Instant::now();

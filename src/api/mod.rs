@@ -13,7 +13,7 @@ pub mod session;
 // Re-export commonly used types for convenience
 pub use client::{ApiClient, ApiError};
 pub use graph::*;
-pub use graph_stream::{stream_graph_as_zstd_ndjson, write_graph_as_zstd_ndjson};
+pub use graph_stream::stream_graph_as_zstd_msgpack;
 pub use llm::{LlmClient, LlmError, build_llm_context};
 pub use rag::*;
 pub use session::*;
