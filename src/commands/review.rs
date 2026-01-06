@@ -496,11 +496,7 @@ async fn execute_client_parse(
         Ok(json) => json,
         Err(e) => {
             pb.finish_and_clear();
-            eprintln!(
-                "{} Failed to serialize semantics: {}",
-                "✗".red().bold(),
-                e
-            );
+            eprintln!("{} Failed to serialize semantics: {}", "✗".red().bold(), e);
             return Ok(EXIT_CONFIG_ERROR);
         }
     };
@@ -543,7 +539,12 @@ async fn execute_client_parse(
 
     let api_start = Instant::now();
     let response = match api_client
-        .analyze_ir(&config.api_key, &ingest.session_id, &profiles, semantics_json)
+        .analyze_ir(
+            &config.api_key,
+            &ingest.session_id,
+            &profiles,
+            semantics_json,
+        )
         .await
     {
         Ok(response) => response,

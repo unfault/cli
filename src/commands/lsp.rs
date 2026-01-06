@@ -425,7 +425,10 @@ impl UnfaultLsp {
         let serialize_start = std::time::Instant::now();
         let semantics_json = match serde_json::to_string(&semantics) {
             Ok(json) => {
-                debug!("[LSP] Semantics serialization time: {}ms", serialize_start.elapsed().as_millis());
+                debug!(
+                    "[LSP] Semantics serialization time: {}ms",
+                    serialize_start.elapsed().as_millis()
+                );
                 json
             }
             Err(e) => {

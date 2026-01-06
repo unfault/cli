@@ -772,12 +772,9 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
-        response
-            .json()
-            .await
-            .map_err(|e| ApiError::ParseError {
-                message: format!("Failed to parse ingest status response: {}", e),
-            })
+        response.json().await.map_err(|e| ApiError::ParseError {
+            message: format!("Failed to parse ingest status response: {}", e),
+        })
     }
 
     pub async fn ingest_graph(
@@ -812,10 +809,8 @@ impl ApiClient {
             return Err(to_http_error(http_status, error_text));
         }
 
-        let start: GraphIngestStartResponse = start_resp
-            .json()
-            .await
-            .map_err(|e| ApiError::ParseError {
+        let start: GraphIngestStartResponse =
+            start_resp.json().await.map_err(|e| ApiError::ParseError {
                 message: format!("Failed to parse ingest start response: {}", e),
             })?;
 
@@ -990,7 +985,6 @@ impl ApiClient {
             elapsed_ms: t0.elapsed().as_millis() as i64,
         })
     }
-
 
     /// Analyze code using client-side parsed semantics.
     ///
