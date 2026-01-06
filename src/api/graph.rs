@@ -186,6 +186,12 @@ pub struct IrFinding {
     pub byte_end: Option<usize>,
 }
 
+/// Response from starting a resumable graph ingest
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GraphIngestStartResponse {
+    pub session_id: String,
+}
+
 /// Response from graph ingestion endpoint
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GraphIngestResponse {
@@ -740,50 +746,169 @@ impl ApiClient {
         workspace_label: Option<&str>,
         graph: unfault_core::graph::CodeGraph,
     ) -> Result<GraphIngestResponse, ApiError> {
-        use crate::api::graph_stream::stream_graph_as_zstd_msgpack;
+        use crate::api::graph_stream::{encode_edges_chunk, encode_nodes_chunk};
 
-        let url = format!(
-            "{}/api/v1/graph/ingest?workspace_id={}&workspace_label={}",
+        let t0 = std::time::Instant::now();
+
+        let start_url = format!(
+            "{}/api/v1/graph/ingest/start?workspace_id={}&workspace_label={}",
             self.base_url,
             urlencoding::encode(workspace_id),
             urlencoding::encode(workspace_label.unwrap_or("")),
         );
 
-        let body_stream = stream_graph_as_zstd_msgpack(graph).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
-        });
-
-        let response = self
+        let start_resp = self
             .client
-            .post(&url)
+            .post(&start_url)
             .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/x-msgpack")
-            .header("Content-Encoding", "zstd")
-            .body(reqwest::Body::wrap_stream(body_stream))
             .send()
             .await
             .map_err(to_network_error)?;
 
-        let status = response.status();
-        debug!(
-            "[API] Response status: {} ({})",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("Unknown")
-        );
-
+        let status = start_resp.status();
         if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            debug!("[API] Error response body: {}", error_text);
+            let error_text = start_resp.text().await.unwrap_or_default();
             return Err(to_http_error(status, error_text));
         }
 
-        let ingest_response: GraphIngestResponse =
-            response.json().await.map_err(|e| ApiError::ParseError {
-                message: format!("Failed to parse ingest response: {}", e),
+        let start: GraphIngestStartResponse = start_resp
+            .json()
+            .await
+            .map_err(|e| ApiError::ParseError {
+                message: format!("Failed to parse ingest start response: {}", e),
             })?;
 
-        Ok(ingest_response)
+        let session_id = start.session_id;
+
+        const NODE_CHUNK: usize = 50_000;
+        const EDGE_CHUNK: usize = 200_000;
+
+        // Upload nodes
+        let node_total = graph.graph.node_count();
+        let mut seq = 0;
+        let mut node_start = 0;
+        while node_start < node_total {
+            let chunk_bytes = encode_nodes_chunk(&graph, node_start, NODE_CHUNK, seq)
+                .map_err(|e| ApiError::Network {
+                    message: format!("Failed to encode node chunk: {}", e),
+                })?;
+
+            let chunk_url = format!(
+                "{}/api/v1/graph/ingest/chunk?session_id={}&phase=nodes&seq={}",
+                self.base_url,
+                urlencoding::encode(&session_id),
+                seq
+            );
+
+            let resp = self
+                .client
+                .post(&chunk_url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/x-msgpack")
+                .header("Content-Encoding", "zstd")
+                .body(chunk_bytes)
+                .send()
+                .await
+                .map_err(to_network_error)?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                let error_text = resp.text().await.unwrap_or_default();
+                return Err(to_http_error(status, error_text));
+            }
+
+            seq += 1;
+            node_start += NODE_CHUNK;
+        }
+
+        // Transition to edges
+        let trans_url = format!(
+            "{}/api/v1/graph/ingest/transition?session_id={}&to_phase=edges",
+            self.base_url,
+            urlencoding::encode(&session_id)
+        );
+
+        let resp = self
+            .client
+            .post(&trans_url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let error_text = resp.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        // Upload edges
+        let edge_total = graph.graph.edge_count();
+        let mut edge_seq = 0;
+        let mut edge_start = 0;
+        while edge_start < edge_total {
+            let chunk_bytes = encode_edges_chunk(&graph, edge_start, EDGE_CHUNK, edge_seq)
+                .map_err(|e| ApiError::Network {
+                    message: format!("Failed to encode edge chunk: {}", e),
+                })?;
+
+            let chunk_url = format!(
+                "{}/api/v1/graph/ingest/chunk?session_id={}&phase=edges&seq={}",
+                self.base_url,
+                urlencoding::encode(&session_id),
+                edge_seq
+            );
+
+            let resp = self
+                .client
+                .post(&chunk_url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/x-msgpack")
+                .header("Content-Encoding", "zstd")
+                .body(chunk_bytes)
+                .send()
+                .await
+                .map_err(to_network_error)?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                let error_text = resp.text().await.unwrap_or_default();
+                return Err(to_http_error(status, error_text));
+            }
+
+            edge_seq += 1;
+            edge_start += EDGE_CHUNK;
+        }
+
+        // Mark done
+        let done_url = format!(
+            "{}/api/v1/graph/ingest/transition?session_id={}&to_phase=done",
+            self.base_url,
+            urlencoding::encode(&session_id)
+        );
+
+        let resp = self
+            .client
+            .post(&done_url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let error_text = resp.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        Ok(GraphIngestResponse {
+            session_id,
+            nodes_created: node_total as i64,
+            edges_created: edge_total as i64,
+            elapsed_ms: t0.elapsed().as_millis() as i64,
+        })
     }
+
 
     /// Analyze code using client-side parsed semantics.
     ///
