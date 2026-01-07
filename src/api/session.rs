@@ -468,6 +468,50 @@ pub struct SessionFindingsResponse {
     pub findings: Vec<Finding>,
 }
 
+/// Response from paginated findings endpoint
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionFindingsPageResponse {
+    pub session_id: String,
+    pub workspace_label: Option<String>,
+
+    pub total_count: i64,
+    pub offset: i64,
+    pub limit: i64,
+
+    pub has_more: bool,
+    pub next_offset: Option<i64>,
+
+    pub findings: Vec<Finding>,
+}
+
+/// Behavior summary for a hotspot
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionHotspotBehaviorSummary {
+    pub bucket: String,
+    pub count: i64,
+    #[serde(default)]
+    pub examples: Vec<Finding>,
+}
+
+/// Summary for a single hotspot
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionHotspotSummary {
+    pub hotspot: String,
+    pub total_count: i64,
+    #[serde(default)]
+    pub behaviors: Vec<SessionHotspotBehaviorSummary>,
+}
+
+/// Hotspots response for a session
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionHotspotsResponse {
+    pub session_id: String,
+    pub workspace_label: Option<String>,
+    pub depth: i64,
+    #[serde(default)]
+    pub hotspots: Vec<SessionHotspotSummary>,
+}
+
 // =============================================================================
 // API Client Methods
 // =============================================================================
@@ -783,6 +827,80 @@ impl ApiClient {
 
         response.json().await.map_err(|e| ApiError::ParseError {
             message: format!("Failed to parse session findings response: {}", e),
+        })
+    }
+
+    /// Fetch a bounded page of findings for a completed session.
+    pub async fn get_session_findings_page(
+        &self,
+        api_key: &str,
+        session_id: &str,
+        limit: i64,
+        offset: i64,
+        severity: Option<&str>,
+        path_prefix: Option<&str>,
+    ) -> Result<SessionFindingsPageResponse, ApiError> {
+        let mut url = format!(
+            "{}/api/v1/session/{}/findings/page?limit={}&offset={}",
+            self.base_url, session_id, limit, offset
+        );
+        if let Some(sev) = severity {
+            url.push_str(&format!("&severity={}", urlencoding::encode(sev)));
+        }
+        if let Some(prefix) = path_prefix {
+            url.push_str(&format!("&path_prefix={}", urlencoding::encode(prefix)));
+        }
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        response.json().await.map_err(|e| ApiError::ParseError {
+            message: format!("Failed to parse session findings page response: {}", e),
+        })
+    }
+
+    /// Fetch hotspot summaries for a completed session.
+    pub async fn get_session_hotspots(
+        &self,
+        api_key: &str,
+        session_id: &str,
+        depth: i64,
+        limit: i64,
+        behaviors: i64,
+        examples: i64,
+    ) -> Result<SessionHotspotsResponse, ApiError> {
+        let url = format!(
+            "{}/api/v1/session/{}/hotspots?depth={}&limit={}&behaviors={}&examples={}",
+            self.base_url, session_id, depth, limit, behaviors, examples
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        response.json().await.map_err(|e| ApiError::ParseError {
+            message: format!("Failed to parse session hotspots response: {}", e),
         })
     }
 }

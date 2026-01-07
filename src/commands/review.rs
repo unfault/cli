@@ -612,121 +612,179 @@ async fn execute_client_parse(
         );
     }
 
-    // Step 7: Fetch findings from the findings table
+    // Step 7: Fetch results (hotspots by default; full findings only when needed)
     pb.set_message("Fetching results...");
 
-    let findings_resp = match api_client
-        .get_session_findings(&config.api_key, &ingest.session_id)
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            pb.finish_and_clear();
-            return Ok(handle_api_error(e));
-        }
-    };
+    let needs_full_findings = args.fix
+        || args.dry_run
+        || args.output_mode == "full"
+        || args.raw_findings
+        || args.output_format == "json"
+        || args.output_format == "sarif";
 
-    pb.finish_and_clear();
-
-    // Convert Finding to IrFinding for display
-    // Supports both new (file_path/line/column) and legacy (location) formats
-    let findings: Vec<IrFinding> = findings_resp
-        .findings
-        .iter()
-        .map(|f| {
-            // Prefer new format fields, fall back to legacy location
-            let (file_path, line, column, end_line, end_column) = if f.file_path.is_some() {
-                (
-                    f.file_path.clone().unwrap_or_default(),
-                    f.line.unwrap_or(0),
-                    f.column.unwrap_or(0),
-                    f.end_line,
-                    f.end_column,
-                )
-            } else if let Some(ref loc) = f.location {
-                (
-                    loc.file.clone(),
-                    loc.start_line,
-                    loc.start_column.unwrap_or(0),
-                    loc.end_line,
-                    loc.end_column,
-                )
-            } else {
-                (String::new(), 0, 0, None, None)
-            };
-
-            IrFinding {
-                rule_id: f.rule_id.clone(),
-                title: f.title.clone(),
-                description: f.description.clone(),
-                severity: f.severity.clone(),
-                dimension: f.dimension.clone(),
-                file_path,
-                line,
-                column,
-                end_line,
-                end_column,
-                message: f.description.clone(),
-                patch_json: None,
-                fix_preview: f.fix_preview.clone(),
-                patch: f.diff.clone(),
-                byte_start: None,
-                byte_end: None,
+    if needs_full_findings {
+        let findings_resp = match api_client
+            .get_session_findings(&config.api_key, &ingest.session_id)
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                pb.finish_and_clear();
+                return Ok(handle_api_error(e));
             }
-        })
-        .collect();
+        };
 
-    // Calculate elapsed time
-    let elapsed = session_start.elapsed();
-    let elapsed_ms = elapsed.as_millis() as u64;
+        pb.finish_and_clear();
 
-    // Get cache hit rate for display context
-    let cache_hit_rate = cache_stats.hit_rate();
-    let cache_rate_opt = if cache_stats.hits > 0 || cache_stats.misses > 0 {
-        Some(cache_hit_rate)
+        // Convert Finding to IrFinding for display / patching
+        // Supports both new (file_path/line/column) and legacy (location) formats
+        let findings: Vec<IrFinding> = findings_resp
+            .findings
+            .iter()
+            .map(|f| {
+                // Prefer new format fields, fall back to legacy location
+                let (file_path, line, column, end_line, end_column) = if f.file_path.is_some() {
+                    (
+                        f.file_path.clone().unwrap_or_default(),
+                        f.line.unwrap_or(0),
+                        f.column.unwrap_or(0),
+                        f.end_line,
+                        f.end_column,
+                    )
+                } else if let Some(ref loc) = f.location {
+                    (
+                        loc.file.clone(),
+                        loc.start_line,
+                        loc.start_column.unwrap_or(0),
+                        loc.end_line,
+                        loc.end_column,
+                    )
+                } else {
+                    (String::new(), 0, 0, None, None)
+                };
+
+                IrFinding {
+                    rule_id: f.rule_id.clone(),
+                    title: f.title.clone(),
+                    description: f.description.clone(),
+                    severity: f.severity.clone(),
+                    dimension: f.dimension.clone(),
+                    file_path,
+                    line,
+                    column,
+                    end_line,
+                    end_column,
+                    message: f.description.clone(),
+                    patch_json: None,
+                    fix_preview: f.fix_preview.clone(),
+                    patch: f.diff.clone(),
+                    byte_start: None,
+                    byte_end: None,
+                }
+            })
+            .collect();
+
+        // Calculate elapsed time
+        let elapsed = session_start.elapsed();
+        let elapsed_ms = elapsed.as_millis() as u64;
+
+        // Get cache hit rate for display context
+        let cache_hit_rate = cache_stats.hit_rate();
+        let cache_rate_opt = if cache_stats.hits > 0 || cache_stats.misses > 0 {
+            Some(cache_hit_rate)
+        } else {
+            None
+        };
+
+        let finding_count = findings.len();
+
+        if args.verbose {
+            eprintln!(
+                "\n{} Analysis response: {} findings from {} files",
+                "DEBUG".yellow(),
+                finding_count,
+                file_count
+            );
+        }
+
+        // Handle fix/dry-run mode
+        let applied_patches = if args.fix || args.dry_run {
+            apply_ir_patches(args, current_dir, &findings)?
+        } else {
+            0
+        };
+
+        // Display results
+        let display_context = ReviewOutputContext {
+            workspace_label: workspace_label.to_string(),
+            languages: workspace_info.language_strings(),
+            frameworks: workspace_info.framework_strings(),
+            dimensions: dimensions.to_vec(),
+            file_count,
+            elapsed_ms,
+            parse_ms,
+            engine_ms,
+            cache_hit_rate: cache_rate_opt,
+            trace_id: trace_id.chars().take(8).collect(),
+            profile: args.profile.clone(),
+        };
+
+        display_ir_findings(args, &findings, applied_patches, &display_context);
+
+        if finding_count > 0 {
+            Ok(EXIT_FINDINGS_FOUND)
+        } else {
+            Ok(EXIT_SUCCESS)
+        }
     } else {
-        None
-    };
+        let hotspots_resp = match api_client
+            .get_session_hotspots(&config.api_key, &ingest.session_id, 3, 10, 3, 3)
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                pb.finish_and_clear();
+                return Ok(handle_api_error(e));
+            }
+        };
 
-    let finding_count = findings.len();
+        pb.finish_and_clear();
 
-    if args.verbose {
-        eprintln!(
-            "\n{} Analysis response: {} findings from {} files",
-            "DEBUG".yellow(),
-            finding_count,
-            file_count
-        );
-    }
+        // Calculate elapsed time
+        let elapsed = session_start.elapsed();
+        let elapsed_ms = elapsed.as_millis() as u64;
 
-    // Handle fix/dry-run mode
-    let applied_patches = if args.fix || args.dry_run {
-        apply_ir_patches(args, current_dir, &findings)?
-    } else {
-        0
-    };
+        // Get cache hit rate for display context
+        let cache_hit_rate = cache_stats.hit_rate();
+        let cache_rate_opt = if cache_stats.hits > 0 || cache_stats.misses > 0 {
+            Some(cache_hit_rate)
+        } else {
+            None
+        };
 
-    // Display results
-    let display_context = ReviewOutputContext {
-        workspace_label: workspace_label.to_string(),
-        languages: workspace_info.language_strings(),
-        frameworks: workspace_info.framework_strings(),
-        dimensions: dimensions.to_vec(),
-        file_count,
-        elapsed_ms,
-        parse_ms,
-        engine_ms,
-        cache_hit_rate: cache_rate_opt,
-        trace_id: trace_id.chars().take(8).collect(),
-        profile: args.profile.clone(),
-    };
+        let display_context = ReviewOutputContext {
+            workspace_label: workspace_label.to_string(),
+            languages: workspace_info.language_strings(),
+            frameworks: workspace_info.framework_strings(),
+            dimensions: dimensions.to_vec(),
+            file_count,
+            elapsed_ms,
+            parse_ms,
+            engine_ms,
+            cache_hit_rate: cache_rate_opt,
+            trace_id: trace_id.chars().take(8).collect(),
+            profile: args.profile.clone(),
+        };
 
-    display_ir_findings(args, &findings, applied_patches, &display_context);
+        let has_any = hotspots_resp.hotspots.iter().any(|h| h.total_count > 0);
 
-    if finding_count > 0 {
-        Ok(EXIT_FINDINGS_FOUND)
-    } else {
-        Ok(EXIT_SUCCESS)
+        display_session_hotspots(args, &hotspots_resp, &display_context);
+
+        if has_any {
+            Ok(EXIT_FINDINGS_FOUND)
+        } else {
+            Ok(EXIT_SUCCESS)
+        }
     }
 }
 
@@ -1274,6 +1332,112 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
             }
         }
     }
+}
+
+fn display_session_hotspots(
+    args: &ReviewArgs,
+    hotspots: &crate::api::SessionHotspotsResponse,
+    context: &ReviewOutputContext,
+) {
+    // JSON/SARIF paths should not reach here
+    if args.output_format == "json" {
+        let output = serde_json::json!({
+            "session_id": hotspots.session_id,
+            "depth": hotspots.depth,
+            "hotspots": hotspots.hotspots,
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        return;
+    }
+
+    println!();
+    render_session_overview(context);
+
+    let has_any = hotspots.hotspots.iter().any(|h| h.total_count > 0);
+    if !has_any {
+        println!();
+        println!(
+            "{} No issues found! Your code looks good.",
+            "✓".bright_green().bold()
+        );
+        return;
+    }
+
+    println!();
+    println!("{}", "Hotspots".bold());
+
+    for (i, hs) in hotspots.hotspots.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+
+        println!(
+            "  {} {} ({} signal{})",
+            "→".cyan().bold(),
+            hs.hotspot.bright_blue(),
+            hs.total_count.to_string().bright_yellow(),
+            if hs.total_count == 1 { "" } else { "s" }
+        );
+
+        for behavior in &hs.behaviors {
+            println!(
+                "    {}: {} signal{}",
+                behavior.bucket.to_string().bold(),
+                behavior.count.to_string().bright_yellow(),
+                if behavior.count == 1 { "" } else { "s" }
+            );
+
+            for ex in &behavior.examples {
+                let title = if !ex.title.is_empty() {
+                    ex.title.clone()
+                } else if !ex.description.is_empty() {
+                    ex.description.clone()
+                } else {
+                    ex.rule_id.clone()
+                };
+
+                let prefix = format!("      [{}] ", ex.rule_id);
+                let first_line_max = MAX_WIDTH.saturating_sub(prefix.len());
+                let wrapped_lines = wrap_text(&title, first_line_max, "        ");
+
+                if let Some(first_line) = wrapped_lines.first() {
+                    println!(
+                        "{}{}",
+                        format!("      [{}] ", ex.rule_id.cyan()),
+                        first_line.dimmed()
+                    );
+                }
+                for line in wrapped_lines.iter().skip(1) {
+                    println!("        {}", line.dimmed());
+                }
+
+                let file_path = ex
+                    .file_path
+                    .clone()
+                    .or_else(|| ex.location.as_ref().map(|l| l.file.clone()))
+                    .unwrap_or_else(|| "".to_string());
+                let line = ex
+                    .line
+                    .or_else(|| ex.location.as_ref().map(|l| l.start_line))
+                    .unwrap_or(0);
+
+                if !file_path.is_empty() {
+                    println!(
+                        "        {}:{}",
+                        file_path.dimmed(),
+                        line.to_string().dimmed()
+                    );
+                }
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "  {} Run with {} for raw output (advanced)",
+        "→".cyan().bold(),
+        "--raw-findings".bright_blue()
+    );
 }
 
 fn display_ir_hotspots_summary(findings: &[IrFinding]) {
