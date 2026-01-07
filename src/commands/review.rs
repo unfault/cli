@@ -140,6 +140,8 @@ pub struct ReviewArgs {
     pub dry_run: bool,
     /// Use legacy server-side parsing (sends source code to server)
     pub server_parse: bool,
+    /// Print raw findings instead of hotspot summary
+    pub raw_findings: bool,
 }
 
 /// Execute the review command
@@ -460,11 +462,20 @@ async fn execute_client_parse(
     let unfault_core::IntermediateRepresentation { semantics, graph } = ir;
 
     // Step 3: Ingest full graph to API (streaming, compressed)
-    pb.set_message("Uploading code graph...");
+    pb.set_message("Uploading code graph... 0%");
 
     let ingest_start = Instant::now();
+    let pb_upload = pb.clone();
     let ingest = match api_client
-        .ingest_graph(&config.api_key, &workspace_id, Some(workspace_label), graph)
+        .ingest_graph_with_progress(
+            &config.api_key,
+            &workspace_id,
+            Some(workspace_label),
+            graph,
+            move |progress| {
+                pb_upload.set_message(format!("Uploading code graph... {}%", progress.percent));
+            },
+        )
         .await
     {
         Ok(resp) => resp,
@@ -533,8 +544,8 @@ async fn execute_client_parse(
     while let Some(encoded_chunk) = chunker.next_chunk()? {
         let files_processed = chunker.files_processed();
         pb.set_message(format!(
-            "Analyzing... {} insights found ({}/{})",
-            findings_total, files_processed, total_files
+            "Analyzing... {}/{} files (signals indexed: {})",
+            files_processed, total_files, findings_total
         ));
 
         let chunk_resp = match api_client
@@ -1010,45 +1021,79 @@ fn display_ir_findings(
     // Blank line before the summary (matches landing page)
     println!();
 
-    // Summary line with issue count and fix hint on the right
+    let hotspot_mode = args.output_mode != "full" && !args.raw_findings;
+
+    // Summary line with count and fix hint on the right
     let fix_hint = if !args.fix && !args.dry_run {
         format!("{}", "run with --fix to apply patches".dimmed())
     } else {
         String::new()
     };
 
-    // Find terminal width for right-alignment (default to 80)
-    let found_text = format!(
-        "{} Found {} issue{}",
-        "⚠",
-        total_findings,
-        if total_findings == 1 { "" } else { "s" }
-    );
+    if hotspot_mode {
+        let base = format!("⚠ Indexed {} signals", total_findings);
+        if fix_hint.is_empty() {
+            println!(
+                "{} Indexed {} signals",
+                "⚠".yellow().bold(),
+                total_findings.to_string().bright_yellow()
+            );
+        } else {
+            let padding = 50_usize.saturating_sub(base.len());
+            println!(
+                "{} Indexed {} signals{:>width$}{}",
+                "⚠".yellow().bold(),
+                total_findings.to_string().bright_yellow(),
+                "",
+                fix_hint,
+                width = padding
+            );
+        }
 
-    if fix_hint.is_empty() {
+        let summary = compute_severity_summary(findings);
         println!(
-            "{} Found {} issue{}",
-            "⚠".yellow().bold(),
-            total_findings.to_string().bright_yellow(),
-            if total_findings == 1 { "" } else { "s" }
+            "  {} {}",
+            "Severity".dimmed(),
+            format_severity_breakdown(&summary).dimmed()
+        );
+        println!(
+            "  {}",
+            "Showing top hotspots (depth=3, 3 examples each)".dimmed()
         );
     } else {
-        // Print summary with fix hint on the right
-        let padding = 50_usize.saturating_sub(found_text.len());
-        println!(
-            "{} Found {} issue{}{:>width$}{}",
-            "⚠".yellow().bold(),
-            total_findings.to_string().bright_yellow(),
-            if total_findings == 1 { "" } else { "s" },
-            "",
-            fix_hint,
-            width = padding
+        // Find terminal width for right-alignment (default to 80)
+        let found_text = format!(
+            "{} Found {} issue{}",
+            "⚠",
+            total_findings,
+            if total_findings == 1 { "" } else { "s" }
         );
-    }
 
-    // Severity breakdown line (like landing page: "4 high · 10 medium · 5 low")
-    let summary = compute_severity_summary(findings);
-    println!("{}", format_severity_breakdown(&summary));
+        if fix_hint.is_empty() {
+            println!(
+                "{} Found {} issue{}",
+                "⚠".yellow().bold(),
+                total_findings.to_string().bright_yellow(),
+                if total_findings == 1 { "" } else { "s" }
+            );
+        } else {
+            // Print summary with fix hint on the right
+            let padding = 50_usize.saturating_sub(found_text.len());
+            println!(
+                "{} Found {} issue{}{:>width$}{}",
+                "⚠".yellow().bold(),
+                total_findings.to_string().bright_yellow(),
+                if total_findings == 1 { "" } else { "s" },
+                "",
+                fix_hint,
+                width = padding
+            );
+        }
+
+        // Severity breakdown line (like landing page: "4 high · 10 medium · 5 low")
+        let summary = compute_severity_summary(findings);
+        println!("{}", format_severity_breakdown(&summary));
+    }
 
     if applied_patches > 0 {
         let verb = if args.dry_run {
@@ -1075,9 +1120,12 @@ fn display_ir_findings(
         for finding in findings {
             display_ir_finding(finding);
         }
-    } else {
-        // Basic mode: grouped display (matches landing page style)
+    } else if args.raw_findings {
+        // Raw grouped display (old behavior)
         display_ir_findings_grouped(findings);
+    } else {
+        // Default: hotspot-first summary (scales to large repos)
+        display_ir_hotspots_summary(findings);
     }
 }
 
@@ -1226,6 +1274,236 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
             }
         }
     }
+}
+
+fn display_ir_hotspots_summary(findings: &[IrFinding]) {
+    use std::collections::HashMap;
+
+    const HOTSPOT_DEPTH: usize = 3;
+    const HOTSPOT_LIMIT: usize = 10;
+    const BEHAVIORS_PER_HOTSPOT: usize = 3;
+    const EXAMPLES_PER_BEHAVIOR: usize = 3;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    enum BehaviorBucket {
+        Resilience,
+        Observability,
+        Performance,
+        Security,
+        Correctness,
+        Other,
+    }
+
+    impl BehaviorBucket {
+        fn label(self) -> &'static str {
+            match self {
+                BehaviorBucket::Resilience => "Resilience",
+                BehaviorBucket::Observability => "Observability",
+                BehaviorBucket::Performance => "Performance",
+                BehaviorBucket::Security => "Security",
+                BehaviorBucket::Correctness => "Correctness",
+                BehaviorBucket::Other => "Other",
+            }
+        }
+    }
+
+    fn severity_weight(sev: &str) -> i64 {
+        match sev.to_lowercase().as_str() {
+            "critical" => 10,
+            "high" => 5,
+            "medium" => 3,
+            "low" => 1,
+            _ => 0,
+        }
+    }
+
+    fn bucket_for_rule(rule_id: &str) -> BehaviorBucket {
+        let r = rule_id.to_lowercase();
+
+        // Security
+        if r.contains("sql_injection")
+            || r.contains("hardcoded_secret")
+            || r.contains("hardcoded_secrets")
+            || r.contains("secret")
+            || r.contains("xss")
+            || r.contains("csrf")
+            || r.contains("injection")
+        {
+            return BehaviorBucket::Security;
+        }
+
+        // Observability
+        if r.contains("logging")
+            || r.contains("correlation")
+            || r.contains("trace")
+            || r.contains("span")
+        {
+            return BehaviorBucket::Observability;
+        }
+
+        // Resilience
+        if r.contains("timeout")
+            || r.contains("retry")
+            || r.contains("circuit")
+            || r.contains("cancel")
+            || r.contains("goroutine")
+            || r.contains("recover")
+            || r.contains("leak")
+        {
+            return BehaviorBucket::Resilience;
+        }
+
+        // Performance
+        if r.contains("n_plus_one")
+            || r.contains("unbounded")
+            || r.contains("large_response")
+            || r.contains("memory")
+            || r.contains("regex_compile")
+            || r.contains("pagination")
+            || r.contains("alloc")
+        {
+            return BehaviorBucket::Performance;
+        }
+
+        // Correctness
+        if r.contains("unchecked") || r.contains("bare_except") || r.contains("type_assert") {
+            return BehaviorBucket::Correctness;
+        }
+
+        BehaviorBucket::Other
+    }
+
+    fn hotspot_key(file_path: &str) -> String {
+        let parts: Vec<&str> = file_path.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            return "unknown".to_string();
+        }
+        let depth = HOTSPOT_DEPTH.min(parts.len());
+        parts[..depth].join("/")
+    }
+
+    #[derive(Default)]
+    struct BucketStats<'a> {
+        count: usize,
+        score: i64,
+        examples: Vec<&'a IrFinding>,
+    }
+
+    #[derive(Default)]
+    struct HotspotStats<'a> {
+        total_count: usize,
+        total_score: i64,
+        buckets: HashMap<BehaviorBucket, BucketStats<'a>>,
+    }
+
+    fn insert_example<'a>(examples: &mut Vec<&'a IrFinding>, f: &'a IrFinding) {
+        examples.push(f);
+        examples.sort_by(|a, b| {
+            severity_weight(&b.severity)
+                .cmp(&severity_weight(&a.severity))
+                .then_with(|| a.rule_id.cmp(&b.rule_id))
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.line.cmp(&b.line))
+        });
+        examples.truncate(EXAMPLES_PER_BEHAVIOR);
+    }
+
+    let mut hotspots: HashMap<String, HotspotStats> = HashMap::new();
+
+    for f in findings {
+        let key = hotspot_key(&f.file_path);
+        let bucket = bucket_for_rule(&f.rule_id);
+        let w = severity_weight(&f.severity);
+
+        let hs = hotspots.entry(key).or_default();
+        hs.total_count += 1;
+        hs.total_score += w;
+
+        let bs = hs.buckets.entry(bucket).or_default();
+        bs.count += 1;
+        bs.score += w;
+        insert_example(&mut bs.examples, f);
+    }
+
+    let mut sorted_hotspots: Vec<(String, HotspotStats)> = hotspots.into_iter().collect();
+    sorted_hotspots.sort_by(|a, b| {
+        b.1.total_score
+            .cmp(&a.1.total_score)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    sorted_hotspots.truncate(HOTSPOT_LIMIT);
+
+    println!("{}", "Hotspots".bold());
+
+    for (i, (key, hs)) in sorted_hotspots.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+
+        println!(
+            "  {} {} ({} finding{})",
+            "→".cyan().bold(),
+            key.bright_blue(),
+            hs.total_count.to_string().bright_yellow(),
+            if hs.total_count == 1 { "" } else { "s" }
+        );
+
+        let mut buckets: Vec<(BehaviorBucket, &BucketStats)> =
+            hs.buckets.iter().map(|(k, v)| (*k, v)).collect();
+        buckets.sort_by(|a, b| {
+            b.1.score
+                .cmp(&a.1.score)
+                .then_with(|| a.0.label().cmp(b.0.label()))
+        });
+        buckets.truncate(BEHAVIORS_PER_HOTSPOT);
+
+        for (bucket, stats) in buckets {
+            println!(
+                "    {}: {} finding{}",
+                bucket.label().bold(),
+                stats.count.to_string().bright_yellow(),
+                if stats.count == 1 { "" } else { "s" }
+            );
+
+            for ex in &stats.examples {
+                let title = if !ex.title.is_empty() {
+                    ex.title.clone()
+                } else if !ex.message.is_empty() {
+                    ex.message.clone()
+                } else {
+                    ex.rule_id.clone()
+                };
+
+                let prefix = format!("      [{}] ", ex.rule_id);
+                let first_line_max = MAX_WIDTH.saturating_sub(prefix.len());
+                let wrapped_lines = wrap_text(&title, first_line_max, "        ");
+
+                if let Some(first_line) = wrapped_lines.first() {
+                    println!(
+                        "{}{}",
+                        format!("      [{}] ", ex.rule_id.cyan()),
+                        first_line.dimmed()
+                    );
+                }
+                for line in wrapped_lines.iter().skip(1) {
+                    println!("        {}", line.dimmed());
+                }
+
+                println!(
+                    "        {}:{}",
+                    ex.file_path.dimmed(),
+                    ex.line.to_string().dimmed()
+                );
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "  {} Run with {} for raw output (advanced)",
+        "→".cyan().bold(),
+        "--raw-findings".bright_blue()
+    );
 }
 
 /// Execute review with server-side parsing (legacy mode).

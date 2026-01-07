@@ -209,6 +209,39 @@ pub struct GraphIngestResponse {
     pub elapsed_ms: i64,
 }
 
+/// Progress snapshot for graph ingestion.
+#[derive(Debug, Clone)]
+pub struct GraphIngestProgress {
+    /// Current ingest phase (nodes/edges/done)
+    pub phase: String,
+    /// Completion percentage [0, 100]
+    pub percent: u8,
+    /// Nodes received so far
+    pub nodes_received: i64,
+    /// Edges received so far
+    pub edges_received: i64,
+    /// Total nodes to ingest
+    pub nodes_total: i64,
+    /// Total edges to ingest
+    pub edges_total: i64,
+}
+
+fn compute_ingest_percent(
+    nodes_total: i64,
+    edges_total: i64,
+    nodes_received: i64,
+    edges_received: i64,
+) -> u8 {
+    let total = nodes_total.saturating_add(edges_total);
+    if total <= 0 {
+        return 100;
+    }
+    let done = nodes_received
+        .saturating_add(edges_received)
+        .clamp(0, total);
+    ((done.saturating_mul(100)) / total).clamp(0, 100) as u8
+}
+
 /// Response from IR analysis endpoint (matches API IrAnalysisResponse)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IrAnalyzeResponse {
@@ -836,6 +869,26 @@ impl ApiClient {
         workspace_label: Option<&str>,
         graph: unfault_core::graph::CodeGraph,
     ) -> Result<GraphIngestResponse, ApiError> {
+        self.ingest_graph_with_progress(api_key, workspace_id, workspace_label, graph, |_| {})
+            .await
+    }
+
+    /// Ingest a full code graph into the API, reporting progress snapshots.
+    ///
+    /// This is identical to `ingest_graph` but calls `on_progress` after each
+    /// accepted chunk (and after state refreshes), allowing the CLI to show
+    /// a percentage to users.
+    pub async fn ingest_graph_with_progress<F>(
+        &self,
+        api_key: &str,
+        workspace_id: &str,
+        workspace_label: Option<&str>,
+        graph: unfault_core::graph::CodeGraph,
+        mut on_progress: F,
+    ) -> Result<GraphIngestResponse, ApiError>
+    where
+        F: FnMut(GraphIngestProgress),
+    {
         use crate::api::graph_stream::{encode_edges_chunk, encode_nodes_chunk};
 
         let t0 = std::time::Instant::now();
@@ -873,16 +926,34 @@ impl ApiClient {
         const NODE_CHUNK: usize = 50_000;
         const EDGE_CHUNK: usize = 200_000;
 
-        let node_total = graph.graph.node_count();
-        let edge_total = graph.graph.edge_count();
+        let node_total = graph.graph.node_count() as i64;
+        let edge_total = graph.graph.edge_count() as i64;
+
+        let mut report = |status: &GraphIngestStatusResponse| {
+            let percent = compute_ingest_percent(
+                node_total,
+                edge_total,
+                status.nodes_received,
+                status.edges_received,
+            );
+            on_progress(GraphIngestProgress {
+                phase: status.phase.clone(),
+                percent,
+                nodes_received: status.nodes_received,
+                edges_received: status.edges_received,
+                nodes_total: node_total,
+                edges_total: edge_total,
+            });
+        };
 
         let mut ingest_status = self.ingest_status(api_key, &session_id).await?;
+        report(&ingest_status);
 
         // Upload nodes (resume on 409 or transient request failures)
         while ingest_status.phase == "nodes" {
             let next_seq = ingest_status.nodes_next_seq.max(0) as usize;
             let start_idx = next_seq.saturating_mul(NODE_CHUNK);
-            if start_idx >= node_total {
+            if start_idx >= node_total.max(0) as usize {
                 break;
             }
 
@@ -911,6 +982,7 @@ impl ApiClient {
                 Ok(r) => r,
                 Err(_) => {
                     ingest_status = self.ingest_status(api_key, &session_id).await?;
+                    report(&ingest_status);
                     continue;
                 }
             };
@@ -918,6 +990,7 @@ impl ApiClient {
             let http_status = resp.status();
             if http_status.as_u16() == 409 {
                 ingest_status = self.ingest_status(api_key, &session_id).await?;
+                report(&ingest_status);
                 continue;
             }
 
@@ -927,9 +1000,11 @@ impl ApiClient {
             }
 
             ingest_status = self.ingest_status(api_key, &session_id).await?;
+            report(&ingest_status);
         }
 
         ingest_status = self.ingest_status(api_key, &session_id).await?;
+        report(&ingest_status);
 
         // Transition nodes → edges if needed
         if ingest_status.phase == "nodes" {
@@ -956,13 +1031,14 @@ impl ApiClient {
             }
 
             ingest_status = self.ingest_status(api_key, &session_id).await?;
+            report(&ingest_status);
         }
 
         // Upload edges
         while ingest_status.phase == "edges" {
             let next_seq = ingest_status.edges_next_seq.max(0) as usize;
             let start_idx = next_seq.saturating_mul(EDGE_CHUNK);
-            if start_idx >= edge_total {
+            if start_idx >= edge_total.max(0) as usize {
                 break;
             }
 
@@ -991,6 +1067,7 @@ impl ApiClient {
                 Ok(r) => r,
                 Err(_) => {
                     ingest_status = self.ingest_status(api_key, &session_id).await?;
+                    report(&ingest_status);
                     continue;
                 }
             };
@@ -998,6 +1075,7 @@ impl ApiClient {
             let http_status = resp.status();
             if http_status.as_u16() == 409 {
                 ingest_status = self.ingest_status(api_key, &session_id).await?;
+                report(&ingest_status);
                 continue;
             }
 
@@ -1007,9 +1085,11 @@ impl ApiClient {
             }
 
             ingest_status = self.ingest_status(api_key, &session_id).await?;
+            report(&ingest_status);
         }
 
         ingest_status = self.ingest_status(api_key, &session_id).await?;
+        report(&ingest_status);
 
         // Transition edges → done if needed
         if ingest_status.phase == "edges" {
@@ -1034,12 +1114,15 @@ impl ApiClient {
                 let error_text = resp.text().await.unwrap_or_default();
                 return Err(to_http_error(http_status, error_text));
             }
+
+            ingest_status = self.ingest_status(api_key, &session_id).await?;
+            report(&ingest_status);
         }
 
         Ok(GraphIngestResponse {
             session_id,
-            nodes_created: node_total as i64,
-            edges_created: edge_total as i64,
+            nodes_created: node_total,
+            edges_created: edge_total,
             elapsed_ms: t0.elapsed().as_millis() as i64,
         })
     }
@@ -1514,6 +1597,18 @@ mod tests {
         assert_eq!(response.function_count, 50);
         assert_eq!(response.total_nodes, 73);
         assert_eq!(response.total_edges, 96);
+    }
+
+    #[test]
+    fn test_compute_ingest_percent_zero_total_is_100() {
+        assert_eq!(compute_ingest_percent(0, 0, 0, 0), 100);
+    }
+
+    #[test]
+    fn test_compute_ingest_percent_progression() {
+        assert_eq!(compute_ingest_percent(10, 10, 0, 0), 0);
+        assert_eq!(compute_ingest_percent(10, 10, 10, 0), 50);
+        assert_eq!(compute_ingest_percent(10, 10, 10, 10), 100);
     }
 
     // ==================== IR Analysis Types Tests ====================

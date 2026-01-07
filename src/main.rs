@@ -135,6 +135,9 @@ enum Commands {
         /// Use legacy server-side parsing (sends source code to server)
         #[arg(long)]
         server_parse: bool,
+        /// Print raw findings instead of hotspot summary (advanced, very large output)
+        #[arg(long, hide = true)]
+        raw_findings: bool,
     },
     /// Check authentication and service configuration status
     Status,
@@ -448,6 +451,7 @@ async fn run_command(command: Commands) -> i32 {
             fix,
             dry_run,
             server_parse,
+            raw_findings,
         } => {
             init_logger(verbose);
             // Convert OutputFormat to string for backward compatibility
@@ -481,6 +485,7 @@ async fn run_command(command: Commands) -> i32 {
                 fix,
                 dry_run,
                 server_parse,
+                raw_findings,
             };
             match commands::review::execute(args).await {
                 Ok(exit_code) => exit_code,
