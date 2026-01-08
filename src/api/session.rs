@@ -513,6 +513,74 @@ pub struct SessionHotspotsResponse {
 }
 
 // =============================================================================
+// Insights (facts -> insights)
+// =============================================================================
+
+/// Evidence reference for an insight.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InsightEvidenceItem {
+    pub fact_id: String,
+    pub fact_type: String,
+    pub severity: String,
+    pub dimension: String,
+
+    #[serde(default)]
+    pub rule_id: Option<String>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub line: Option<i64>,
+
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// Group metadata for an insight's evidence.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InsightEvidenceGroup {
+    pub scope_key: String,
+    pub bucket: String,
+    pub count: i64,
+    pub score: i64,
+}
+
+/// Evidence payload for an insight.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InsightEvidence {
+    #[serde(default)]
+    pub facts: Vec<InsightEvidenceItem>,
+    pub group: InsightEvidenceGroup,
+}
+
+/// A user-facing insight derived from facts.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionInsight {
+    pub id: String,
+    pub kind: String,
+
+    pub title: String,
+    pub summary: String,
+
+    pub dimension: String,
+    pub severity: String,
+
+    pub scope_key: String,
+    pub evidence: InsightEvidence,
+
+    pub created_at: String,
+}
+
+/// Insights response for a session.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionInsightsResponse {
+    pub session_id: String,
+    pub workspace_label: Option<String>,
+
+    #[serde(default)]
+    pub insights: Vec<SessionInsight>,
+}
+
+// =============================================================================
 // API Client Methods
 // =============================================================================
 
@@ -870,6 +938,33 @@ impl ApiClient {
         })
     }
 
+    /// Fetch deterministic insights for a completed session.
+    pub async fn get_session_insights(
+        &self,
+        api_key: &str,
+        session_id: &str,
+    ) -> Result<SessionInsightsResponse, ApiError> {
+        let url = format!("{}/api/v1/session/{}/insights", self.base_url, session_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        response.json().await.map_err(|e| ApiError::ParseError {
+            message: format!("Failed to parse session insights response: {}", e),
+        })
+    }
+
     /// Fetch hotspot summaries for a completed session.
     pub async fn get_session_hotspots(
         &self,
@@ -1011,6 +1106,54 @@ mod tests {
         assert_eq!(response.session_id, "sess_abc123");
         assert_eq!(response.status, "created");
         assert_eq!(response.workspace_label, "my-project");
+    }
+
+    #[test]
+    fn test_session_insights_response_deserialization() {
+        let json = r#"{
+            "session_id": "sess_abc123",
+            "workspace_label": "my-project",
+            "insights": [
+                {
+                    "id": "insight_001",
+                    "kind": "hotspot_behavior",
+                    "title": "Observability signals concentrate in api/routes",
+                    "summary": "3 fact(s) in the 'observability' bucket were detected under 'api/routes'.",
+                    "dimension": "observability",
+                    "severity": "Medium",
+                    "scope_key": "api/routes",
+                    "evidence": {
+                        "facts": [
+                            {
+                                "fact_id": "fact_001",
+                                "fact_type": "rule_finding",
+                                "severity": "Medium",
+                                "dimension": "observability",
+                                "rule_id": "python.logging.missing_correlation_id",
+                                "file_path": "api/routes/users.py",
+                                "line": 42,
+                                "title": "Missing correlation id"
+                            }
+                        ],
+                        "group": {
+                            "scope_key": "api/routes",
+                            "bucket": "observability",
+                            "count": 3,
+                            "score": 9
+                        }
+                    },
+                    "created_at": "2026-01-08T10:30:00Z"
+                }
+            ]
+        }"#;
+
+        let response: SessionInsightsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.session_id, "sess_abc123");
+        assert_eq!(response.workspace_label.as_deref(), Some("my-project"));
+        assert_eq!(response.insights.len(), 1);
+        assert_eq!(response.insights[0].dimension, "observability");
+        assert_eq!(response.insights[0].evidence.group.bucket, "observability");
+        assert_eq!(response.insights[0].evidence.facts[0].line, Some(42));
     }
 
     #[test]

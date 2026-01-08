@@ -138,6 +138,9 @@ enum Commands {
         /// Print raw findings instead of hotspot summary (advanced, very large output)
         #[arg(long, hide = true)]
         raw_findings: bool,
+        /// Include test files in analysis (default: skip tests)
+        #[arg(long)]
+        include_tests: bool,
     },
     /// Check authentication and service configuration status
     Status,
@@ -452,6 +455,7 @@ async fn run_command(command: Commands) -> i32 {
             dry_run,
             server_parse,
             raw_findings,
+            include_tests,
         } => {
             init_logger(verbose);
             // Convert OutputFormat to string for backward compatibility
@@ -486,6 +490,7 @@ async fn run_command(command: Commands) -> i32 {
                 dry_run,
                 server_parse,
                 raw_findings,
+                include_tests,
             };
             match commands::review::execute(args).await {
                 Ok(exit_code) => exit_code,

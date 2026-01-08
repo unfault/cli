@@ -142,6 +142,8 @@ pub struct ReviewArgs {
     pub server_parse: bool,
     /// Print raw findings instead of hotspot summary
     pub raw_findings: bool,
+    /// Include test files in analysis (default: skip tests)
+    pub include_tests: bool,
 }
 
 /// Execute the review command
@@ -332,7 +334,18 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     // Final render with complete info
     {
         let mut state = display_state.lock().unwrap();
-        state.file_count = workspace_info.source_files.len();
+        state.file_count = if args.include_tests {
+            workspace_info.source_files.len()
+        } else {
+            workspace_info
+                .source_files
+                .iter()
+                .filter(|(p, _)| {
+                    let rel = p.strip_prefix(&current_dir).unwrap_or(p).to_string_lossy();
+                    !is_test_path(&rel)
+                })
+                .count()
+        };
         state.languages = workspace_info.language_strings();
         state.frameworks = workspace_info.framework_strings();
         state.render(&dimensions, args.profile.as_deref());
@@ -387,6 +400,36 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
 /// 4. Stream semantics in chunks to API for rule evaluation
 /// 5. Fetch findings and optionally apply patches
 #[allow(clippy::too_many_arguments)]
+fn is_test_path(path: &str) -> bool {
+    let lower = path.to_lowercase().replace('\\', "/");
+
+    lower.starts_with("test/")
+        || lower.starts_with("tests/")
+        || lower.starts_with("testdata/")
+        || lower.starts_with("fixtures/")
+        || lower.contains("/test/")
+        || lower.contains("/tests/")
+        || lower.contains("/testdata/")
+        || lower.contains("/fixtures/")
+        || lower.contains("/__tests__/")
+        || lower.contains("_test.")
+        || lower.contains(".test.")
+        || lower.contains(".spec.")
+        || lower.ends_with("_test.go")
+        || lower.ends_with("_test.rs")
+        || lower.ends_with("_test.py")
+        || lower.ends_with("_test.ts")
+        || lower.ends_with("_test.tsx")
+        || lower.ends_with(".test.ts")
+        || lower.ends_with(".test.tsx")
+        || lower.ends_with(".spec.ts")
+        || lower.ends_with(".spec.tsx")
+        || lower
+            .split('/')
+            .last()
+            .is_some_and(|name| name.starts_with("test_") || name.starts_with("spec_"))
+}
+
 async fn execute_client_parse(
     args: &ReviewArgs,
     config: &Config,
@@ -413,7 +456,27 @@ async fn execute_client_parse(
     pb.set_message("Parsing source files locally...");
 
     let parse_start = Instant::now();
-    let build_result = match build_ir_cached(current_dir, None, args.verbose) {
+    // Exclude tests before parsing by default.
+    let file_paths: Option<Vec<std::path::PathBuf>> = if args.include_tests {
+        None
+    } else {
+        Some(
+            workspace_info
+                .source_files
+                .iter()
+                .filter_map(|(p, _)| {
+                    let rel = p.strip_prefix(current_dir).unwrap_or(p).to_string_lossy();
+                    if is_test_path(&rel) {
+                        None
+                    } else {
+                        Some(p.clone())
+                    }
+                })
+                .collect(),
+        )
+    };
+
+    let build_result = match build_ir_cached(current_dir, file_paths.as_deref(), args.verbose) {
         Ok(result) => result,
         Err(e) => {
             pb.finish_and_clear();
@@ -737,15 +800,38 @@ async fn execute_client_parse(
             Ok(EXIT_SUCCESS)
         }
     } else {
-        let hotspots_resp = match api_client
-            .get_session_hotspots(&config.api_key, &ingest.session_id, 3, 10, 3, 3)
-            .await
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                pb.finish_and_clear();
-                return Ok(handle_api_error(e));
+        // Default UX: insights-first, with a safe fallback to hotspots.
+        let insights_resp = if args.output_mode == "basic" {
+            match api_client
+                .get_session_insights(&config.api_key, &ingest.session_id)
+                .await
+            {
+                Ok(resp) => Some(resp),
+                Err(ApiError::ClientError { status: 404, .. }) => None,
+                Err(e) => {
+                    pb.finish_and_clear();
+                    return Ok(handle_api_error(e));
+                }
             }
+        } else {
+            None
+        };
+
+        let hotspots_resp = if insights_resp.is_none() {
+            Some(
+                match api_client
+                    .get_session_hotspots(&config.api_key, &ingest.session_id, 3, 10, 3, 3)
+                    .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        pb.finish_and_clear();
+                        return Ok(handle_api_error(e));
+                    }
+                },
+            )
+        } else {
+            None
         };
 
         pb.finish_and_clear();
@@ -776,9 +862,14 @@ async fn execute_client_parse(
             profile: args.profile.clone(),
         };
 
-        let has_any = hotspots_resp.hotspots.iter().any(|h| h.total_count > 0);
-
-        display_session_hotspots(args, &hotspots_resp, &display_context);
+        let has_any = if let Some(insights) = &insights_resp {
+            display_session_insights(args, insights, &display_context);
+            !insights.insights.is_empty()
+        } else {
+            let hotspots = hotspots_resp.expect("hotspots fallback should be present");
+            display_session_hotspots(args, &hotspots, &display_context);
+            hotspots.hotspots.iter().any(|h| h.total_count > 0)
+        };
 
         if has_any {
             Ok(EXIT_FINDINGS_FOUND)
@@ -1334,6 +1425,134 @@ fn display_ir_findings_grouped(findings: &[IrFinding]) {
     }
 }
 
+fn shorten_example(title: &str) -> String {
+    let mut t = title.trim().to_string();
+
+    // Keep it compact.
+    if let Some(idx) = t.find(" at line ") {
+        t.truncate(idx);
+    }
+
+    if t.len() > 70 {
+        t.truncate(67);
+        t.push_str("...");
+    }
+
+    t
+}
+
+fn display_session_insights(
+    args: &ReviewArgs,
+    insights: &crate::api::SessionInsightsResponse,
+    context: &ReviewOutputContext,
+) {
+    println!();
+    render_session_overview(context);
+
+    // Filter test scopes unless explicitly included.
+    let mut items: Vec<_> = insights
+        .insights
+        .iter()
+        .filter(|i| args.include_tests || !is_test_path(&i.scope_key))
+        .collect();
+
+    if items.is_empty() {
+        println!();
+        println!(
+            "{} No issues found! Your code looks good.",
+            "✓".bright_green().bold()
+        );
+        return;
+    }
+
+    // Keep this bounded and deterministic.
+    items.truncate(8);
+
+    use std::collections::HashMap;
+
+    // Aggregate buckets across top insights.
+    let mut bucket_counts: HashMap<String, i64> = HashMap::new();
+    for i in &items {
+        let bucket = i.evidence.group.bucket.clone();
+        *bucket_counts.entry(bucket).or_insert(0) += i.evidence.group.count;
+    }
+
+    let mut buckets: Vec<(String, i64)> = bucket_counts.into_iter().collect();
+    buckets.sort_by(|a, b| b.1.cmp(&a.1));
+    buckets.truncate(2);
+
+    let theme_phrase = |b: &str| match b {
+        "resilience" => "resilience hardening",
+        "observability" => "logging and tracing",
+        "security" => "security hygiene",
+        "performance" => "performance hot paths",
+        "correctness" => "correctness edge cases",
+        _ => "general cleanup",
+    };
+
+    let mut paragraph = String::new();
+    paragraph.push_str("Looks good overall, with a couple spots that deserve a closer look.");
+
+    if buckets.len() == 2 {
+        paragraph.push_str(&format!(
+            " Two themes keep showing up: {} and {}.",
+            theme_phrase(&buckets[0].0),
+            theme_phrase(&buckets[1].0)
+        ));
+    } else if buckets.len() == 1 {
+        paragraph.push_str(&format!(
+            " One theme keeps showing up: {}.",
+            theme_phrase(&buckets[0].0)
+        ));
+    }
+
+    // Starting points: top 2 scopes with one example each.
+    let mut starts: Vec<(String, Option<String>)> = Vec::new();
+    for i in items.iter().take(2) {
+        let example = i
+            .evidence
+            .facts
+            .iter()
+            .find_map(|f| f.title.as_deref().map(shorten_example));
+        starts.push((i.scope_key.clone(), example));
+    }
+
+    if let Some((h1, ex1)) = starts.get(0) {
+        paragraph.push_str(&format!(" Starting point: {}", h1));
+        if let Some(ex) = ex1 {
+            paragraph.push_str(&format!(" ({})", ex));
+        }
+
+        if let Some((h2, ex2)) = starts.get(1) {
+            paragraph.push_str(&format!("; then {}", h2));
+            if let Some(ex) = ex2 {
+                paragraph.push_str(&format!(" ({})", ex));
+            }
+        }
+        paragraph.push('.');
+    }
+
+    if buckets.iter().any(|(b, _)| b == "observability") {
+        paragraph.push_str(
+            " If an incident hits, correlation IDs and structured logs make the follow-up a lot calmer.",
+        );
+    }
+
+    println!();
+    println!("{}", "Summary".bold());
+
+    let wrapped = wrap_text(&paragraph, MAX_WIDTH, "");
+    for line in wrapped {
+        println!("{}", line);
+    }
+
+    println!();
+    println!(
+        "{}",
+        "Tip: use --output full to drill into hotspots.".dimmed()
+    );
+}
+
 fn display_session_hotspots(
     args: &ReviewArgs,
     hotspots: &crate::api::SessionHotspotsResponse,
@@ -1360,6 +1579,115 @@ fn display_session_hotspots(
             "{} No issues found! Your code looks good.",
             "✓".bright_green().bold()
         );
+        return;
+    }
+
+    // Calm default: render a short, human Summary.
+    if args.output_mode == "basic" {
+        // Filter test hotspots unless explicitly included.
+        let mut hs: Vec<_> = hotspots
+            .hotspots
+            .iter()
+            .filter(|h| args.include_tests || !is_test_path(&h.hotspot))
+            .collect();
+
+        // The API already sorts hotspots by importance, but keep it deterministic.
+        hs.truncate(8);
+
+        // Aggregate bucket counts across top hotspots.
+        use std::collections::HashMap;
+        let mut bucket_counts: HashMap<String, i64> = HashMap::new();
+
+        for h in &hs {
+            for b in &h.behaviors {
+                *bucket_counts.entry(b.bucket.clone()).or_insert(0) += b.count as i64;
+            }
+        }
+
+        let mut buckets: Vec<(String, i64)> = bucket_counts.into_iter().collect();
+        buckets.sort_by(|a, b| b.1.cmp(&a.1));
+        buckets.truncate(2);
+
+        let theme_phrase = |b: &str| match b {
+            "resilience" => "resilience hardening",
+            "observability" => "logging and tracing",
+            "security" => "security hygiene",
+            "performance" => "performance hot paths",
+            "correctness" => "correctness edge cases",
+            _ => "general cleanup",
+        };
+
+        let mut paragraph = String::new();
+
+        paragraph.push_str("Looks good overall, with a couple spots that deserve a closer look.");
+
+        if buckets.len() == 2 {
+            paragraph.push_str(&format!(
+                " Two themes keep showing up: {} and {}.",
+                theme_phrase(&buckets[0].0),
+                theme_phrase(&buckets[1].0)
+            ));
+        } else if buckets.len() == 1 {
+            paragraph.push_str(&format!(
+                " One theme keeps showing up: {}.",
+                theme_phrase(&buckets[0].0)
+            ));
+        }
+
+        // Starting points: top 2 hotspots with one example each.
+        let mut starts: Vec<(String, Option<String>)> = Vec::new();
+        for h in hs.iter().take(2) {
+            let example = h
+                .behaviors
+                .iter()
+                .flat_map(|b| b.examples.iter())
+                .find_map(|ex| {
+                    if !ex.title.is_empty() {
+                        Some(shorten_example(&ex.title))
+                    } else {
+                        None
+                    }
+                });
+
+            starts.push((h.hotspot.clone(), example));
+        }
+
+        if let Some((h1, ex1)) = starts.get(0) {
+            paragraph.push_str(&format!(" Starting point: {}", h1));
+            if let Some(ex) = ex1 {
+                paragraph.push_str(&format!(" ({})", ex));
+            }
+
+            if let Some((h2, ex2)) = starts.get(1) {
+                paragraph.push_str(&format!("; then {}", h2));
+                if let Some(ex) = ex2 {
+                    paragraph.push_str(&format!(" ({})", ex));
+                }
+            }
+            paragraph.push('.');
+        }
+
+        if buckets.iter().any(|(b, _)| b == "observability") {
+            paragraph.push_str(
+                " If an incident hits, correlation IDs and structured logs make the follow-up a lot calmer.",
+            );
+        }
+
+        println!();
+        println!("{}", "Summary".bold());
+
+        // Wrap to 80 columns.
+        let wrapped = wrap_text(&paragraph, MAX_WIDTH, "");
+        for line in wrapped {
+            println!("{}", line);
+        }
+
+        println!();
+        println!(
+            "{}",
+            "Tip: use --output full to drill into hotspots.".dimmed()
+        );
+
         return;
     }
 
@@ -1724,9 +2052,15 @@ async fn execute_server_parse(
     pb.set_message("Collecting files for analysis...");
 
     let collector = FileCollector::new(current_dir);
-    let collected_files = collector
+    let mut collected_files = collector
         .collect(&session_response.file_hints, &workspace_info.source_files)
         .context("Failed to collect files")?;
+
+    // Exclude tests before uploading (default behavior).
+    if !args.include_tests {
+        collected_files.files.retain(|f| !is_test_path(&f.path));
+        collected_files.total_bytes = collected_files.files.iter().map(|f| f.contents.len()).sum();
+    }
 
     if args.verbose {
         eprintln!(
@@ -2243,6 +2577,20 @@ mod tests {
     use crate::session::WorkspaceScanner;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_is_test_path_common_patterns() {
+        assert!(is_test_path("tests/test_api.py"));
+        assert!(is_test_path("src/__tests__/widget.test.tsx"));
+        assert!(is_test_path("pkg/foo_test.go"));
+        assert!(is_test_path("testdata/corpus.json"));
+        assert!(is_test_path("fixtures/sample.yaml"));
+        assert!(is_test_path("tests\\unit\\spec_auth.rs"));
+
+        assert!(!is_test_path("src/main.py"));
+        assert!(!is_test_path("src/testament.rs"));
+        assert!(!is_test_path("src/contest/winner.rs"));
+    }
 
     #[test]
     fn test_workspace_scanner_empty_dir() {
