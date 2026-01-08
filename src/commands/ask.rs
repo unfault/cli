@@ -1056,33 +1056,42 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
     }
 
     if let Some(graph_context) = &response.graph_context {
-        if graph_context_has_data(graph_context) {
-            let target = graph_context
-                .target_file
-                .as_deref()
-                .unwrap_or("your target");
+        let target = graph_context
+            .target_file
+            .as_deref()
+            .unwrap_or("your target");
 
-            if graph_context.query_type == "impact" && !graph_context.affected_files.is_empty() {
-                let n = graph_context.affected_files.len();
-                let top: Vec<&str> = graph_context
-                    .affected_files
-                    .iter()
-                    .filter_map(|r| r.path.as_deref())
-                    .take(3)
-                    .collect();
+        // Impact: even an empty result is meaningful (no internal callers found).
+        if graph_context.query_type == "impact" {
+            let n = graph_context.affected_files.len();
 
-                let suffix = if top.is_empty() {
-                    "".to_string()
-                } else {
-                    format!(" Top: {}.", top.join(", "))
-                };
-
+            if n == 0 {
                 return format!(
-                    "If you change {}, I’m seeing {} downstream file(s).{}",
-                    target, n, suffix
+                    "I don’t see any internal callers for {} in the call graph. That can mean it’s unused, or it’s invoked indirectly (FastAPI dependencies, background tasks, reflection). I’d still grep for references and run the tests.",
+                    target
                 );
             }
 
+            let top: Vec<&str> = graph_context
+                .affected_files
+                .iter()
+                .filter_map(|r| r.path.as_deref())
+                .take(3)
+                .collect();
+
+            let suffix = if top.is_empty() {
+                "".to_string()
+            } else {
+                format!(" Top: {}.", top.join(", "))
+            };
+
+            return format!(
+                "If you change {}, I’m seeing {} downstream file(s).{}",
+                target, n, suffix
+            );
+        }
+
+        if graph_context_has_data(graph_context) {
             if graph_context.query_type == "dependencies" && !graph_context.dependencies.is_empty()
             {
                 let n = graph_context.dependencies.len();

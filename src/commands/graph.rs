@@ -1219,11 +1219,11 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
 
         if response.total_affected == 0 {
             println!(
-                "  {} This function is a leaf — not called by any other functions.",
+                "  {} No internal callers found in the call graph.",
                 "ℹ".blue()
             );
             println!(
-                "  {} Safe to refactor without affecting other call paths.",
+                "  {} That can mean it’s unused, or it’s called indirectly (framework hooks, dependency injection, reflection).",
                 "".dimmed()
             );
             println!();
