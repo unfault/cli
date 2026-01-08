@@ -82,9 +82,9 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-        /// Skip LLM and show raw context only
+        /// Use the configured LLM for a longer answer
         #[arg(long)]
-        no_llm: bool,
+        llm: bool,
         /// Enable verbose output
         #[arg(long, short = 'v')]
         verbose: bool,
@@ -399,7 +399,7 @@ async fn run_command(command: Commands) -> i32 {
             max_findings,
             threshold,
             json,
-            no_llm,
+            llm,
             verbose,
         } => {
             let args = commands::ask::AskArgs {
@@ -410,7 +410,7 @@ async fn run_command(command: Commands) -> i32 {
                 max_findings: Some(max_findings),
                 similarity_threshold: Some(threshold),
                 json,
-                no_llm,
+                llm,
                 verbose,
             };
             init_logger(verbose);

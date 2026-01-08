@@ -167,8 +167,8 @@ pub struct AskArgs {
     pub similarity_threshold: Option<f64>,
     /// Output JSON instead of formatted text
     pub json: bool,
-    /// Skip LLM and show raw context only
-    pub no_llm: bool,
+    /// Generate an AI response using the configured LLM
+    pub llm: bool,
     /// Verbose output
     pub verbose: bool,
 }
@@ -405,69 +405,79 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
         }
     };
 
-    // Check if LLM is configured for generating AI response (unless --no-llm)
-    let llm_response = if !args.no_llm && config.llm_ready() {
-        let llm_config = config.llm.as_ref().unwrap();
-
-        if args.verbose {
-            eprintln!(
-                "{} Using {} ({}) for AI response...",
-                "→".cyan(),
-                llm_config.provider,
-                llm_config.model
-            );
-        }
-
-        // Build rich context for LLM
-        let llm_context = build_llm_context(
-            &response.context_summary,
-            &response.sessions,
-            &response.findings,
-        );
-
-        // Create LLM client and generate response with streaming
-        match LlmClient::new_with_options(llm_config, args.verbose) {
-            Ok(client) => {
-                // Print header before streaming starts (include model info)
-                println!();
-                println!(
-                    "{} {} {}",
-                    "🤖".green(),
-                    "AI Analysis".bold().underline(),
-                    format!("({})", llm_config.model).dimmed()
+    // Run LLM only when explicitly requested.
+    let llm_response = if args.llm {
+        if !config.llm_ready() {
+            if args.verbose {
+                eprintln!(
+                    "{} LLM not configured; falling back to templates",
+                    "⚠".yellow()
                 );
-                println!();
+            }
+            None
+        } else {
+            let llm_config = config.llm.as_ref().unwrap();
 
-                // Stream tokens directly to stdout
-                let result = client.generate_streaming(&args.query, &llm_context).await;
+            if args.verbose {
+                eprintln!(
+                    "{} Using {} ({}) for AI response...",
+                    "→".cyan(),
+                    llm_config.provider,
+                    llm_config.model
+                );
+            }
 
-                match result {
-                    Ok(text) => {
-                        // Treat empty or whitespace-only responses as failures
-                        let trimmed = text.trim();
-                        if trimmed.is_empty() {
+            // Build rich context for LLM
+            let llm_context = build_llm_context(
+                &response.context_summary,
+                &response.sessions,
+                &response.findings,
+            );
+
+            // Create LLM client and generate response with streaming
+            match LlmClient::new_with_options(llm_config, args.verbose) {
+                Ok(client) => {
+                    // Print header before streaming starts (include model info)
+                    println!();
+                    println!(
+                        "{} {} {}",
+                        "🤖".green(),
+                        "AI Analysis".bold().underline(),
+                        format!("({})", llm_config.model).dimmed()
+                    );
+                    println!();
+
+                    // Stream tokens directly to stdout
+                    let result = client.generate_streaming(&args.query, &llm_context).await;
+
+                    match result {
+                        Ok(text) => {
+                            // Treat empty or whitespace-only responses as failures
+                            let trimmed = text.trim();
+                            if trimmed.is_empty() {
+                                if args.verbose {
+                                    eprintln!("{} LLM returned empty response", "⚠".yellow());
+                                }
+                                None
+                            } else {
+                                // Already printed via streaming, store for output logic
+                                Some(trimmed.to_string())
+                            }
+                        }
+                        Err(e) => {
                             if args.verbose {
-                                eprintln!("{} LLM returned empty response", "⚠".yellow());
+                                eprintln!("{} LLM error: {}", "⚠".yellow(), e);
                             }
                             None
-                        } else {
-                            // Already printed via streaming, store for output logic
-                            Some(trimmed.to_string())
                         }
                     }
-                    Err(e) => {
-                        if args.verbose {
-                            eprintln!("{} LLM error: {}", "⚠".yellow(), e);
-                        }
-                        None
+                }
+                Err(e) => {
+                    if args.verbose {
+                        eprintln!("{} LLM client error: {}", "⚠".yellow(), e);
                     }
+                    None
                 }
-            }
-            Err(e) => {
-                if args.verbose {
-                    eprintln!("{} LLM client error: {}", "⚠".yellow(), e);
-                }
-                None
             }
         }
     } else {
@@ -494,19 +504,14 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
 
 /// Output response as JSON
 fn output_json(response: &RAGQueryResponse, llm_response: Option<&str>) -> Result<()> {
-    // Create a combined response with LLM output if available
-    let output = if let Some(llm_text) = llm_response {
-        serde_json::json!({
-            "query": response.query,
-            "answer": llm_text,
-            "sessions": response.sessions,
-            "findings": response.findings,
-            "sources": response.sources,
-            "context_summary": response.context_summary,
-        })
-    } else {
-        serde_json::to_value(response)?
-    };
+    // Always include the full response payload.
+    let mut output = serde_json::to_value(response)?;
+
+    if let Some(llm_text) = llm_response {
+        if let Some(obj) = output.as_object_mut() {
+            obj.insert("answer".to_string(), serde_json::json!(llm_text));
+        }
+    }
 
     let json = serde_json::to_string_pretty(&output)?;
     println!("{}", json);
@@ -892,11 +897,509 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
     }
 }
 
+const MAX_ASK_WIDTH: usize = 80;
+
+fn wrap_paragraph(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let extra = if current.is_empty() { 0 } else { 1 };
+        if current.len() + word.len() + extra > width {
+            if !current.is_empty() {
+                lines.push(current);
+                current = String::new();
+            }
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
+}
+
+fn color_paths(line: &str) -> String {
+    // Match the review summary: paths stand out in bold purple.
+    let scope_rgb = (210u8, 168u8, 255u8);
+
+    let mut out = line.to_string();
+    for token in line.split_whitespace() {
+        let cleaned = token.trim_matches(|c: char| c == ',' || c == '.' || c == ')' || c == ';');
+        let is_path_like = cleaned.contains('/')
+            || cleaned.ends_with(".go")
+            || cleaned.ends_with(".py")
+            || cleaned.ends_with(".rs")
+            || cleaned.ends_with(".ts")
+            || cleaned.ends_with(".tsx");
+
+        if is_path_like {
+            out = out.replace(
+                cleaned,
+                &cleaned
+                    .truecolor(scope_rgb.0, scope_rgb.1, scope_rgb.2)
+                    .bold()
+                    .to_string(),
+            );
+        }
+    }
+    out
+}
+
+fn pick_variant<'a>(seed: &str, variants: &'a [&'a str]) -> &'a str {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    seed.hash(&mut hasher);
+    let idx = (hasher.finish() as usize) % variants.len().max(1);
+    variants[idx]
+}
+
+fn quick_take_seed(response: &RAGQueryResponse) -> String {
+    let source = response
+        .sources
+        .first()
+        .map(|s| s.id.as_str())
+        .unwrap_or("no_source");
+
+    format!(
+        "{}:{}:{}",
+        response.query,
+        response.topic_label.as_deref().unwrap_or("no_topic"),
+        source
+    )
+}
+
+fn build_colleague_reply(response: &RAGQueryResponse) -> String {
+    let seed = quick_take_seed(response);
+
+    if let Some(hint) = &response.hint {
+        let prefix = pick_variant(
+            &seed,
+            &[
+                "Alright — I can help, but I need one small detail.",
+                "Makes sense. I can do that, I just need a concrete target.",
+                "Happy to help. Quick clarification first:",
+            ],
+        );
+        return format!("{} {}", prefix, hint);
+    }
+
+    if let Some(flow_context) = &response.flow_context {
+        let has_flow = !flow_context.paths.is_empty() || !flow_context.root_nodes.is_empty();
+        if has_flow {
+            let opener = pick_variant(
+                &seed,
+                &[
+                    "Alright. Here’s the shape of the flow I’m seeing:",
+                    "From what I can see, the flow generally goes:",
+                    "Here’s the rough call path:",
+                ],
+            );
+
+            if let Some(path) = flow_context.paths.first() {
+                if let (Some(first), Some(last)) = (path.first(), path.last()) {
+                    let start = first
+                        .path
+                        .as_ref()
+                        .map(|p| format!("{} ({})", first.name, p))
+                        .unwrap_or_else(|| first.name.clone());
+                    let end = last
+                        .path
+                        .as_ref()
+                        .map(|p| format!("{} ({})", last.name, p))
+                        .unwrap_or_else(|| last.name.clone());
+
+                    if path.len() <= 2 {
+                        return format!("{} {} → {}.", opener, start, end);
+                    }
+
+                    let mid = &path[1];
+                    let mid_s = mid
+                        .path
+                        .as_ref()
+                        .map(|p| format!("{} ({})", mid.name, p))
+                        .unwrap_or_else(|| mid.name.clone());
+
+                    return format!("{} {} → {} → {}.", opener, start, mid_s, end);
+                }
+            }
+
+            if let Some(root) = flow_context.root_nodes.first() {
+                let start = root
+                    .path
+                    .as_ref()
+                    .map(|p| format!("{} ({})", root.name, p))
+                    .unwrap_or_else(|| root.name.clone());
+
+                let prefix = pick_variant(
+                    &seed,
+                    &[
+                        "If you want a good starting point, I’d begin at",
+                        "A calm starting point is",
+                        "I’d start by reading",
+                    ],
+                );
+
+                return format!("{} {}.", prefix, start);
+            }
+        }
+    }
+
+    if let Some(graph_context) = &response.graph_context {
+        if graph_context_has_data(graph_context) {
+            let target = graph_context
+                .target_file
+                .as_deref()
+                .unwrap_or("your target");
+
+            if graph_context.query_type == "impact" && !graph_context.affected_files.is_empty() {
+                let n = graph_context.affected_files.len();
+                let top: Vec<&str> = graph_context
+                    .affected_files
+                    .iter()
+                    .filter_map(|r| r.path.as_deref())
+                    .take(3)
+                    .collect();
+
+                let suffix = if top.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" Top: {}.", top.join(", "))
+                };
+
+                return format!(
+                    "If you change {}, I’m seeing {} downstream file(s).{}",
+                    target, n, suffix
+                );
+            }
+
+            if graph_context.query_type == "dependencies" && !graph_context.dependencies.is_empty()
+            {
+                let n = graph_context.dependencies.len();
+                let top: Vec<&str> = graph_context
+                    .dependencies
+                    .iter()
+                    .filter_map(|d| d.name.as_deref())
+                    .take(4)
+                    .collect();
+
+                let list = if top.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" A few that stand out: {}.", top.join(", "))
+                };
+
+                return format!(
+                    "{} pulls in {} external dependency/dependencies.{}",
+                    target, n, list
+                );
+            }
+
+            if graph_context.query_type == "library" && !graph_context.library_users.is_empty() {
+                let n = graph_context.library_users.len();
+                let top: Vec<&str> = graph_context
+                    .library_users
+                    .iter()
+                    .filter_map(|r| r.path.as_deref())
+                    .take(3)
+                    .collect();
+
+                let list = if top.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" For example: {}.", top.join(", "))
+                };
+
+                return format!("I’m seeing {} usage site(s) for {}.{}", n, target, list);
+            }
+
+            if graph_context.query_type == "centrality" && !graph_context.affected_files.is_empty()
+            {
+                let top: Vec<&str> = graph_context
+                    .affected_files
+                    .iter()
+                    .filter_map(|r| r.path.as_deref())
+                    .take(5)
+                    .collect();
+
+                let list = if top.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" Top files: {}.", top.join(", "))
+                };
+
+                return format!("Here are the hotspots I’d keep an eye on first.{}", list);
+            }
+
+            // Generic graph fallback.
+            return format!(
+                "I found some graph context around {}. If you want the full narrative, rerun with `--llm`.",
+                target
+            );
+        }
+    }
+
+    // Fall back to findings/sessions based summary.
+    if let Some(take) = build_no_llm_quick_take(response) {
+        return take;
+    }
+
+    if !response.findings.is_empty() {
+        let msg = pick_variant(
+            &seed,
+            &[
+                "I pulled in a few relevant findings — worth a quick look.",
+                "I found some related findings that should point you in the right direction.",
+            ],
+        );
+        return msg.to_string();
+    }
+
+    if !response.sessions.is_empty() {
+        let msg = pick_variant(
+            &seed,
+            &[
+                "I found a bit of relevant past context. `--verbose` will show the raw details.",
+                "There are a couple of related sessions here. `--verbose` will show what I pulled.",
+            ],
+        );
+        return msg.to_string();
+    }
+
+    let msg = pick_variant(
+        &seed,
+        &[
+            "I don’t have enough context to answer that cleanly yet.",
+            "I’m missing a bit of context to answer that well.",
+        ],
+    );
+
+    format!(
+        "{} Try running `unfault review` first, then ask again.",
+        msg
+    )
+}
+
+fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
+    let seed = quick_take_seed(response);
+
+    let has_flow_context = response
+        .flow_context
+        .as_ref()
+        .is_some_and(|fc| !fc.paths.is_empty() || !fc.root_nodes.is_empty());
+
+    let has_graph_context = response
+        .graph_context
+        .as_ref()
+        .is_some_and(|gc| graph_context_has_data(gc));
+
+    if has_flow_context {
+        let fc = response.flow_context.as_ref().unwrap();
+        if let Some(path) = fc.paths.first() {
+            if let (Some(first), Some(last)) = (path.first(), path.last()) {
+                let start = if let Some(p) = &first.path {
+                    format!("{} ({})", first.name, p)
+                } else {
+                    first.name.clone()
+                };
+                let end = if let Some(p) = &last.path {
+                    format!("{} ({})", last.name, p)
+                } else {
+                    last.name.clone()
+                };
+
+                let prefix = pick_variant(
+                    &seed,
+                    &[
+                        "Here’s the shape I see:",
+                        "At a glance it goes:",
+                        "Roughly:",
+                        "From what I can see:",
+                        "The flow looks like:",
+                        "A simple way to think about it:",
+                    ],
+                );
+
+                if path.len() <= 2 {
+                    return Some(format!("{} {} → {}.", prefix, start, end));
+                }
+
+                let mid = &path[1];
+                let mid_s = if let Some(p) = &mid.path {
+                    format!("{} ({})", mid.name, p)
+                } else {
+                    mid.name.clone()
+                };
+
+                return Some(format!("{} {} → {} → {}.", prefix, start, mid_s, end));
+            }
+        }
+
+        if let Some(root) = fc.root_nodes.first() {
+            let start = if let Some(p) = &root.path {
+                format!("{} ({})", root.name, p)
+            } else {
+                root.name.clone()
+            };
+            let prefix = pick_variant(
+                &seed,
+                &[
+                    "A reasonable starting point is",
+                    "A good starting point is",
+                    "If you want a starting point, try",
+                    "I’d start with",
+                ],
+            );
+            return Some(format!("{} {}.", prefix, start));
+        }
+
+        let msg = pick_variant(
+            &seed,
+            &[
+                "I found a call flow, but it’s a bit sparse.",
+                "I found a call flow, but it’s pretty thin.",
+                "I found something, but it’s not a very rich path yet.",
+            ],
+        );
+        return Some(msg.to_string());
+    }
+
+    if has_graph_context {
+        let gc = response.graph_context.as_ref().unwrap();
+        if gc.query_type == "dependencies" && !gc.dependencies.is_empty() {
+            let msg = pick_variant(
+                &seed,
+                &[
+                    "I found a few external dependencies that show up around your target.",
+                    "A handful of external dependencies show up around your target.",
+                    "There are a few external deps in the mix here.",
+                ],
+            );
+            return Some(msg.to_string());
+        }
+        if !gc.library_users.is_empty() {
+            let msg = pick_variant(
+                &seed,
+                &[
+                    "I found a few places in the codebase that pull this in.",
+                    "A few spots in the codebase seem to pull this in.",
+                    "Looks like this gets pulled in from a few places.",
+                ],
+            );
+            return Some(msg.to_string());
+        }
+        if !gc.affected_files.is_empty() {
+            let msg = pick_variant(
+                &seed,
+                &[
+                    "I found a small set of places that are affected by this change.",
+                    "This change looks like it touches a small set of places.",
+                    "There’s a small blast radius here.",
+                ],
+            );
+            return Some(msg.to_string());
+        }
+    }
+
+    if !response.findings.is_empty() {
+        // Derive themes from dimensions.
+        let mut dim_counts: HashMap<&str, i32> = HashMap::new();
+        for f in &response.findings {
+            if let Some(dim) = f.dimension.as_deref() {
+                *dim_counts.entry(dim).or_insert(0) += 1;
+            }
+        }
+
+        let mut dims: Vec<(&str, i32)> = dim_counts.into_iter().collect();
+        dims.sort_by(|a, b| b.1.cmp(&a.1));
+        dims.truncate(2);
+
+        let describe_dim = |d: &str| -> &'static str {
+            match d.to_lowercase().as_str() {
+                "stability" => "stability / resilience",
+                "security" => "security hygiene",
+                "performance" => "performance hot paths",
+                "correctness" => "correctness edge cases",
+                "observability" => "logging / tracing",
+                _ => "general cleanup",
+            }
+        };
+
+        let opener = pick_variant(
+            &seed,
+            &[
+                "Feels mostly steady.",
+                "Looks mostly steady.",
+                "Nothing jumps out as wild.",
+                "Seems in decent shape.",
+                "Overall this looks pretty steady.",
+            ],
+        );
+        let mut take = opener.to_string();
+        if !dims.is_empty() {
+            if dims.len() == 1 {
+                take.push_str(&format!(" Main theme: {}.", describe_dim(dims[0].0)));
+            } else {
+                take.push_str(&format!(
+                    " Two themes keep showing up: {} and {}.",
+                    describe_dim(dims[0].0),
+                    describe_dim(dims[1].0)
+                ));
+            }
+        }
+
+        // Starting point from the best finding location.
+        let best = response
+            .findings
+            .iter()
+            .max_by(|a, b| a.similarity.partial_cmp(&b.similarity).unwrap());
+        if let Some(best) = best {
+            if let Some(file) = &best.file_path {
+                if let Some(line) = best.line {
+                    take.push_str(&format!(
+                        " If you want a starting point: {}:{}.",
+                        file, line
+                    ));
+                } else {
+                    take.push_str(&format!(" If you want a starting point: {}.", file));
+                }
+            }
+        }
+
+        return Some(take);
+    }
+
+    if response.sessions.is_empty() {
+        let msg = pick_variant(
+            &seed,
+            &[
+                "I didn’t find enough context to answer that cleanly yet.",
+                "I don’t have enough context to answer that cleanly yet.",
+                "I’m missing a bit of context to answer that well.",
+                "I couldn’t find enough to give you a confident answer yet.",
+            ],
+        );
+        return Some(msg.to_string());
+    }
+
+    None
+}
+
 fn output_formatted(
     response: &RAGQueryResponse,
     llm_response: Option<&str>,
     verbose: bool,
-    has_llm: bool,
+    _has_llm: bool,
     streamed: bool,
 ) {
     // Check if we have flow context (indicates a "how does X work?" type query)
@@ -910,7 +1413,7 @@ fn output_formatted(
         .as_ref()
         .is_some_and(|gc| graph_context_has_data(gc));
 
-    let has_structured_context = has_flow_context || has_graph_context;
+    let _has_structured_context = has_flow_context || has_graph_context;
 
     // Print LLM response if available (this is the main answer)
     // If streamed=true, the response was already printed in real-time
@@ -935,16 +1438,17 @@ fn output_formatted(
             println!("{}", "─".repeat(50).dimmed());
             println!("{}", "Raw Context (verbose mode)".dimmed());
         }
-    } else if !has_llm {
-        // No LLM configured - show hint at top, but AFTER flow context if present
-        if !has_structured_context {
+    }
+
+    // Default path: print a short colleague-style reply first.
+    if llm_response.is_none() {
+        let reply = build_colleague_reply(response);
+        if !reply.trim().is_empty() {
             println!();
-            println!(
-                "{} {} Configure an LLM for AI-powered answers: {}",
-                "💡".yellow(),
-                "Tip:".yellow().bold(),
-                "unfault config llm openai".cyan()
-            );
+            for line in wrap_paragraph(&reply, MAX_ASK_WIDTH) {
+                println!("{}", color_paths(&line));
+            }
+            println!();
         }
     }
 
@@ -953,16 +1457,6 @@ fn output_formatted(
         if !flow_context.paths.is_empty() || !flow_context.root_nodes.is_empty() {
             render_flow_context(flow_context, verbose);
             println!();
-
-            // Show LLM hint after flow context (when no LLM configured)
-            if llm_response.is_none() && !has_llm {
-                println!(
-                    "{} {} Configure an LLM for AI-powered answers: {}",
-                    "💡".yellow(),
-                    "Tip:".yellow().bold(),
-                    "unfault config llm openai".cyan()
-                );
-            }
         }
     }
 
@@ -974,11 +1468,7 @@ fn output_formatted(
     }
 
     // Print context summary (only in verbose mode when flow context is shown, or when no flow context)
-    let show_summary = if has_structured_context {
-        verbose // Only show in verbose when we have flow context
-    } else {
-        llm_response.is_none() || verbose
-    };
+    let show_summary = verbose;
 
     if show_summary {
         println!();
@@ -988,11 +1478,7 @@ fn output_formatted(
     }
 
     // Print sessions if any (in verbose mode, or when no LLM answer and no flow context)
-    let show_sessions = if has_structured_context {
-        verbose
-    } else {
-        (llm_response.is_none() || verbose) && !response.sessions.is_empty()
-    };
+    let show_sessions = verbose && !response.sessions.is_empty();
 
     if show_sessions && !response.sessions.is_empty() {
         println!("{}", "Related Sessions".bold());
@@ -1040,11 +1526,7 @@ fn output_formatted(
     }
 
     // Print findings if any (in verbose mode, or when no LLM answer and no flow context)
-    let show_findings = if has_structured_context {
-        verbose
-    } else {
-        (llm_response.is_none() || verbose) && !response.findings.is_empty()
-    };
+    let show_findings = verbose && !response.findings.is_empty();
 
     if show_findings && !response.findings.is_empty() {
         println!("{}", "Related Findings".bold());
@@ -1084,22 +1566,91 @@ fn output_formatted(
         }
         println!();
     }
-
-    // If nothing found (only show when no LLM answer AND no flow context)
-    if llm_response.is_none()
-        && !has_structured_context
-        && response.sessions.is_empty()
-        && response.findings.is_empty()
-    {
-        println!("{} No relevant context found for your query.", "ℹ".blue());
-        println!("  Try running `unfault review` first to analyze your code.");
-        println!();
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_no_llm_quick_take_flow_context() {
+        let response = RAGQueryResponse {
+            query: "how does auth work".to_string(),
+            sessions: vec![],
+            findings: vec![],
+            sources: vec![],
+            context_summary: "".to_string(),
+            topic_label: None,
+            graph_context: None,
+            flow_context: Some(RAGFlowContext {
+                query: None,
+                root_nodes: vec![],
+                paths: vec![vec![
+                    RAGFlowPathNode {
+                        node_id: "n1".to_string(),
+                        name: "start".to_string(),
+                        path: Some("src/auth.go".to_string()),
+                        node_type: "function".to_string(),
+                        depth: 0,
+                        http_method: None,
+                        http_path: None,
+                        description: None,
+                        category: None,
+                    },
+                    RAGFlowPathNode {
+                        node_id: "n2".to_string(),
+                        name: "end".to_string(),
+                        path: Some("src/db.go".to_string()),
+                        node_type: "function".to_string(),
+                        depth: 1,
+                        http_method: None,
+                        http_path: None,
+                        description: None,
+                        category: None,
+                    },
+                ]],
+            }),
+            hint: None,
+        };
+
+        let take = build_no_llm_quick_take(&response).unwrap();
+        assert!(take.contains("→"));
+        assert!(take.contains("src/auth.go"));
+
+        let reply = build_colleague_reply(&response);
+        assert!(reply.contains("flow") || reply.contains("path") || reply.contains("→"));
+    }
+
+    #[test]
+    fn test_no_llm_quick_take_findings() {
+        let response = RAGQueryResponse {
+            query: "what should I worry about".to_string(),
+            sessions: vec![],
+            findings: vec![crate::api::rag::RAGFindingContext {
+                finding_id: "f1".to_string(),
+                rule_id: Some("R1".to_string()),
+                dimension: Some("Security".to_string()),
+                severity: Some("High".to_string()),
+                file_path: Some("src/main.go".to_string()),
+                line: Some(10),
+                similarity: 0.9,
+            }],
+            sources: vec![],
+            context_summary: "".to_string(),
+            topic_label: None,
+            graph_context: None,
+            flow_context: None,
+            hint: None,
+        };
+
+        let take = build_no_llm_quick_take(&response).unwrap();
+        let lower = take.to_lowercase();
+        assert!(lower.contains("security"));
+        assert!(lower.contains("src/main.go"));
+
+        let reply = build_colleague_reply(&response);
+        assert!(!reply.trim().is_empty());
+    }
 
     #[test]
     fn test_ask_args_defaults() {
@@ -1111,15 +1662,34 @@ mod tests {
             max_findings: None,
             similarity_threshold: None,
             json: false,
-            no_llm: false,
+            llm: false,
             verbose: false,
         };
         assert_eq!(args.query, "test query");
         assert!(args.workspace_id.is_none());
         assert!(args.workspace_path.is_none());
         assert!(!args.json);
-        assert!(!args.no_llm);
+        assert!(!args.llm);
         assert!(!args.verbose);
+    }
+
+    #[test]
+    fn test_colleague_reply_prefers_hint() {
+        let response = RAGQueryResponse {
+            query: "where is it used".to_string(),
+            sessions: vec![],
+            findings: vec![],
+            sources: vec![],
+            context_summary: "".to_string(),
+            topic_label: None,
+            graph_context: None,
+            flow_context: None,
+            hint: Some("Please specify a file path or symbol".to_string()),
+        };
+
+        let reply = build_colleague_reply(&response);
+        assert!(reply.to_lowercase().contains("please"));
+        assert!(reply.to_lowercase().contains("specify"));
     }
 
     #[test]
@@ -1132,7 +1702,7 @@ mod tests {
             max_findings: Some(20),
             similarity_threshold: Some(0.7),
             json: true,
-            no_llm: false,
+            llm: true,
             verbose: true,
         };
         assert_eq!(args.query, "How is my service?");
@@ -1141,5 +1711,6 @@ mod tests {
         assert_eq!(args.max_sessions, Some(10));
         assert!(args.json);
         assert!(args.verbose);
+        assert!(args.llm);
     }
 }

@@ -104,8 +104,8 @@ unfault ask "What functions lack structured logging?"
 # Scope to a specific workspace
 unfault ask "Show me the critical paths" --workspace wks_abc123
 
-# Get raw context without AI synthesis
-unfault ask "Which routes have no retry logic?" --no-llm
+# Use the configured LLM for a longer answer
+unfault ask "Which routes have no retry logic?" --llm
 ```
 
 Configure an LLM for AI-powered answers:
