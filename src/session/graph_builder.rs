@@ -36,6 +36,8 @@ pub struct SerializableGraph {
     pub contains: Vec<ContainsEdge>,
     /// Call edges (function → function)
     pub calls: Vec<CallEdge>,
+    /// Dependency injection edges (function → function)
+    pub dependency_injections: Vec<DependencyInjectionEdge>,
     /// External library usage
     pub library_usage: Vec<LibraryUsage>,
     /// Graph statistics
@@ -83,6 +85,13 @@ pub struct CallEdge {
     pub caller: String,
     pub callee: String,
     pub caller_file: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DependencyInjectionEdge {
+    pub consumer: String,
+    pub provider: String,
+    pub consumer_file: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -260,6 +269,7 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
     let mut imports = Vec::new();
     let mut contains = Vec::new();
     let mut calls = Vec::new();
+    let mut dependency_injections = Vec::new();
     let mut library_usage = Vec::new();
 
     // Build a map from FileId to path for file nodes
@@ -383,6 +393,32 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
                     caller_file,
                 });
             }
+            GraphEdgeKind::DependencyInjection => {
+                let source_node = &graph.graph[source_idx];
+                let target_node = &graph.graph[target_idx];
+
+                let (consumer_name, consumer_file) = match source_node {
+                    GraphNode::Function {
+                        qualified_name,
+                        file_id,
+                        ..
+                    } => {
+                        let file_path = file_id_to_path.get(file_id).cloned().unwrap_or_default();
+                        (qualified_name.clone(), file_path)
+                    }
+                    _ => continue,
+                };
+                let provider_name = match target_node {
+                    GraphNode::Function { qualified_name, .. } => qualified_name.clone(),
+                    _ => continue,
+                };
+
+                dependency_injections.push(DependencyInjectionEdge {
+                    consumer: consumer_name,
+                    provider: provider_name,
+                    consumer_file,
+                });
+            }
             GraphEdgeKind::UsesLibrary => {
                 let source_node = &graph.graph[source_idx];
                 let target_node = &graph.graph[target_idx];
@@ -414,6 +450,7 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
         imports,
         contains,
         calls,
+        dependency_injections,
         library_usage,
         stats: GraphStats {
             file_count: graph_stats.file_count,
@@ -544,6 +581,46 @@ def helper():
 
         // Should have functions
         assert!(graph.functions.len() >= 2);
+    }
+
+    #[test]
+    fn test_build_local_graph_dependency_injection_edges() {
+        let temp_dir = TempDir::new().unwrap();
+
+        fs::write(
+            temp_dir.path().join("validators.py"),
+            r#"
+
+def valid_plan():
+    return True
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            temp_dir.path().join("routes.py"),
+            r#"
+from fastapi import FastAPI, Depends
+import validators
+
+app = FastAPI()
+
+@app.get("/plan")
+async def get_plan(plan=Depends(validators.valid_plan)):
+    return {"ok": True}
+"#,
+        )
+        .unwrap();
+
+        let result = build_local_graph(temp_dir.path(), None, false);
+        assert!(result.is_ok());
+        let graph = result.unwrap();
+
+        assert_eq!(graph.dependency_injections.len(), 1);
+        let dep = &graph.dependency_injections[0];
+        assert_eq!(dep.consumer_file, "routes.py");
+        assert!(dep.consumer.ends_with("get_plan"));
+        assert!(dep.provider.ends_with("valid_plan"));
     }
 
     #[test]

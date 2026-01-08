@@ -84,6 +84,22 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
         })
         .collect();
 
+    // Convert dependency injections
+    let dependency_injections: Vec<HashMap<String, serde_json::Value>> = graph
+        .dependency_injections
+        .iter()
+        .map(|e| {
+            let mut map = HashMap::new();
+            map.insert("consumer".to_string(), serde_json::json!(e.consumer));
+            map.insert("provider".to_string(), serde_json::json!(e.provider));
+            map.insert(
+                "consumer_file".to_string(),
+                serde_json::json!(e.consumer_file),
+            );
+            map
+        })
+        .collect();
+
     // Convert imports
     let imports: Vec<HashMap<String, serde_json::Value>> = graph
         .imports
@@ -143,6 +159,7 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
         files,
         functions,
         calls,
+        dependency_injections,
         imports,
         contains,
         library_usage,
@@ -826,36 +843,46 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
 
     if ctx.query_type == "impact" {
         let target = ctx.target_file.as_deref().unwrap_or("target");
-        if ctx.affected_files.is_empty() {
-            println!("  {} No callers found for {}", "ℹ".blue(), target.cyan());
-        } else {
+
+        let mut callers = Vec::new();
+        let mut dependency_consumers = Vec::new();
+        for rel in &ctx.affected_files {
+            let rel_kind = rel.relationship.as_deref().unwrap_or("calls");
+            if rel_kind.contains("dependency") {
+                dependency_consumers.push(rel);
+            } else {
+                callers.push(rel);
+            }
+        }
+
+        if callers.is_empty() && dependency_consumers.is_empty() {
             println!(
-                "  {} Functions/files that depend on {}:",
-                "→".cyan(),
+                "  {} No callers found for {} (may still be invoked indirectly)",
+                "ℹ".blue(),
                 target.cyan()
             );
-            for (idx, rel) in ctx.affected_files.iter().enumerate() {
-                let path = rel.path.as_deref().unwrap_or("<unknown>");
-                let function = rel
-                    .function
-                    .as_deref()
-                    .map(|f| format!(" :: {}", f.yellow()))
-                    .unwrap_or_default();
-                let depth = rel.depth.unwrap_or(0);
-                let hops = if depth == 1 { "hop" } else { "hops" };
+        } else {
+            if callers.is_empty() && !dependency_consumers.is_empty() {
                 println!(
-                    "  {} {}{} ({} {} away)",
-                    format!("{}.", idx + 1).bright_white(),
-                    path.cyan(),
-                    function,
-                    depth,
-                    hops
+                    "  {} No callers found, but used as a dependency by:",
+                    "→".cyan()
                 );
+            } else if !callers.is_empty() {
+                println!("  {} Called by:", "→".cyan());
+            }
 
-                if verbose {
-                    if let Some(session) = rel.session_id.as_deref() {
-                        println!("     {} Session: {}", "".dimmed(), session);
-                    }
+            for (idx, rel) in callers.iter().enumerate() {
+                render_impact_relation(idx, rel, verbose);
+            }
+
+            if !dependency_consumers.is_empty() {
+                if !callers.is_empty() {
+                    println!();
+                    println!("  {} Used as a dependency by:", "→".cyan());
+                }
+
+                for (idx, rel) in dependency_consumers.iter().enumerate() {
+                    render_impact_relation(idx, rel, verbose);
                 }
             }
         }
@@ -894,6 +921,32 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
             "Target".dimmed(),
             ctx.target_file.as_deref().unwrap_or("n/a").dimmed()
         );
+    }
+}
+
+fn render_impact_relation(idx: usize, rel: &crate::api::rag::RAGGraphFileRelation, verbose: bool) {
+    let path = rel.path.as_deref().unwrap_or("<unknown>");
+    let function = rel
+        .function
+        .as_deref()
+        .map(|f| format!(" :: {}", f.yellow()))
+        .unwrap_or_default();
+    let depth = rel.depth.unwrap_or(0);
+    let hops = if depth == 1 { "hop" } else { "hops" };
+
+    println!(
+        "  {} {}{} ({} {} away)",
+        format!("{}.", idx + 1).bright_white(),
+        path.cyan(),
+        function,
+        depth,
+        hops
+    );
+
+    if verbose {
+        if let Some(session) = rel.session_id.as_deref() {
+            println!("     {} Session: {}", "".dimmed(), session);
+        }
     }
 }
 
@@ -1061,17 +1114,48 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
             .as_deref()
             .unwrap_or("your target");
 
-        // Impact: even an empty result is meaningful (no internal callers found).
+        // Impact: even an empty result is meaningful.
         if graph_context.query_type == "impact" {
-            let n = graph_context.affected_files.len();
+            let mut callers = Vec::new();
+            let mut dependency_consumers = Vec::new();
+            for rel in &graph_context.affected_files {
+                let rel_kind = rel.relationship.as_deref().unwrap_or("calls");
+                if rel_kind.contains("dependency") {
+                    dependency_consumers.push(rel);
+                } else {
+                    callers.push(rel);
+                }
+            }
 
-            if n == 0 {
+            if callers.is_empty() && dependency_consumers.is_empty() {
                 return format!(
                     "I don’t see any internal callers for {} in the call graph. That can mean it’s unused, or it’s invoked indirectly (FastAPI dependencies, background tasks, reflection). I’d still grep for references and run the tests.",
                     target
                 );
             }
 
+            if callers.is_empty() && !dependency_consumers.is_empty() {
+                let top: Vec<&str> = dependency_consumers
+                    .iter()
+                    .filter_map(|r| r.path.as_deref())
+                    .take(3)
+                    .collect();
+
+                let suffix = if top.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" Top: {}.", top.join(", "))
+                };
+
+                return format!(
+                    "No callers found for {}, but it’s used as a dependency by {} function(s).{}",
+                    target,
+                    dependency_consumers.len(),
+                    suffix
+                );
+            }
+
+            let n = graph_context.affected_files.len();
             let top: Vec<&str> = graph_context
                 .affected_files
                 .iter()
@@ -1085,9 +1169,18 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
                 format!(" Top: {}.", top.join(", "))
             };
 
+            let extra = if dependency_consumers.is_empty() {
+                "".to_string()
+            } else {
+                format!(
+                    " (plus {} dependency consumer(s))",
+                    dependency_consumers.len()
+                )
+            };
+
             return format!(
-                "If you change {}, I’m seeing {} downstream file(s).{}",
-                target, n, suffix
+                "If you change {}, I’m seeing {} downstream usage site(s){}.{}",
+                target, n, extra, suffix
             );
         }
 

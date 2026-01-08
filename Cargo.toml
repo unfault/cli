@@ -52,8 +52,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # sibling checkout, you can uncomment the `[patch.crates-io]` section below.
 unfault-core = "0.1.1"
 
-# [patch.crates-io]
-# unfault-core = { path = "../core" }
+[patch.crates-io]
+unfault-core = { path = "../core" }
 
 [dev-dependencies]
 tempfile = "3.8"

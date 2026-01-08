@@ -26,6 +26,9 @@ pub struct ClientGraphData {
     /// Call edges between functions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<HashMap<String, serde_json::Value>>,
+    /// Dependency injection edges between functions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_injections: Vec<HashMap<String, serde_json::Value>>,
     /// Import edges between files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub imports: Vec<HashMap<String, serde_json::Value>>,
