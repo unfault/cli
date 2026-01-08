@@ -126,15 +126,9 @@ enum Commands {
         /// Default: all dimensions from the profile
         #[arg(long, short = 'd', value_name = "DIMENSION")]
         dimension: Vec<String>,
-        /// Auto-apply all suggested fixes
-        #[arg(long)]
-        fix: bool,
         /// Show what fixes would be applied without actually applying them
         #[arg(long)]
         dry_run: bool,
-        /// Use legacy server-side parsing (sends source code to server)
-        #[arg(long)]
-        server_parse: bool,
         /// Print raw findings instead of hotspot summary (advanced, very large output)
         #[arg(long, hide = true)]
         raw_findings: bool,
@@ -451,9 +445,7 @@ async fn run_command(command: Commands) -> i32 {
             verbose,
             profile,
             dimension,
-            fix,
             dry_run,
-            server_parse,
             raw_findings,
             include_tests,
         } => {
@@ -486,9 +478,7 @@ async fn run_command(command: Commands) -> i32 {
                 } else {
                     Some(dimension)
                 },
-                fix,
                 dry_run,
-                server_parse,
                 raw_findings,
                 include_tests,
             };

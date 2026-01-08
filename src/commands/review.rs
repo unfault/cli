@@ -5,21 +5,17 @@
 //!
 //! ## Architecture
 //!
-//! By default, the review command uses **client-side parsing**:
+//! The review command uses **client-side parsing**:
 //! 1. Parse source files locally using tree-sitter (via unfault-core)
 //! 2. Build an Intermediate Representation (IR) containing semantics and code graph
 //! 3. Send serialized IR to the API (no source code over the wire)
-//! 4. Receive findings and optionally apply patches locally
-//!
-//! Use `--server-parse` flag to fall back to legacy server-side parsing.
+//! 4. Receive findings and optionally preview patches locally
 //!
 //! ## Usage
 //!
 //! ```bash
-//! unfault review               # Client-side parsing (default)
-//! unfault review --fix         # Auto-apply all fixes
+//! unfault review               # Analyze current directory
 //! unfault review --dry-run     # Show what fixes would be applied
-//! unfault review --server-parse # Legacy: send source to server
 //! unfault review --output full
 //! unfault review --output json
 //! unfault review --output sarif
@@ -33,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::api::graph::IrFinding;
-use crate::api::{ApiClient, ApiError, SessionContextInput, SubscriptionWarning};
+use crate::api::{ApiClient, ApiError};
 use crate::config::Config;
 use crate::errors::{
     display_auth_error, display_config_error, display_network_error, display_service_error,
@@ -41,52 +37,9 @@ use crate::errors::{
 };
 use crate::exit_codes::*;
 use crate::session::{
-    FileCollector, PatchApplier, ScanProgress, SessionRunner, WorkspaceScanner, build_ir_cached,
-    compute_workspace_id, get_git_remote,
+    PatchApplier, ScanProgress, WorkspaceScanner, build_ir_cached, compute_workspace_id,
+    get_git_remote,
 };
-
-/// Display a subscription warning banner (non-blocking nudge).
-///
-/// This is used to inform users about trial expiration without blocking their workflow.
-fn display_subscription_warning(warning: &SubscriptionWarning) {
-    let icon = match warning.warning_type.as_str() {
-        "trial_ending" => "ℹ",
-        "trial_expired" => "⚠",
-        _ => "ℹ",
-    };
-
-    let color = match warning.warning_type.as_str() {
-        "trial_ending" => "cyan",
-        "trial_expired" => "yellow",
-        _ => "white",
-    };
-
-    eprintln!();
-    eprintln!(
-        "{} {}",
-        icon.color(color).bold(),
-        warning.message.color(color)
-    );
-    eprintln!(
-        "  Subscribe at: {}",
-        warning.upgrade_url.underline().bright_blue()
-    );
-    eprintln!();
-}
-
-/// Display a message about limited results due to expired trial.
-fn display_limited_results_notice(shown_count: usize, total_count: i32) {
-    let hidden_count = total_count as usize - shown_count;
-    if hidden_count > 0 {
-        eprintln!();
-        eprintln!(
-            "  {} {} more issue{} available with subscription",
-            "→".bright_blue(),
-            hidden_count.to_string().bright_yellow(),
-            if hidden_count == 1 { "" } else { "s" }
-        );
-    }
-}
 
 /// Handle an API error and return the appropriate exit code.
 fn handle_api_error(error: ApiError) -> i32 {
@@ -134,12 +87,8 @@ pub struct ReviewArgs {
     pub profile: Option<String>,
     /// Dimensions to analyze (None = all from profile)
     pub dimensions: Option<Vec<String>>,
-    /// Auto-apply all suggested fixes
-    pub fix: bool,
     /// Show what fixes would be applied without actually applying them
     pub dry_run: bool,
-    /// Use legacy server-side parsing (sends source code to server)
-    pub server_parse: bool,
     /// Print raw findings instead of hotspot summary
     pub raw_findings: bool,
     /// Include test files in analysis (default: skip tests)
@@ -360,36 +309,19 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
         return Ok(EXIT_SUCCESS);
     }
 
-    // Branch: Server-side parsing (legacy) vs Client-side parsing (default)
-    if args.server_parse {
-        // Legacy mode: send source code to server
-        execute_server_parse(
-            &args,
-            &config,
-            &api_client,
-            &trace_id,
-            &current_dir,
-            &workspace_label,
-            &dimensions,
-            &workspace_info,
-            session_start,
-        )
-        .await
-    } else {
-        // New default: client-side parsing
-        execute_client_parse(
-            &args,
-            &config,
-            &api_client,
-            &trace_id,
-            &current_dir,
-            &workspace_label,
-            &dimensions,
-            &workspace_info,
-            session_start,
-        )
-        .await
-    }
+    // Client-side parsing
+    execute_client_parse(
+        &args,
+        &config,
+        &api_client,
+        &trace_id,
+        &current_dir,
+        &workspace_label,
+        &dimensions,
+        &workspace_info,
+        session_start,
+    )
+    .await
 }
 
 /// Execute review with client-side parsing (default mode).
@@ -678,8 +610,7 @@ async fn execute_client_parse(
     // Step 7: Fetch results (hotspots by default; full findings only when needed)
     pb.set_message("Fetching results...");
 
-    let needs_full_findings = args.fix
-        || args.dry_run
+    let needs_full_findings = args.dry_run
         || args.output_mode == "full"
         || args.raw_findings
         || args.output_format == "json"
@@ -771,7 +702,7 @@ async fn execute_client_parse(
         }
 
         // Handle fix/dry-run mode
-        let applied_patches = if args.fix || args.dry_run {
+        let applied_patches = if args.dry_run {
             apply_ir_patches(args, current_dir, &findings)?
         } else {
             0
@@ -1010,6 +941,36 @@ fn format_severity_breakdown(summary: &SeveritySummary) -> String {
 /// Max width for terminal output (80 chars standard)
 const MAX_WIDTH: usize = 80;
 
+fn visible_len(s: &str) -> usize {
+    // Handle ANSI escape sequences like "\x1b[...m" emitted by `colored`.
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut len = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            // Skip ESC[...m
+            if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'm' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+
+        // We only use this for wrapping terminal output; treating this as
+        // byte length is ok for our ASCII-heavy CLI output.
+        len += 1;
+        i += 1;
+    }
+
+    len
+}
+
 /// Wrap text to fit within max_width, continuing on the next line with the given indent.
 /// Returns a Vec of lines to print.
 fn wrap_text(s: &str, first_line_max: usize, continuation_indent: &str) -> Vec<String> {
@@ -1026,8 +987,8 @@ fn wrap_text(s: &str, first_line_max: usize, continuation_indent: &str) -> Vec<S
     let mut current_max = first_line_max;
 
     for word in words {
-        let word_len = word.len();
-        let current_len = current_line.len();
+        let word_len = visible_len(word);
+        let current_len = visible_len(&current_line);
 
         // Check if we need to start a new line
         let would_fit = if current_len == 0 {
@@ -1046,10 +1007,12 @@ fn wrap_text(s: &str, first_line_max: usize, continuation_indent: &str) -> Vec<S
 
         // Add the word to the current line
         if current_line.is_empty() {
-            // If word is longer than max width, we need to hard-break it
+            // If word is longer than max width, hard-break it.
+            // Note: we don't attempt to hard-break colored strings; those should
+            // be naturally short (paths, labels).
             if word_len > current_max {
                 let mut remaining = word;
-                while remaining.len() > current_max {
+                while visible_len(remaining) > current_max {
                     let (chunk, rest) = remaining.split_at(current_max);
                     lines.push(chunk.to_string());
                     remaining = rest;
@@ -1154,6 +1117,12 @@ fn display_ir_findings(
         return;
     }
 
+    if args.output_format == "sarif" {
+        let sarif = generate_ir_sarif_output(findings, &context.workspace_label);
+        println!("{}", serde_json::to_string_pretty(&sarif).unwrap());
+        return;
+    }
+
     // Text output
     println!();
 
@@ -1172,32 +1141,12 @@ fn display_ir_findings(
 
     let hotspot_mode = args.output_mode != "full" && !args.raw_findings;
 
-    // Summary line with count and fix hint on the right
-    let fix_hint = if !args.fix && !args.dry_run {
-        format!("{}", "run with --fix to apply patches".dimmed())
-    } else {
-        String::new()
-    };
-
     if hotspot_mode {
-        let base = format!("⚠ Indexed {} signals", total_findings);
-        if fix_hint.is_empty() {
-            println!(
-                "{} Indexed {} signals",
-                "⚠".yellow().bold(),
-                total_findings.to_string().bright_yellow()
-            );
-        } else {
-            let padding = 50_usize.saturating_sub(base.len());
-            println!(
-                "{} Indexed {} signals{:>width$}{}",
-                "⚠".yellow().bold(),
-                total_findings.to_string().bright_yellow(),
-                "",
-                fix_hint,
-                width = padding
-            );
-        }
+        println!(
+            "{} Indexed {} signals",
+            "⚠".yellow().bold(),
+            total_findings.to_string().bright_yellow()
+        );
 
         let summary = compute_severity_summary(findings);
         println!(
@@ -1210,34 +1159,12 @@ fn display_ir_findings(
             "Showing top hotspots (depth=3, 3 examples each)".dimmed()
         );
     } else {
-        // Find terminal width for right-alignment (default to 80)
-        let found_text = format!(
+        println!(
             "{} Found {} issue{}",
-            "⚠",
-            total_findings,
+            "⚠".yellow().bold(),
+            total_findings.to_string().bright_yellow(),
             if total_findings == 1 { "" } else { "s" }
         );
-
-        if fix_hint.is_empty() {
-            println!(
-                "{} Found {} issue{}",
-                "⚠".yellow().bold(),
-                total_findings.to_string().bright_yellow(),
-                if total_findings == 1 { "" } else { "s" }
-            );
-        } else {
-            // Print summary with fix hint on the right
-            let padding = 50_usize.saturating_sub(found_text.len());
-            println!(
-                "{} Found {} issue{}{:>width$}{}",
-                "⚠".yellow().bold(),
-                total_findings.to_string().bright_yellow(),
-                if total_findings == 1 { "" } else { "s" },
-                "",
-                fix_hint,
-                width = padding
-            );
-        }
 
         // Severity breakdown line (like landing page: "4 high · 10 medium · 5 low")
         let summary = compute_severity_summary(findings);
@@ -1482,12 +1409,17 @@ fn display_session_insights(
     buckets.truncate(2);
 
     let theme_phrase = |b: &str| match b {
-        "resilience" => "resilience hardening",
-        "observability" => "logging and tracing",
-        "security" => "security hygiene",
-        "performance" => "performance hot paths",
-        "correctness" => "correctness edge cases",
-        _ => "general cleanup",
+        "resilience" => format!("{} hardening", "resilience".bright_yellow().bold()),
+        "observability" => {
+            format!(
+                "{} (logging and tracing)",
+                "observability".bright_yellow().bold()
+            )
+        }
+        "security" => format!("{} hygiene", "security".bright_yellow().bold()),
+        "performance" => format!("{} hot paths", "performance".bright_yellow().bold()),
+        "correctness" => format!("{} edge cases", "correctness".bright_yellow().bold()),
+        _ => format!("{} cleanup", "other".bright_yellow().bold()),
     };
 
     let mut paragraph = String::new();
@@ -1518,13 +1450,16 @@ fn display_session_insights(
     }
 
     if let Some((h1, ex1)) = starts.get(0) {
-        paragraph.push_str(&format!(" Starting point: {}", h1));
+        paragraph.push_str(&format!(
+            " Starting point: {}",
+            h1.as_str().bright_purple().bold()
+        ));
         if let Some(ex) = ex1 {
             paragraph.push_str(&format!(" ({})", ex));
         }
 
         if let Some((h2, ex2)) = starts.get(1) {
-            paragraph.push_str(&format!("; then {}", h2));
+            paragraph.push_str(&format!("; then {}", h2.as_str().bright_purple().bold()));
             if let Some(ex) = ex2 {
                 paragraph.push_str(&format!(" ({})", ex));
             }
@@ -1609,12 +1544,17 @@ fn display_session_hotspots(
         buckets.truncate(2);
 
         let theme_phrase = |b: &str| match b {
-            "resilience" => "resilience hardening",
-            "observability" => "logging and tracing",
-            "security" => "security hygiene",
-            "performance" => "performance hot paths",
-            "correctness" => "correctness edge cases",
-            _ => "general cleanup",
+            "resilience" => format!("{} hardening", "resilience".bright_yellow().bold()),
+            "observability" => {
+                format!(
+                    "{} (logging and tracing)",
+                    "observability".bright_yellow().bold()
+                )
+            }
+            "security" => format!("{} hygiene", "security".bright_yellow().bold()),
+            "performance" => format!("{} hot paths", "performance".bright_yellow().bold()),
+            "correctness" => format!("{} edge cases", "correctness".bright_yellow().bold()),
+            _ => format!("{} cleanup", "other".bright_yellow().bold()),
         };
 
         let mut paragraph = String::new();
@@ -1653,13 +1593,16 @@ fn display_session_hotspots(
         }
 
         if let Some((h1, ex1)) = starts.get(0) {
-            paragraph.push_str(&format!(" Starting point: {}", h1));
+            paragraph.push_str(&format!(
+                " Starting point: {}",
+                h1.as_str().bright_purple().bold()
+            ));
             if let Some(ex) = ex1 {
                 paragraph.push_str(&format!(" ({})", ex));
             }
 
             if let Some((h2, ex2)) = starts.get(1) {
-                paragraph.push_str(&format!("; then {}", h2));
+                paragraph.push_str(&format!("; then {}", h2.as_str().bright_purple().bold()));
                 if let Some(ex) = ex2 {
                     paragraph.push_str(&format!(" ({})", ex));
                 }
@@ -1998,415 +1941,15 @@ fn display_ir_hotspots_summary(findings: &[IrFinding]) {
     );
 }
 
-/// Execute review with server-side parsing (legacy mode).
-///
-/// This is the original implementation that sends source code to the server.
-#[allow(clippy::too_many_arguments)]
-async fn execute_server_parse(
-    args: &ReviewArgs,
-    config: &Config,
-    api_client: &ApiClient,
-    trace_id: &str,
-    current_dir: &std::path::Path,
-    workspace_label: &str,
-    dimensions: &[String],
-    workspace_info: &crate::session::WorkspaceInfo,
-    session_start: Instant,
-) -> Result<i32> {
-    // Create progress bar for API operations
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.cyan} {msg}")
-            .unwrap(),
-    );
-    pb.enable_steady_tick(Duration::from_millis(100));
-
-    // Step 2: Create session
-    pb.set_message("Creating analysis session...");
-
-    let runner = SessionRunner::new(api_client, &config.api_key);
-    let session_response = match runner.create_session(workspace_info, None).await {
-        Ok(response) => response,
-        Err(e) => {
-            pb.finish_and_clear();
-            return Ok(handle_api_error(e));
-        }
-    };
-
-    // Display subscription warning if present (non-blocking nudge)
-    if let Some(warning) = &session_response.subscription_warning {
-        display_subscription_warning(warning);
-    }
-
-    if args.verbose {
-        eprintln!("\n{} Trace ID: {}", "DEBUG".yellow(), trace_id.cyan());
-        eprintln!(
-            "\n{} Session created: {}",
-            "DEBUG".yellow(),
-            serde_json::to_string_pretty(&session_response).unwrap_or_default()
-        );
-    }
-
-    // Step 3: Collect files based on file hints
-    pb.set_message("Collecting files for analysis...");
-
-    let collector = FileCollector::new(current_dir);
-    let mut collected_files = collector
-        .collect(&session_response.file_hints, &workspace_info.source_files)
-        .context("Failed to collect files")?;
-
-    // Exclude tests before uploading (default behavior).
-    if !args.include_tests {
-        collected_files.files.retain(|f| !is_test_path(&f.path));
-        collected_files.total_bytes = collected_files.files.iter().map(|f| f.contents.len()).sum();
-    }
-
-    if args.verbose {
-        eprintln!(
-            "\n{} Collected {} files ({} bytes)",
-            "DEBUG".yellow(),
-            collected_files.files.len(),
-            collected_files.total_bytes
-        );
-    }
-
-    // Step 4: Run analysis
-    pb.set_message("Running analysis...");
-
-    let contexts: Vec<SessionContextInput> = dimensions
-        .iter()
-        .map(|dim| SessionContextInput {
-            id: format!("ctx_{}", dim),
-            label: dim.clone(),
-            dimension: dim.clone(),
-            files: collected_files.files.clone(),
-        })
-        .collect();
-
-    let run_response = match runner
-        .run_analysis_with_contexts(&session_response.session_id, workspace_info, contexts)
-        .await
-    {
-        Ok(response) => response,
-        Err(e) => {
-            pb.finish_and_clear();
-            return Ok(handle_api_error(e));
-        }
-    };
-
-    pb.finish_and_clear();
-
-    // Calculate elapsed time
-    let elapsed = session_start.elapsed();
-    let elapsed_ms = elapsed.as_millis() as u64;
-
-    eprintln!(
-        "  Reviewed in {}ms (trace: {})",
-        elapsed_ms.to_string().bright_cyan(),
-        &trace_id[..8].dimmed()
-    );
-
-    if args.verbose {
-        eprintln!(
-            "\n{} Analysis response: {}",
-            "DEBUG".yellow(),
-            serde_json::to_string_pretty(&run_response).unwrap_or_default()
-        );
-    }
-
-    // Display results
-    let total_findings: usize = run_response.contexts.iter().map(|c| c.findings.len()).sum();
-
-    if args.output_format == "sarif" {
-        let sarif = generate_sarif_output(&run_response, workspace_label);
-        println!("{}", serde_json::to_string_pretty(&sarif).unwrap());
-    } else if args.output_format == "json" {
-        let output = serde_json::json!({
-            "session_id": run_response.session_id,
-            "status": run_response.status,
-            "findings_count": total_findings,
-            "elapsed_ms": elapsed_ms,
-            "contexts": run_response.contexts,
-            "subscription_warning": run_response.subscription_warning,
-            "is_limited": run_response.is_limited,
-            "total_findings_count": run_response.total_findings_count,
-        });
-        println!("{}", serde_json::to_string_pretty(&output).unwrap());
-    } else {
-        println!();
-
-        if total_findings == 0 {
-            if run_response.is_limited {
-                if let Some(total) = run_response.total_findings_count {
-                    if total > 0 {
-                        println!(
-                            "{} {} issue{} found (subscribe for full results)",
-                            "⚠".yellow().bold(),
-                            total.to_string().bright_yellow(),
-                            if total == 1 { "" } else { "s" }
-                        );
-                    } else {
-                        println!(
-                            "{} No issues found! Your code looks good.",
-                            "✓".bright_green().bold()
-                        );
-                    }
-                } else {
-                    println!(
-                        "{} No issues found! Your code looks good.",
-                        "✓".bright_green().bold()
-                    );
-                }
-            } else {
-                println!(
-                    "{} No issues found! Your code looks good.",
-                    "✓".bright_green().bold()
-                );
-            }
-        } else {
-            if run_response.is_limited {
-                if let Some(total) = run_response.total_findings_count {
-                    println!(
-                        "{} Found {} issue{} (showing {} of {})",
-                        "⚠".yellow().bold(),
-                        total.to_string().bright_yellow(),
-                        if total == 1 { "" } else { "s" },
-                        total_findings,
-                        total
-                    );
-                } else {
-                    println!(
-                        "{} Found {} issue{} (limited)",
-                        "⚠".yellow().bold(),
-                        total_findings.to_string().bright_yellow(),
-                        if total_findings == 1 { "" } else { "s" }
-                    );
-                }
-            } else {
-                println!(
-                    "{} Found {} issue{}",
-                    "⚠".yellow().bold(),
-                    total_findings.to_string().bright_yellow(),
-                    if total_findings == 1 { "" } else { "s" }
-                );
-            }
-            println!();
-
-            let all_findings: Vec<&crate::api::Finding> = run_response
-                .contexts
-                .iter()
-                .flat_map(|c| c.findings.iter())
-                .collect();
-
-            if args.output_mode == "full" {
-                for finding in &all_findings {
-                    display_finding(finding);
-                }
-            } else {
-                display_findings_grouped(&all_findings);
-            }
-
-            if run_response.is_limited {
-                if let Some(total) = run_response.total_findings_count {
-                    display_limited_results_notice(total_findings, total);
-                }
-            }
-        }
-
-        if let Some(warning) = &run_response.subscription_warning {
-            if session_response.subscription_warning.is_none() || run_response.is_limited {
-                display_subscription_warning(warning);
-            }
-        }
-
-        if let Some(graph_warning) = &run_response.graph_warning {
-            eprintln!();
-            eprintln!(
-                "{} {} {}",
-                "⚠".yellow(),
-                "Graph Error:".yellow().bold(),
-                graph_warning.dimmed()
-            );
-            eprintln!(
-                "  {} RAG queries (unfault ask) will not work for this session.",
-                "→".dimmed()
-            );
-        }
-    }
-
-    if total_findings > 0 {
-        Ok(EXIT_FINDINGS_FOUND)
-    } else {
-        Ok(EXIT_SUCCESS)
-    }
-}
-
-/// Display findings grouped by severity and rule_id (for basic mode)
-fn display_findings_grouped(findings: &[&crate::api::Finding]) {
-    use std::collections::BTreeMap;
-
-    // Define severity order (Critical first, then High, Medium, Low)
-    let severity_order = |s: &str| -> u8 {
-        match s {
-            "Critical" => 0,
-            "High" => 1,
-            "Medium" => 2,
-            "Low" => 3,
-            _ => 4,
-        }
-    };
-
-    // Group findings by severity, then by rule_id
-    // BTreeMap<severity_order, BTreeMap<rule_id, Vec<Finding>>>
-    let mut grouped: BTreeMap<u8, BTreeMap<String, Vec<&crate::api::Finding>>> = BTreeMap::new();
-
-    for finding in findings {
-        let sev_key = severity_order(&finding.severity);
-        grouped
-            .entry(sev_key)
-            .or_default()
-            .entry(finding.rule_id.clone())
-            .or_default()
-            .push(*finding);
-    }
-
-    // Build a numbered rule index
-    let mut rule_index: Vec<String> = Vec::new();
-    for (_, rules_by_id) in &grouped {
-        for (rule_id, _) in rules_by_id {
-            if !rule_index.contains(rule_id) {
-                rule_index.push(rule_id.clone());
-            }
-        }
-    }
-
-    // Display findings grouped by severity
-    let mut first_severity = true;
-    for (sev_key, rules_by_id) in &grouped {
-        // Add blank line between severity groups (but not before the first one)
-        if !first_severity {
-            println!();
-        }
-        first_severity = false;
-
-        let severity_name = match sev_key {
-            0 => "Critical",
-            1 => "High",
-            2 => "Medium",
-            3 => "Low",
-            _ => "Other",
-        };
-
-        let severity_icon = match sev_key {
-            0 => "🔴",
-            1 => "🟠",
-            2 => "🟡",
-            3 => "🔵",
-            _ => "⚪",
-        };
-
-        let severity_color = match sev_key {
-            0 | 1 => "red",
-            2 => "yellow",
-            3 => "blue",
-            _ => "white",
-        };
-
-        // Count total findings for this severity
-        let severity_count: usize = rules_by_id.values().map(|v| v.len()).sum();
-        println!(
-            "{} {} ({} issue{})",
-            severity_icon,
-            severity_name.color(severity_color).bold(),
-            severity_count,
-            if severity_count == 1 { "" } else { "s" }
-        );
-
-        for (rule_id, rule_findings) in rules_by_id {
-            let count = rule_findings.len();
-            let title = &rule_findings[0].title;
-
-            println!(
-                "   [{}] {} ({}x)",
-                rule_id.dimmed(),
-                title,
-                count.to_string().color("yellow")
-            );
-        }
-    }
-}
-
-/// Display a single finding (for full mode)
-fn display_finding(finding: &crate::api::Finding) {
-    let severity_color = match finding.severity.as_str() {
-        "Critical" => "red",
-        "High" => "red",
-        "Medium" => "yellow",
-        "Low" => "blue",
-        _ => "white",
-    };
-
-    let severity_icon = match finding.severity.as_str() {
-        "Critical" => "🔴",
-        "High" => "🟠",
-        "Medium" => "🟡",
-        "Low" => "🔵",
-        _ => "⚪",
-    };
-
-    println!(
-        "{} {} [{}]",
-        severity_icon,
-        finding.title.bold(),
-        finding.severity.color(severity_color)
-    );
-
-    println!("   {}", finding.description.dimmed());
-    println!(
-        "   Rule: {} | Dimension: {} | Confidence: {:.0}%",
-        finding.rule_id.cyan(),
-        finding.dimension,
-        finding.confidence * 100.0
-    );
-
-    if let Some(diff) = &finding.diff {
-        println!();
-        println!("   {}", "Suggested fix:".green().bold());
-        for line in diff.lines() {
-            if line.starts_with('+') && !line.starts_with("+++") {
-                println!("   {}", line.green());
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                println!("   {}", line.red());
-            } else {
-                println!("   {}", line.dimmed());
-            }
-        }
-    }
-    println!();
-}
-
-/// Generate SARIF 2.1.0 output for GitHub Code Scanning and IDE integration
-fn generate_sarif_output(
-    run_response: &crate::api::SessionRunResponse,
-    workspace_label: &str,
-) -> serde_json::Value {
+/// Generate SARIF 2.1.0 output for GitHub Code Scanning and IDE integration.
+fn generate_ir_sarif_output(findings: &[IrFinding], workspace_label: &str) -> serde_json::Value {
     use std::collections::HashMap;
 
-    // Collect all findings and build rule registry
-    let all_findings: Vec<&crate::api::Finding> = run_response
-        .contexts
-        .iter()
-        .flat_map(|c| c.findings.iter())
-        .collect();
-
-    // Build unique rules map
-    let mut rules_map: HashMap<String, &crate::api::Finding> = HashMap::new();
-    for finding in &all_findings {
+    let mut rules_map: HashMap<String, &IrFinding> = HashMap::new();
+    for finding in findings {
         rules_map.entry(finding.rule_id.clone()).or_insert(finding);
     }
 
-    // Build SARIF rules array
     let rules: Vec<serde_json::Value> = rules_map
         .iter()
         .map(|(rule_id, finding)| {
@@ -2427,7 +1970,6 @@ fn generate_sarif_output(
                 }
             });
 
-            // Add help URL if we have a rule ID pattern
             if let Some(obj) = rule.as_object_mut() {
                 obj.insert(
                     "helpUri".to_string(),
@@ -2442,37 +1984,35 @@ fn generate_sarif_output(
         })
         .collect();
 
-    // Build SARIF results array
-    let results: Vec<serde_json::Value> = all_findings
+    let results: Vec<serde_json::Value> = findings
         .iter()
         .map(|finding| {
             let mut result = serde_json::json!({
                 "ruleId": finding.rule_id,
                 "level": severity_to_sarif_level(&finding.severity),
                 "message": {
-                    "text": finding.description
+                    "text": finding.message
                 },
                 "properties": {
-                    "confidence": finding.confidence,
-                    "dimension": finding.dimension,
-                    "kind": finding.kind
+                    "dimension": finding.dimension
                 }
             });
 
-            // Add location if available
-            if let Some(location) = &finding.location {
+            if !finding.file_path.is_empty() && finding.line > 0 {
                 let mut region = serde_json::json!({
-                    "startLine": location.start_line
+                    "startLine": finding.line
                 });
 
-                if let Some(end_line) = location.end_line {
+                if let Some(end_line) = finding.end_line {
                     region["endLine"] = serde_json::json!(end_line);
                 }
-                if let Some(start_col) = location.start_column {
-                    region["startColumn"] = serde_json::json!(start_col);
+
+                if finding.column > 0 {
+                    region["startColumn"] = serde_json::json!(finding.column);
                 }
-                if let Some(end_col) = location.end_column {
-                    region["endColumn"] = serde_json::json!(end_col);
+
+                if let Some(end_column) = finding.end_column {
+                    region["endColumn"] = serde_json::json!(end_column);
                 }
 
                 if let Some(obj) = result.as_object_mut() {
@@ -2481,7 +2021,7 @@ fn generate_sarif_output(
                         serde_json::json!([{
                             "physicalLocation": {
                                 "artifactLocation": {
-                                    "uri": location.file,
+                                    "uri": finding.file_path,
                                     "uriBaseId": "%SRCROOT%"
                                 },
                                 "region": region
@@ -2491,9 +2031,8 @@ fn generate_sarif_output(
                 }
             }
 
-            // Add fix if diff is available
-            if let Some(diff) = &finding.diff {
-                if let Some(location) = &finding.location {
+            if let Some(diff) = &finding.patch {
+                if !finding.file_path.is_empty() && finding.line > 0 {
                     if let Some(obj) = result.as_object_mut() {
                         obj.insert(
                             "fixes".to_string(),
@@ -2503,13 +2042,13 @@ fn generate_sarif_output(
                                 },
                                 "artifactChanges": [{
                                     "artifactLocation": {
-                                        "uri": location.file,
+                                        "uri": finding.file_path,
                                         "uriBaseId": "%SRCROOT%"
                                     },
                                     "replacements": [{
                                         "deletedRegion": {
-                                            "startLine": location.start_line,
-                                            "endLine": location.end_line.unwrap_or(location.start_line)
+                                            "startLine": finding.line,
+                                            "endLine": finding.end_line.unwrap_or(finding.line)
                                         },
                                         "insertedContent": {
                                             "text": extract_fix_from_diff(diff)
@@ -2526,7 +2065,6 @@ fn generate_sarif_output(
         })
         .collect();
 
-    // Build complete SARIF document
     serde_json::json!({
         "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
         "version": "2.1.0",
@@ -2554,10 +2092,10 @@ fn generate_sarif_output(
 
 /// Convert Unfault severity to SARIF level
 fn severity_to_sarif_level(severity: &str) -> &'static str {
-    match severity {
-        "Critical" | "High" => "error",
-        "Medium" => "warning",
-        "Low" | "Info" => "note",
+    match severity.to_lowercase().as_str() {
+        "critical" | "high" => "error",
+        "medium" => "warning",
+        "low" | "info" => "note",
         _ => "warning",
     }
 }
@@ -2593,6 +2131,21 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_text_is_ansi_aware() {
+        let path = "scripts/create-plan.py".bright_purple().bold().to_string();
+        let s = format!(
+            "Starting point: {} (something with enough words to wrap cleanly at eighty columns)",
+            path
+        );
+
+        let lines = wrap_text(&s, MAX_WIDTH, "");
+        assert!(lines.len() > 1);
+        for line in lines {
+            assert!(visible_len(&line) <= MAX_WIDTH);
+        }
+    }
+
+    #[test]
     fn test_workspace_scanner_empty_dir() {
         let temp_dir = TempDir::new().unwrap();
         let mut scanner = WorkspaceScanner::new(temp_dir.path());
@@ -2623,151 +2176,134 @@ mod tests {
         assert!(info.frameworks.iter().any(|f| f.name == "fastapi"));
     }
     #[test]
-    fn test_display_finding_does_not_panic() {
-        let finding = crate::api::Finding {
-            id: "test_001".to_string(),
+    fn test_display_ir_finding_does_not_panic() {
+        let finding = IrFinding {
             rule_id: "test.rule".to_string(),
-            kind: "BehaviorThreat".to_string(),
             title: "Test Finding".to_string(),
             description: "This is a test finding".to_string(),
             severity: "Medium".to_string(),
-            confidence: 0.85,
             dimension: "Stability".to_string(),
-            file_path: None,
-            line: None,
-            column: None,
-            end_line: None,
-            end_column: None,
-            location: None,
-            diff: None,
+            file_path: "src/main.py".to_string(),
+            line: 10,
+            column: 5,
+            end_line: Some(12),
+            end_column: Some(40),
+            message: "This is a test finding".to_string(),
+            patch_json: None,
             fix_preview: None,
+            patch: None,
+            byte_start: None,
+            byte_end: None,
         };
-        display_finding(&finding);
+
+        display_ir_finding(&finding);
     }
 
     #[test]
-    fn test_display_findings_grouped_does_not_panic() {
+    fn test_display_ir_findings_grouped_does_not_panic() {
         let findings = vec![
-            crate::api::Finding {
-                id: "test_001".to_string(),
+            IrFinding {
                 rule_id: "http.timeout".to_string(),
-                kind: "BehaviorThreat".to_string(),
                 title: "Missing HTTP timeout".to_string(),
                 description: "HTTP call without timeout".to_string(),
                 severity: "High".to_string(),
-                confidence: 0.9,
                 dimension: "Stability".to_string(),
-                file_path: None,
-                line: None,
-                column: None,
+                file_path: "src/main.py".to_string(),
+                line: 10,
+                column: 1,
                 end_line: None,
                 end_column: None,
-                location: None,
-                diff: None,
+                message: "HTTP call without timeout".to_string(),
+                patch_json: None,
                 fix_preview: None,
+                patch: None,
+                byte_start: None,
+                byte_end: None,
             },
-            crate::api::Finding {
-                id: "test_002".to_string(),
+            IrFinding {
                 rule_id: "http.timeout".to_string(),
-                kind: "BehaviorThreat".to_string(),
                 title: "Missing HTTP timeout".to_string(),
                 description: "Another HTTP call without timeout".to_string(),
                 severity: "High".to_string(),
-                confidence: 0.9,
                 dimension: "Stability".to_string(),
-                file_path: None,
-                line: None,
-                column: None,
+                file_path: "src/main.py".to_string(),
+                line: 20,
+                column: 1,
                 end_line: None,
                 end_column: None,
-                location: None,
-                diff: None,
+                message: "Another HTTP call without timeout".to_string(),
+                patch_json: None,
                 fix_preview: None,
+                patch: None,
+                byte_start: None,
+                byte_end: None,
             },
-            crate::api::Finding {
-                id: "test_003".to_string(),
+            IrFinding {
                 rule_id: "cors.missing".to_string(),
-                kind: "BehaviorThreat".to_string(),
                 title: "Missing CORS".to_string(),
                 description: "No CORS configured".to_string(),
                 severity: "Medium".to_string(),
-                confidence: 0.85,
                 dimension: "Correctness".to_string(),
-                file_path: None,
-                line: None,
-                column: None,
+                file_path: "src/main.py".to_string(),
+                line: 30,
+                column: 1,
                 end_line: None,
                 end_column: None,
-                location: None,
-                diff: None,
+                message: "No CORS configured".to_string(),
+                patch_json: None,
                 fix_preview: None,
+                patch: None,
+                byte_start: None,
+                byte_end: None,
             },
-            crate::api::Finding {
-                id: "test_004".to_string(),
+            IrFinding {
                 rule_id: "critical.issue".to_string(),
-                kind: "BehaviorThreat".to_string(),
                 title: "Critical Issue".to_string(),
                 description: "A critical issue".to_string(),
                 severity: "Critical".to_string(),
-                confidence: 0.95,
                 dimension: "Stability".to_string(),
-                file_path: None,
-                line: None,
-                column: None,
+                file_path: "src/main.py".to_string(),
+                line: 40,
+                column: 1,
                 end_line: None,
                 end_column: None,
-                location: None,
-                diff: None,
+                message: "A critical issue".to_string(),
+                patch_json: None,
                 fix_preview: None,
+                patch: None,
+                byte_start: None,
+                byte_end: None,
             },
         ];
-        let refs: Vec<&crate::api::Finding> = findings.iter().collect();
-        display_findings_grouped(&refs);
+
+        display_ir_findings_grouped(&findings);
     }
 
     #[test]
     fn test_sarif_output_generation() {
-        let run_response = crate::api::SessionRunResponse {
-            session_id: "test_session".to_string(),
-            status: "completed".to_string(),
-            meta: serde_json::json!({}),
-            contexts: vec![crate::api::ContextResult {
-                context_id: "ctx_1".to_string(),
-                label: "Test".to_string(),
-                findings: vec![crate::api::Finding {
-                    id: "finding_001".to_string(),
-                    rule_id: "python.http.missing_timeout".to_string(),
-                    kind: "BehaviorThreat".to_string(),
-                    title: "Missing HTTP timeout".to_string(),
-                    description: "HTTP request without timeout".to_string(),
-                    severity: "High".to_string(),
-                    confidence: 0.9,
-                    dimension: "Stability".to_string(),
-                    file_path: None,
-                    line: None,
-                    column: None,
-                    end_line: None,
-                    end_column: None,
-                    location: Some(crate::api::FindingLocation {
-                        file: "src/main.py".to_string(),
-                        start_line: 10,
-                        end_line: Some(12),
-                        start_column: Some(5),
-                        end_column: Some(40),
-                    }),
-                    diff: Some("--- a/src/main.py\n+++ b/src/main.py\n@@ -10,1 +10,1 @@\n-requests.get(url)\n+requests.get(url, timeout=30)".to_string()),
-                    fix_preview: None,
-                }],
-            }],
-            elapsed_ms: 100,
-            error_message: None,
-            subscription_warning: None,
-            is_limited: false,
-            total_findings_count: None,
-            graph_warning: None,
-        };
+        let findings = vec![IrFinding {
+            rule_id: "python.http.missing_timeout".to_string(),
+            title: "Missing HTTP timeout".to_string(),
+            description: "HTTP request without timeout".to_string(),
+            severity: "High".to_string(),
+            dimension: "Stability".to_string(),
+            file_path: "src/main.py".to_string(),
+            line: 10,
+            column: 5,
+            end_line: Some(12),
+            end_column: Some(40),
+            message: "HTTP request without timeout".to_string(),
+            patch_json: None,
+            fix_preview: None,
+            patch: Some(
+                "--- a/src/main.py\n+++ b/src/main.py\n@@ -10,1 +10,1 @@\n-requests.get(url)\n+requests.get(url, timeout=30)"
+                    .to_string(),
+            ),
+            byte_start: None,
+            byte_end: None,
+        }];
 
-        let sarif = generate_sarif_output(&run_response, "test-workspace");
+        let sarif = generate_ir_sarif_output(&findings, "test-workspace");
 
         // Verify SARIF structure
         assert_eq!(sarif["version"], "2.1.0");
@@ -2818,8 +2354,8 @@ mod tests {
     }
 
     #[test]
-    fn test_display_findings_grouped_empty() {
-        let findings: Vec<&crate::api::Finding> = vec![];
-        display_findings_grouped(&findings);
+    fn test_display_ir_findings_grouped_empty() {
+        let findings: Vec<IrFinding> = vec![];
+        display_ir_findings_grouped(&findings);
     }
 }
