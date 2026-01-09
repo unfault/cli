@@ -1076,7 +1076,7 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
                 "Happy to help. Quick clarification first:",
             ],
         );
-        return format!("{} {}", prefix, hint);
+        return format!("{} {}", prefix, hint.bright_yellow());
     }
 
     if let Some(flow_context) = &response.flow_context {
