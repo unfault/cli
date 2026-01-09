@@ -521,7 +521,15 @@ async fn execute_client_parse(
                     }
                 }
                 Err(e) => {
-                    if args.verbose {
+                    let error_msg = e.to_string();
+                    // Show auth errors even without verbose since they're actionable
+                    if error_msg.contains("gcloud auth") {
+                        eprintln!(
+                            "\n{} {}",
+                            "⚠".yellow().bold(),
+                            error_msg
+                        );
+                    } else if args.verbose {
                         eprintln!("\n{} SLO discovery failed: {}", "DEBUG".yellow(), e);
                     }
                 }

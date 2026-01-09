@@ -192,6 +192,15 @@ impl GcpProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            
+            // Check for common auth errors and provide helpful hints
+            if body.contains("invalid_grant") || body.contains("invalid_rapt") {
+                anyhow::bail!(
+                    "Couldn't fetch SLOs from GCP Cloud Monitoring because your credentials seem to have expired. \
+                    You can refresh them with 'gcloud auth application-default login'."
+                );
+            }
+            
             anyhow::bail!("Token refresh failed: {} - {}", status, body);
         }
 
