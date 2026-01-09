@@ -329,6 +329,65 @@ pub struct MetaFileInfo {
     pub contents: String,
 }
 
+/// Information about a package exported by a workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageExport {
+    /// The package name (e.g., "core_lib", "@acme/core-lib")
+    pub package_name: String,
+    /// The language/ecosystem
+    pub language: &'static str,
+    /// Source of the export info: "manifest" or "config"
+    pub source: &'static str,
+}
+
+/// Extract package export information from manifest files.
+///
+/// Returns the package name and language for cross-workspace dependency tracking.
+pub fn extract_package_export(meta_files: &[MetaFileInfo]) -> Option<PackageExport> {
+    for mf in meta_files {
+        match mf.kind {
+            "pyproject" => {
+                if let Some(name) = extract_pyproject_name(&mf.contents) {
+                    return Some(PackageExport {
+                        package_name: name,
+                        language: "python",
+                        source: "manifest",
+                    });
+                }
+            }
+            "package_json" => {
+                if let Some(name) = extract_package_json_name(&mf.contents) {
+                    return Some(PackageExport {
+                        package_name: name,
+                        language: "typescript",
+                        source: "manifest",
+                    });
+                }
+            }
+            "cargo_toml" => {
+                if let Some(name) = extract_cargo_toml_name(&mf.contents) {
+                    return Some(PackageExport {
+                        package_name: name,
+                        language: "rust",
+                        source: "manifest",
+                    });
+                }
+            }
+            "go_mod" => {
+                if let Some(name) = extract_go_mod_module(&mf.contents) {
+                    return Some(PackageExport {
+                        package_name: name,
+                        language: "go",
+                        source: "manifest",
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Extract project name from meta files.
 pub fn extract_project_name_from_meta_files(meta_files: &[MetaFileInfo]) -> Option<String> {
     for mf in meta_files {
@@ -546,6 +605,112 @@ go 1.21
             extract_go_mod_module(content),
             Some("github.com/acme/myservice".to_string())
         );
+    }
+
+    // =========================================================================
+    // extract_package_export tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_package_export_python() {
+        let meta_files = vec![MetaFileInfo {
+            kind: "pyproject",
+            contents: r#"[project]
+name = "core-lib"
+version = "1.0.0"
+"#
+            .to_string(),
+        }];
+
+        let export = extract_package_export(&meta_files);
+        assert!(export.is_some());
+        let export = export.unwrap();
+        assert_eq!(export.package_name, "core-lib");
+        assert_eq!(export.language, "python");
+        assert_eq!(export.source, "manifest");
+    }
+
+    #[test]
+    fn test_extract_package_export_typescript() {
+        let meta_files = vec![MetaFileInfo {
+            kind: "package_json",
+            contents: r#"{"name": "@acme/core-lib", "version": "1.0.0"}"#.to_string(),
+        }];
+
+        let export = extract_package_export(&meta_files);
+        assert!(export.is_some());
+        let export = export.unwrap();
+        assert_eq!(export.package_name, "@acme/core-lib");
+        assert_eq!(export.language, "typescript");
+        assert_eq!(export.source, "manifest");
+    }
+
+    #[test]
+    fn test_extract_package_export_rust() {
+        let meta_files = vec![MetaFileInfo {
+            kind: "cargo_toml",
+            contents: r#"[package]
+name = "core_lib"
+version = "0.1.0"
+"#
+            .to_string(),
+        }];
+
+        let export = extract_package_export(&meta_files);
+        assert!(export.is_some());
+        let export = export.unwrap();
+        assert_eq!(export.package_name, "core_lib");
+        assert_eq!(export.language, "rust");
+        assert_eq!(export.source, "manifest");
+    }
+
+    #[test]
+    fn test_extract_package_export_go() {
+        let meta_files = vec![MetaFileInfo {
+            kind: "go_mod",
+            contents: r#"module github.com/acme/core-lib
+
+go 1.21
+"#
+            .to_string(),
+        }];
+
+        let export = extract_package_export(&meta_files);
+        assert!(export.is_some());
+        let export = export.unwrap();
+        assert_eq!(export.package_name, "github.com/acme/core-lib");
+        assert_eq!(export.language, "go");
+        assert_eq!(export.source, "manifest");
+    }
+
+    #[test]
+    fn test_extract_package_export_none() {
+        let meta_files: Vec<MetaFileInfo> = vec![];
+        assert!(extract_package_export(&meta_files).is_none());
+    }
+
+    #[test]
+    fn test_extract_package_export_priority() {
+        // If multiple manifests exist, first match wins
+        let meta_files = vec![
+            MetaFileInfo {
+                kind: "pyproject",
+                contents: r#"[project]
+name = "python-pkg"
+"#
+                .to_string(),
+            },
+            MetaFileInfo {
+                kind: "package_json",
+                contents: r#"{"name": "npm-pkg"}"#.to_string(),
+            },
+        ];
+
+        let export = extract_package_export(&meta_files);
+        assert!(export.is_some());
+        let export = export.unwrap();
+        assert_eq!(export.package_name, "python-pkg");
+        assert_eq!(export.language, "python");
     }
 
     // =========================================================================

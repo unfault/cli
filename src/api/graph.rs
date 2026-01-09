@@ -895,6 +895,7 @@ impl ApiClient {
         workspace_id: &str,
         workspace_label: Option<&str>,
         git_remote: Option<&str>,
+        package_export: Option<&crate::session::PackageExport>,
         graph: unfault_core::graph::CodeGraph,
     ) -> Result<GraphIngestResponse, ApiError> {
         self.ingest_graph_with_progress(
@@ -902,6 +903,7 @@ impl ApiClient {
             workspace_id,
             workspace_label,
             git_remote,
+            package_export,
             graph,
             |_| {},
         )
@@ -921,6 +923,7 @@ impl ApiClient {
     /// * `workspace_label` - Human-readable workspace label
     /// * `git_remote` - Git remote URL for computing stable file IDs. If provided,
     ///   file IDs will be globally unique across machines for the same repo.
+    /// * `package_export` - Package export info for cross-workspace dependency tracking
     /// * `graph` - The code graph to ingest
     /// * `on_progress` - Progress callback
     pub async fn ingest_graph_with_progress<F>(
@@ -929,6 +932,7 @@ impl ApiClient {
         workspace_id: &str,
         workspace_label: Option<&str>,
         git_remote: Option<&str>,
+        package_export: Option<&crate::session::PackageExport>,
         graph: unfault_core::graph::CodeGraph,
         mut on_progress: F,
     ) -> Result<GraphIngestResponse, ApiError>
@@ -946,12 +950,27 @@ impl ApiClient {
             workspace_id.to_string(),
         );
 
-        let start_url = format!(
+        let mut start_url = format!(
             "{}/api/v1/graph/ingest/start?workspace_id={}&workspace_label={}",
             self.base_url,
             urlencoding::encode(workspace_id),
             urlencoding::encode(workspace_label.unwrap_or("")),
         );
+
+        // Add package export info for cross-workspace dependency tracking
+        if let Some(export) = package_export {
+            start_url.push_str(&format!(
+                "&package_name={}&package_language={}",
+                urlencoding::encode(&export.package_name),
+                urlencoding::encode(export.language),
+            ));
+            if let Some(remote) = git_remote {
+                start_url.push_str(&format!(
+                    "&git_remote={}",
+                    urlencoding::encode(remote),
+                ));
+            }
+        }
 
         let start_resp = self
             .client

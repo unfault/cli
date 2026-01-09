@@ -404,6 +404,7 @@ impl UnfaultLsp {
                 &workspace_id,
                 Some(workspace_label_str),
                 git_remote.as_deref(),
+                None, // TODO: Pass package_export for cross-workspace tracking
                 graph,
             )
             .await

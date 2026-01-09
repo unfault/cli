@@ -37,8 +37,8 @@ use crate::errors::{
 };
 use crate::exit_codes::*;
 use crate::session::{
-    PatchApplier, ScanProgress, WorkspaceScanner, build_ir_cached, compute_workspace_id,
-    get_git_remote,
+    MetaFileInfo, PatchApplier, ScanProgress, WorkspaceScanner, build_ir_cached,
+    compute_workspace_id, extract_package_export, get_git_remote,
 };
 
 /// Handle an API error and return the appropriate exit code.
@@ -456,6 +456,17 @@ async fn execute_client_parse(
     // Split IR into components so we can free memory early
     let unfault_core::IntermediateRepresentation { semantics, graph } = ir;
 
+    // Extract package export info for cross-workspace dependency tracking
+    let meta_files: Vec<MetaFileInfo> = workspace_info
+        .meta_files
+        .iter()
+        .map(|mf| MetaFileInfo {
+            kind: mf.kind.as_str(),
+            contents: mf.contents.clone(),
+        })
+        .collect();
+    let package_export = extract_package_export(&meta_files);
+
     // Step 3: Ingest full graph to API (streaming, compressed)
     pb.set_message("Uploading code graph... 0%");
 
@@ -467,6 +478,7 @@ async fn execute_client_parse(
             &workspace_id,
             Some(workspace_label),
             git_remote.as_deref(),
+            package_export.as_ref(),
             graph,
             move |progress| {
                 pb_upload.set_message(format!("Uploading code graph... {}%", progress.percent));
