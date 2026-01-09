@@ -175,6 +175,83 @@ fn normalize_severity(severity: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum FindingSeverityThreshold {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+impl FindingSeverityThreshold {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Critical => 4,
+            Self::High => 3,
+            Self::Medium => 2,
+            Self::Low => 1,
+        }
+    }
+
+    fn from_finding_severity(severity: &str) -> Self {
+        match severity.to_lowercase().as_str() {
+            "critical" => Self::Critical,
+            "high" => Self::High,
+            "medium" => Self::Medium,
+            _ => Self::Low,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LspDiagnosticsSettings {
+    enabled: bool,
+    #[serde(default = "default_min_severity")]
+    min_severity: FindingSeverityThreshold,
+}
+
+fn default_min_severity() -> FindingSeverityThreshold {
+    FindingSeverityThreshold::High
+}
+
+impl Default for LspDiagnosticsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_severity: FindingSeverityThreshold::High,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LspClientSettings {
+    #[serde(default)]
+    diagnostics: LspDiagnosticsSettings,
+}
+
+fn apply_lsp_settings(current: &mut LspClientSettings, raw: &serde_json::Value) {
+    let root = raw.get("unfault").unwrap_or(raw);
+    let Some(diagnostics) = root.get("diagnostics") else {
+        return;
+    };
+
+    if let Some(enabled) = diagnostics.get("enabled").and_then(|v| v.as_bool()) {
+        current.diagnostics.enabled = enabled;
+    }
+
+    if let Some(min_severity) = diagnostics.get("minSeverity").and_then(|v| v.as_str()) {
+        current.diagnostics.min_severity = match min_severity.to_lowercase().as_str() {
+            "critical" => FindingSeverityThreshold::Critical,
+            "high" => FindingSeverityThreshold::High,
+            "medium" => FindingSeverityThreshold::Medium,
+            "low" => FindingSeverityThreshold::Low,
+            _ => current.diagnostics.min_severity,
+        };
+    }
+}
+
 /// The Unfault LSP backend
 struct UnfaultLsp {
     /// LSP client for sending notifications
@@ -196,6 +273,8 @@ struct UnfaultLsp {
     function_cache: DashMap<Url, Vec<FunctionInfo>>,
     /// Cached file centrality data for the workspace
     centrality_cache: Arc<tokio::sync::RwLock<Option<Vec<FileCentrality>>>>,
+    /// Client-controlled display settings (diagnostics thresholds, etc.)
+    settings: Arc<tokio::sync::RwLock<LspClientSettings>>,
     /// Enable verbose logging
     verbose: bool,
 }
@@ -229,6 +308,7 @@ impl UnfaultLsp {
             document_cache: scc::HashMap::new(),
             function_cache: DashMap::new(),
             centrality_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            settings: Arc::new(tokio::sync::RwLock::new(LspClientSettings::default())),
             verbose,
         }
     }
@@ -237,6 +317,59 @@ impl UnfaultLsp {
     fn log_debug(&self, message: &str) {
         if self.verbose {
             eprintln!("[unfault-lsp] {}", message);
+        }
+    }
+
+    async fn republish_diagnostics_for_uri(&self, uri: &Url) {
+        let settings = { self.settings.read().await.clone() };
+
+        // If diagnostics are disabled, always clear.
+        if !settings.diagnostics.enabled {
+            self.client
+                .publish_diagnostics(uri.clone(), vec![], None)
+                .await;
+            return;
+        }
+
+        let source_text = self
+            .document_cache
+            .get_async(uri)
+            .await
+            .map(|entry| entry.get().clone())
+            .unwrap_or_default();
+
+        let cached_findings = self.findings_cache.get(uri).map(|v| v.clone());
+        let Some(cached_findings) = cached_findings else {
+            self.client
+                .publish_diagnostics(uri.clone(), vec![], None)
+                .await;
+            return;
+        };
+
+        let mut diagnostics = Vec::new();
+        let mut version: Option<i32> = None;
+
+        for cached in cached_findings.iter() {
+            version = version.map(|v| v.max(cached.version)).or(Some(cached.version));
+
+            let finding_severity = FindingSeverityThreshold::from_finding_severity(&cached.finding.severity);
+            if finding_severity.rank() < settings.diagnostics.min_severity.rank() {
+                continue;
+            }
+
+            diagnostics.push(self.finding_to_diagnostic(&cached.finding, &source_text));
+        }
+
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, version)
+            .await;
+    }
+
+    async fn republish_diagnostics_for_open_documents(&self) {
+        // Use findings_cache keys as our “open-ish” doc set.
+        let uris: Vec<Url> = self.findings_cache.iter().map(|e| e.key().clone()).collect();
+        for uri in uris {
+            self.republish_diagnostics_for_uri(&uri).await;
         }
     }
 
@@ -493,7 +626,8 @@ impl UnfaultLsp {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
 
-        // Filter findings for this document and convert to diagnostics
+        // Filter findings for this document and (optionally) convert to diagnostics
+        let settings = { self.settings.read().await.clone() };
         let mut diagnostics = Vec::new();
         let mut cached_findings = Vec::new();
 
@@ -511,29 +645,43 @@ impl UnfaultLsp {
                 continue;
             }
 
-            // Create diagnostic
-            let diagnostic = self.finding_to_diagnostic(finding, text);
-            diagnostics.push(diagnostic);
-
-            // Cache for code actions
+            // Cache for code actions / hovers (always)
             cached_findings.push(CachedFinding {
                 finding: finding.clone(),
                 version,
             });
+
+            // Only publish diagnostics if enabled + within threshold
+            if settings.diagnostics.enabled {
+                let finding_severity =
+                    FindingSeverityThreshold::from_finding_severity(&finding.severity);
+                if finding_severity.rank() >= settings.diagnostics.min_severity.rank() {
+                    diagnostics.push(self.finding_to_diagnostic(finding, text));
+                }
+            }
         }
 
         // Store cached findings
         self.findings_cache.insert(uri.clone(), cached_findings);
 
-        // Publish diagnostics
+        // Publish diagnostics (or clear them if disabled)
         let diagnostics_count = diagnostics.len();
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, Some(version))
-            .await;
+
+        if settings.diagnostics.enabled {
+            self.client
+                .publish_diagnostics(uri.clone(), diagnostics, Some(version))
+                .await;
+        } else {
+            self.client
+                .publish_diagnostics(uri.clone(), vec![], Some(version))
+                .await;
+        }
 
         self.log_debug(&format!(
-            "Published {} diagnostics for {}",
-            diagnostics_count, uri
+            "Diagnostics: enabled={} published={} for {}",
+            settings.diagnostics.enabled,
+            diagnostics_count,
+            uri
         ));
     }
 
@@ -1790,6 +1938,17 @@ impl LanguageServer for UnfaultLsp {
             }
         }
 
+        // Apply initialization options (VS Code extension settings)
+        if let Some(options) = params.initialization_options {
+            let mut settings = self.settings.write().await;
+            apply_lsp_settings(&mut settings, &options);
+            self.log_debug(&format!(
+                "Settings: diagnostics.enabled={} minSeverity={:?}",
+                settings.diagnostics.enabled,
+                settings.diagnostics.min_severity
+            ));
+        }
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 // We use the "push" model via publishDiagnostics, not the "pull" model
@@ -1828,6 +1987,22 @@ impl LanguageServer for UnfaultLsp {
                 )
                 .await;
         }
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        // Accept either: { unfault: { diagnostics: ... } } or { diagnostics: ... }
+        {
+            let mut settings = self.settings.write().await;
+            apply_lsp_settings(&mut settings, &params.settings);
+            self.log_debug(&format!(
+                "Settings updated: diagnostics.enabled={} minSeverity={:?}",
+                settings.diagnostics.enabled,
+                settings.diagnostics.min_severity
+            ));
+        }
+
+        // Apply changes immediately without requiring restart.
+        self.republish_diagnostics_for_open_documents().await;
     }
 
     async fn shutdown(&self) -> RpcResult<()> {
@@ -2430,6 +2605,58 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_lsp_settings_default_is_quiet() {
+        let settings = LspClientSettings::default();
+        assert!(!settings.diagnostics.enabled);
+        assert_eq!(
+            settings.diagnostics.min_severity,
+            FindingSeverityThreshold::High
+        );
+    }
+
+    #[test]
+    fn test_apply_lsp_settings_updates_diagnostics() {
+        let mut settings = LspClientSettings::default();
+
+        apply_lsp_settings(
+            &mut settings,
+            &serde_json::json!({
+                "unfault": {
+                    "diagnostics": { "enabled": true, "minSeverity": "critical" }
+                }
+            }),
+        );
+
+        assert!(settings.diagnostics.enabled);
+        assert_eq!(
+            settings.diagnostics.min_severity,
+            FindingSeverityThreshold::Critical
+        );
+
+        // Unknown values should not crash and should keep existing.
+        apply_lsp_settings(
+            &mut settings,
+            &serde_json::json!({
+                "unfault": {
+                    "diagnostics": { "minSeverity": "unknown" }
+                }
+            }),
+        );
+
+        assert_eq!(
+            settings.diagnostics.min_severity,
+            FindingSeverityThreshold::Critical
+        );
+    }
+
+    #[test]
+    fn test_severity_threshold_rank_ordering() {
+        assert!(FindingSeverityThreshold::Critical.rank() > FindingSeverityThreshold::High.rank());
+        assert!(FindingSeverityThreshold::High.rank() > FindingSeverityThreshold::Medium.rank());
+        assert!(FindingSeverityThreshold::Medium.rank() > FindingSeverityThreshold::Low.rank());
+    }
 
     #[test]
     fn test_find_project_root_with_pyproject() {
