@@ -103,6 +103,43 @@ impl GcpProvider {
             }
         }
 
+        // Try to read from gcloud config file
+        if let Some(project) = Self::get_project_from_gcloud_config() {
+            return Some(project);
+        }
+
+        None
+    }
+
+    /// Read project ID from gcloud CLI configuration.
+    fn get_project_from_gcloud_config() -> Option<String> {
+        // First check which config is active
+        let home = env::var("HOME").ok()?;
+        let gcloud_dir = PathBuf::from(&home).join(".config/gcloud");
+        
+        // Read active config name
+        let active_config = std::fs::read_to_string(gcloud_dir.join("active_config"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "default".to_string());
+        
+        // Read the config file
+        let config_path = gcloud_dir.join("configurations").join(format!("config_{}", active_config));
+        let contents = std::fs::read_to_string(config_path).ok()?;
+        
+        // Parse INI-style config to find project
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.starts_with("project") {
+                if let Some(value) = line.split('=').nth(1) {
+                    let project = value.trim().to_string();
+                    if !project.is_empty() {
+                        return Some(project);
+                    }
+                }
+            }
+        }
+        
         None
     }
 

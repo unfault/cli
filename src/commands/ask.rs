@@ -1064,6 +1064,21 @@ fn quick_take_seed(response: &RAGQueryResponse) -> String {
     )
 }
 
+/// Highlight unfault commands within a hint string.
+///
+/// Finds patterns like 'unfault review --discover-observability' and highlights them.
+fn highlight_unfault_commands(hint: &str) -> String {
+    use regex::Regex;
+    
+    // Match 'unfault <command> [--flags...]' patterns
+    let re = Regex::new(r"'(unfault\s+[^']+)'").unwrap();
+    
+    re.replace_all(hint, |caps: &regex::Captures| {
+        format!("'{}'", caps[1].bright_yellow())
+    })
+    .to_string()
+}
+
 fn build_colleague_reply(response: &RAGQueryResponse) -> String {
     let seed = quick_take_seed(response);
 
@@ -1076,7 +1091,9 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
                 "Happy to help. Quick clarification first:",
             ],
         );
-        return format!("{} {}", prefix, hint.bright_yellow());
+        // Highlight unfault commands within the hint (e.g., 'unfault review --discover-observability')
+        let styled_hint = highlight_unfault_commands(hint);
+        return format!("{} {}", prefix, styled_hint);
     }
 
     if let Some(flow_context) = &response.flow_context {
