@@ -67,7 +67,9 @@ use crate::api::graph::{
 };
 use crate::config::Config;
 use crate::exit_codes::*;
-use crate::session::{WorkspaceScanner, build_ir_cached, compute_workspace_id, get_git_remote};
+use crate::session::{
+    WorkspaceScanner, build_ir_cached, compute_file_id, compute_workspace_id, get_git_remote,
+};
 
 // Import patch types from unfault-core for parsing patch_json
 use unfault_core::IntermediateRepresentation;
@@ -1437,9 +1439,18 @@ impl UnfaultLsp {
         ));
 
         // Call function impact API
+        let workspace_root = { self.workspace_root.read().await.clone() };
+        let git_remote = workspace_root.as_ref().and_then(|p| get_git_remote(p));
+        let file_id = Some(compute_file_id(
+            git_remote.as_deref(),
+            &workspace_id,
+            file_path,
+        ));
+
         let request = FunctionImpactRequest {
             session_id: None,
             workspace_id: Some(workspace_id),
+            file_id,
             file_path: file_path.to_string(),
             function_name: function_name.to_string(),
             max_depth: 5,
@@ -2178,9 +2189,17 @@ impl LanguageServer for UnfaultLsp {
             None => return Ok(None),
         };
 
+        let git_remote = workspace_root.as_ref().and_then(|p| get_git_remote(p));
+        let file_id = Some(compute_file_id(
+            git_remote.as_deref(),
+            &workspace_id,
+            &relative_path,
+        ));
+
         let impact_request = crate::api::graph::FunctionImpactRequest {
             session_id: None,
             workspace_id: Some(workspace_id),
+            file_id,
             file_path: relative_path,
             function_name: req.function_name.clone(),
             max_depth: 5,
@@ -2295,9 +2314,17 @@ impl UnfaultLsp {
             None => return Ok(None),
         };
 
+        let git_remote = workspace_root.as_ref().and_then(|p| get_git_remote(p));
+        let file_id = Some(compute_file_id(
+            git_remote.as_deref(),
+            &workspace_id,
+            &relative_path,
+        ));
+
         let impact_request = crate::api::graph::FunctionImpactRequest {
             session_id: None,
             workspace_id: Some(workspace_id),
+            file_id,
             file_path: relative_path,
             function_name: req.function_name.clone(),
             max_depth: 5,

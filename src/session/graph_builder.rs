@@ -40,6 +40,8 @@ pub struct SerializableGraph {
     pub dependency_injections: Vec<DependencyInjectionEdge>,
     /// External library usage
     pub library_usage: Vec<LibraryUsage>,
+    /// Framework references (e.g., FastAPI lifespan handlers)
+    pub framework_references: Vec<FrameworkReferenceEdge>,
     /// Graph statistics
     pub stats: GraphStats,
 }
@@ -98,6 +100,20 @@ pub struct DependencyInjectionEdge {
 pub struct LibraryUsage {
     pub file_path: String,
     pub library: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FrameworkReferenceEdge {
+    /// Type of framework reference (e.g., "lifespan", "on_startup")
+    pub reference_type: String,
+    /// Framework name (e.g., "FastAPI")
+    pub framework: String,
+    /// File containing the framework usage (e.g., "main.py")
+    pub source_file: String,
+    /// The function being referenced
+    pub target_function: String,
+    /// File containing the target function
+    pub target_file: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -271,6 +287,7 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
     let mut calls = Vec::new();
     let mut dependency_injections = Vec::new();
     let mut library_usage = Vec::new();
+    let mut framework_references = Vec::new();
 
     // Build a map from FileId to path for file nodes
     let mut file_id_to_path: std::collections::HashMap<FileId, String> =
@@ -436,6 +453,38 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
                     });
                 }
             }
+            GraphEdgeKind::FastApiAppLifespan => {
+                let source_node = &graph.graph[source_idx];
+                let target_node = &graph.graph[target_idx];
+
+                // Source is a FastApiApp, target is a Function
+                let source_file = match source_node {
+                    GraphNode::FastApiApp { file_id, .. } => {
+                        file_id_to_path.get(file_id).cloned().unwrap_or_default()
+                    }
+                    _ => continue,
+                };
+
+                let (target_function, target_file) = match target_node {
+                    GraphNode::Function {
+                        qualified_name,
+                        file_id,
+                        ..
+                    } => {
+                        let file_path = file_id_to_path.get(file_id).cloned().unwrap_or_default();
+                        (qualified_name.clone(), file_path)
+                    }
+                    _ => continue,
+                };
+
+                framework_references.push(FrameworkReferenceEdge {
+                    reference_type: "lifespan".to_string(),
+                    framework: "FastAPI".to_string(),
+                    source_file,
+                    target_function,
+                    target_file,
+                });
+            }
             _ => {}
         }
     }
@@ -452,6 +501,7 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
         calls,
         dependency_injections,
         library_usage,
+        framework_references,
         stats: GraphStats {
             file_count: graph_stats.file_count,
             function_count: graph_stats.function_count,

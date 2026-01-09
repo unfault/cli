@@ -425,7 +425,10 @@ pub struct FunctionImpactRequest {
     /// Workspace ID (auto-resolves to latest session with graph)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    /// Path to the file containing the function
+    /// Stable file identifier (uf:file:v1:...). Preferred over file_path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+    /// Path to the file containing the function (legacy fallback)
     pub file_path: String,
     /// Name of the function (qualified if method)
     pub function_name: String,
@@ -467,6 +470,19 @@ pub struct FunctionFinding {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FrameworkReference {
+    /// Type of reference (e.g., "lifespan", "on_startup")
+    pub reference_type: String,
+    /// Framework name (e.g., "FastAPI")
+    pub framework: String,
+    /// File containing the framework usage
+    pub source_file: String,
+    /// Variable name of the app (e.g., "app")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_var: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FunctionImpactResponse {
     /// The function being analyzed (file:function)
     pub function: String,
@@ -482,6 +498,9 @@ pub struct FunctionImpactResponse {
     /// All functions affected via dependency injection (including direct)
     #[serde(default)]
     pub transitive_dependency_consumers: Vec<FunctionCaller>,
+    /// Framework-level references (lifespan handlers, event handlers, etc.)
+    #[serde(default)]
+    pub framework_references: Vec<FrameworkReference>,
     /// Total number of affected functions
     pub total_affected: i32,
     /// Findings related to this function
@@ -916,7 +935,7 @@ impl ApiClient {
     where
         F: FnMut(GraphIngestProgress),
     {
-        use crate::api::graph_stream::{encode_edges_chunk, encode_nodes_chunk, IdContext};
+        use crate::api::graph_stream::{IdContext, encode_edges_chunk, encode_nodes_chunk};
 
         let t0 = std::time::Instant::now();
 

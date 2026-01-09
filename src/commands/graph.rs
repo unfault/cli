@@ -45,7 +45,7 @@ use crate::api::graph::{
 };
 use crate::config::Config;
 use crate::exit_codes::*;
-use crate::session::{MetaFileInfo, compute_workspace_id, get_git_remote};
+use crate::session::{MetaFileInfo, compute_file_id, compute_workspace_id, get_git_remote};
 
 /// Arguments for the graph impact command
 #[derive(Debug)]
@@ -1175,9 +1175,34 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         ResolvedIdentifier::WorkspaceId(wid) => (None, Some(wid)),
     };
 
+    // Compute stable file_id when we have a workspace_id context.
+    let file_id = if let Some(ref wid) = workspace_id {
+        let workspace_root = match args.workspace_path.as_deref() {
+            Some(p) => std::path::PathBuf::from(p),
+            None => std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        };
+        let git_remote = get_git_remote(&workspace_root);
+
+        let rel_path = {
+            let p = std::path::Path::new(&file_path);
+            if p.is_absolute() {
+                p.strip_prefix(&workspace_root)
+                    .ok()
+                    .map(|rp| rp.to_string_lossy().to_string())
+            } else {
+                Some(file_path.clone())
+            }
+        };
+
+        rel_path.map(|rp| compute_file_id(git_remote.as_deref(), wid, &rp))
+    } else {
+        None
+    };
+
     let request = FunctionImpactRequest {
         session_id,
         workspace_id,
+        file_id,
         file_path,
         function_name,
         max_depth: args.max_depth,
@@ -1190,6 +1215,9 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
             request.file_path,
             request.function_name
         );
+        if let Some(ref fid) = request.file_id {
+            eprintln!("  {} file_id: {}", "→".dimmed(), fid.dimmed());
+        }
     }
 
     // Execute query
@@ -1208,17 +1236,9 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         let json = serde_json::to_string_pretty(&response)?;
         println!("{}", json);
     } else {
-        println!();
-        println!(
-            "{} {} {}",
-            "🔗".cyan(),
-            "Function Call Graph:".bold(),
-            response.function.bright_white()
-        );
-        println!();
-
         let direct_call_count = response.direct_callers.len();
         let direct_di_count = response.direct_dependency_consumers.len();
+        let framework_count = response.framework_references.len();
         let total_direct = direct_call_count + direct_di_count;
 
         let transitive_call_only: Vec<_> = response
@@ -1235,155 +1255,243 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         let transitive_call_count = transitive_call_only.len();
         let transitive_di_count = transitive_di_only.len();
 
+        // Extract just the function name for display
+        let func_name = response
+            .function
+            .rsplit_once(':')
+            .map(|(_, name)| name)
+            .unwrap_or(&response.function);
+
+        println!();
+
+        // No consumers found
         if response.total_affected == 0 {
             println!(
-                "  {} No internal callers or dependency consumers found.",
-                "ℹ".blue()
+                "{} is not called by any other function in this codebase.",
+                func_name.bright_white().bold()
             );
+            println!();
             println!(
-                "  {} This can still be invoked indirectly (framework hooks, reflection).",
-                "".dimmed()
+                "{}",
+                "It may still be invoked via framework hooks, reflection, or as an entrypoint."
+                    .dimmed()
             );
             println!();
             return Ok(EXIT_SUCCESS);
         }
 
-        if response.direct_callers.is_empty() && !response.direct_dependency_consumers.is_empty() {
-            println!(
-                "  {} No callers found, but used as a dependency by {} place(s)",
-                "→".cyan(),
-                direct_di_count.to_string().bold()
-            );
-        } else {
-            println!(
-                "  {} This function is referenced from {} place(s)",
-                "→".cyan(),
-                response.total_affected.to_string().bold()
-            );
-            println!(
-                "  {} {} direct ({} calls, {} DI)",
-                "".dimmed(),
-                total_direct,
-                direct_call_count,
-                direct_di_count
-            );
+        // Build a natural language summary
+        let summary = build_impact_summary(
+            func_name,
+            direct_call_count,
+            direct_di_count,
+            transitive_call_count,
+            transitive_di_count,
+            framework_count,
+        );
+        println!("{}", summary);
+        println!();
+
+        // Framework references section (show first if present)
+        if !response.framework_references.is_empty() {
+            println!("  {}", "Framework Usage".dimmed());
+            for fr in &response.framework_references {
+                println!(
+                    "    {} {} ({} {})",
+                    "⚡".yellow(),
+                    fr.source_file.white(),
+                    fr.framework.cyan(),
+                    fr.reference_type.dimmed()
+                );
+            }
+            println!();
         }
 
-        if transitive_call_count > 0 || transitive_di_count > 0 {
+        // Group consumers by file for cleaner display
+        let mut by_file: std::collections::BTreeMap<&str, Vec<(&str, &str)>> =
+            std::collections::BTreeMap::new();
+
+        for caller in &response.direct_callers {
+            by_file
+                .entry(&caller.path)
+                .or_default()
+                .push((&caller.function, "calls"));
+        }
+        for consumer in &response.direct_dependency_consumers {
+            by_file
+                .entry(&consumer.path)
+                .or_default()
+                .push((&consumer.function, "injects"));
+        }
+
+        // Display grouped by file (only if there are callers/DI consumers)
+        if !by_file.is_empty() {
+            for (file_path, funcs) in &by_file {
+                println!("  {}", file_path.dimmed());
+                for (func_name, relation) in funcs {
+                    let icon = if *relation == "calls" { "→" } else { "⤷" };
+                    println!(
+                        "    {} {}",
+                        icon.cyan(),
+                        func_name.bright_white()
+                    );
+                }
+            }
+        }
+
+        // Transitive (upstream) section - only show if there are any
+        if !transitive_call_only.is_empty() || !transitive_di_only.is_empty() {
+            println!();
             println!(
-                "  {} {} through chains ({} call, {} DI)",
-                "".dimmed(),
-                transitive_call_count + transitive_di_count,
-                transitive_call_count,
-                transitive_di_count
+                "{}",
+                "Upstream (indirect dependencies):".dimmed()
             );
+
+            let mut upstream_by_file: std::collections::BTreeMap<&str, Vec<(&str, i32)>> =
+                std::collections::BTreeMap::new();
+
+            for caller in &transitive_call_only {
+                upstream_by_file
+                    .entry(&caller.path)
+                    .or_default()
+                    .push((&caller.function, caller.depth));
+            }
+            for consumer in &transitive_di_only {
+                upstream_by_file
+                    .entry(&consumer.path)
+                    .or_default()
+                    .push((&consumer.function, consumer.depth));
+            }
+
+            for (file_path, funcs) in &upstream_by_file {
+                println!("  {}", file_path.dimmed());
+                for (func_name, depth) in funcs {
+                    println!(
+                        "    {} {} {}",
+                        "⋯".dimmed(),
+                        func_name.white(),
+                        format!("{} hops away", depth).dimmed()
+                    );
+                }
+            }
         }
 
         println!();
 
-        // Direct callers
-        if !response.direct_callers.is_empty() {
-            println!("{}", "Direct Callers".bold().underline());
-            println!("{}", "Functions that call this directly".dimmed());
-            println!("{}", "─".repeat(60).dimmed());
-            for caller in &response.direct_callers {
-                println!(
-                    "  {} {} ({})",
-                    "•".cyan(),
-                    caller.function.bright_white(),
-                    caller.path.dimmed()
-                );
-            }
-            println!();
-        }
-
-        // Direct dependency consumers
-        if !response.direct_dependency_consumers.is_empty() {
-            println!("{}", "Direct Dependency Consumers".bold().underline());
+        // Contextual tip based on impact
+        if framework_count > 0 && total_direct == 0 {
             println!(
-                "{}",
-                "Functions that use this via dependency injection (Depends)".dimmed()
+                "{}  {}",
+                "Tip:".cyan().bold(),
+                "This function is a framework hook. Changes may affect application lifecycle."
             );
-            println!("{}", "─".repeat(60).dimmed());
-            for consumer in &response.direct_dependency_consumers {
-                println!(
-                    "  {} {} ({})",
-                    "•".cyan(),
-                    consumer.function.bright_white(),
-                    consumer.path.dimmed()
-                );
-            }
-            println!();
-        }
-
-        // Transitive callers
-        if !transitive_call_only.is_empty() {
-            println!("{}", "Upstream Callers".bold().underline());
+        } else if response.total_affected >= 10 {
             println!(
-                "{}",
-                "Functions that depend on this through call chains".dimmed()
+                "{}  {}",
+                "Tip:".yellow().bold(),
+                "This function has wide impact. Consider adding tests before changing it."
             );
-            println!("{}", "─".repeat(60).dimmed());
-            for caller in transitive_call_only {
-                let depth_indicator = "→".repeat(caller.depth as usize);
-                println!(
-                    "  {} {} ({}) {}",
-                    depth_indicator.dimmed(),
-                    caller.function.bright_white(),
-                    caller.path.dimmed(),
-                    format!("({} hops)", caller.depth).dimmed()
-                );
-            }
-            println!();
-        }
-
-        // Transitive dependency consumers
-        if !transitive_di_only.is_empty() {
-            println!("{}", "Upstream Dependency Consumers".bold().underline());
+        } else if response.total_affected >= 5 {
             println!(
-                "{}",
-                "Functions that depend on this through DI chains".dimmed()
+                "{}  {}",
+                "Tip:".yellow().bold(),
+                "Several functions depend on this. Review callers before making changes."
             );
-            println!("{}", "─".repeat(60).dimmed());
-            for consumer in transitive_di_only {
-                let depth_indicator = "→".repeat(consumer.depth as usize);
-                println!(
-                    "  {} {} ({}) {}",
-                    depth_indicator.dimmed(),
-                    consumer.function.bright_white(),
-                    consumer.path.dimmed(),
-                    format!("({} hops)", consumer.depth).dimmed()
-                );
-            }
-            println!();
-        }
-
-        // Insights
-        if response.total_affected >= 5 {
+        } else if direct_di_count > 0 && direct_call_count == 0 {
             println!(
-                "  {} This is a core function. Changes affect many call paths.",
-                "💡".yellow()
+                "{}  {}",
+                "Tip:".cyan().bold(),
+                "This is a dependency provider. Changes affect all injected consumers."
             );
-            println!();
         }
 
         if args.verbose {
-            println!(
-                "  {} Direct: {} ({} calls, {} DI), Upstream: {} ({} calls, {} DI), Total: {}",
-                "Stats:".dimmed(),
-                total_direct,
-                direct_call_count,
-                direct_di_count,
-                transitive_call_count + transitive_di_count,
-                transitive_call_count,
-                transitive_di_count,
-                response.total_affected
-            );
             println!();
+            println!(
+                "{}",
+                format!(
+                    "Stats: {} direct ({} calls, {} DI), {} framework, {} upstream, {} total",
+                    total_direct,
+                    direct_call_count,
+                    direct_di_count,
+                    framework_count,
+                    transitive_call_count + transitive_di_count,
+                    response.total_affected
+                )
+                .dimmed()
+            );
         }
+
+        println!();
     }
 
     Ok(EXIT_SUCCESS)
+}
+
+/// Build a natural language summary of function impact.
+fn build_impact_summary(
+    func_name: &str,
+    direct_calls: usize,
+    direct_di: usize,
+    transitive_calls: usize,
+    transitive_di: usize,
+    framework_refs: usize,
+) -> String {
+    use colored::Colorize;
+
+    let _total_direct = direct_calls + direct_di;
+    let total_upstream = transitive_calls + transitive_di;
+
+    let mut parts = Vec::new();
+
+    // Describe framework usage first (most important context)
+    if framework_refs > 0 {
+        parts.push(format!("used by {} framework{}", framework_refs, if framework_refs == 1 { "" } else { "s" }));
+    }
+
+    // Describe direct relationships
+    if direct_calls > 0 && direct_di > 0 {
+        parts.push(format!(
+            "called by {} function{} and injected into {} more",
+            direct_calls,
+            if direct_calls == 1 { "" } else { "s" },
+            direct_di
+        ));
+    } else if direct_calls > 0 {
+        parts.push(format!(
+            "called by {} function{}",
+            direct_calls,
+            if direct_calls == 1 { "" } else { "s" }
+        ));
+    } else if direct_di > 0 {
+        parts.push(format!(
+            "injected into {} function{}",
+            direct_di,
+            if direct_di == 1 { "" } else { "s" }
+        ));
+    }
+
+    // Add upstream if significant
+    if total_upstream > 0 {
+        parts.push(format!(
+            "{} more upstream",
+            total_upstream
+        ));
+    }
+
+    if parts.is_empty() {
+        return format!(
+            "{} is not referenced by any other code.",
+            func_name.bright_white().bold()
+        );
+    }
+
+    let description = parts.join(", ");
+    format!(
+        "{} is {}.",
+        func_name.bright_white().bold(),
+        description
+    )
 }
 
 fn output_stats_formatted(response: &GraphStatsResponse, verbose: bool) {
@@ -1573,6 +1681,14 @@ pub fn execute_dump(args: DumpArgs) -> Result<i32> {
             outgoing_calls: Vec<crate::session::graph_builder::CallEdge>,
             incoming_calls: Vec<crate::session::graph_builder::CallEdge>,
             imports: Vec<crate::session::graph_builder::ImportEdge>,
+            /// DI edges where this file's functions are consumers
+            outgoing_dependency_injections:
+                Vec<crate::session::graph_builder::DependencyInjectionEdge>,
+            /// DI edges where this file's functions are providers
+            incoming_dependency_injections:
+                Vec<crate::session::graph_builder::DependencyInjectionEdge>,
+            /// Framework references where this file's functions are targets
+            framework_references: Vec<crate::session::graph_builder::FrameworkReferenceEdge>,
         }
 
         let file_graph = FileGraph {
@@ -1609,6 +1725,32 @@ pub fn execute_dump(args: DumpArgs) -> Result<i32> {
                 .imports
                 .iter()
                 .filter(|i| i.from_file.contains(file_filter) || i.to_file.contains(file_filter))
+                .cloned()
+                .collect(),
+            outgoing_dependency_injections: graph
+                .dependency_injections
+                .iter()
+                .filter(|d| d.consumer_file.contains(file_filter))
+                .cloned()
+                .collect(),
+            incoming_dependency_injections: graph
+                .dependency_injections
+                .iter()
+                .filter(|d| {
+                    // Find the provider's file
+                    graph
+                        .functions
+                        .iter()
+                        .any(|f| f.qualified_name == d.provider && f.file_path.contains(file_filter))
+                })
+                .cloned()
+                .collect(),
+            framework_references: graph
+                .framework_references
+                .iter()
+                .filter(|fr| {
+                    fr.source_file.contains(file_filter) || fr.target_file.contains(file_filter)
+                })
                 .cloned()
                 .collect(),
         };

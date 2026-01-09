@@ -403,6 +403,7 @@ pub fn encode_edges_chunk(
             GraphEdgeKind::FastApiAppOwnsRoute => ("fastapi_app_owns_route", None),
             GraphEdgeKind::FastApiAppHasMiddleware => ("fastapi_app_has_middleware", None),
             GraphEdgeKind::DependencyInjection => ("dependency_injection", None),
+            GraphEdgeKind::FastApiAppLifespan => ("fastapi_app_lifespan", None),
         };
 
         let frame = push_frame(
