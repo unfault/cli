@@ -62,7 +62,8 @@ impl GcpProvider {
 
         // Check Application Default Credentials location
         if let Ok(home) = env::var("HOME") {
-            let adc_path = PathBuf::from(home).join(".config/gcloud/application_default_credentials.json");
+            let adc_path =
+                PathBuf::from(home).join(".config/gcloud/application_default_credentials.json");
             if adc_path.exists() {
                 return Some(adc_path);
             }
@@ -70,7 +71,8 @@ impl GcpProvider {
 
         // Windows fallback
         if let Ok(appdata) = env::var("APPDATA") {
-            let adc_path = PathBuf::from(appdata).join("gcloud/application_default_credentials.json");
+            let adc_path =
+                PathBuf::from(appdata).join("gcloud/application_default_credentials.json");
             if adc_path.exists() {
                 return Some(adc_path);
             }
@@ -116,17 +118,19 @@ impl GcpProvider {
         // First check which config is active
         let home = env::var("HOME").ok()?;
         let gcloud_dir = PathBuf::from(&home).join(".config/gcloud");
-        
+
         // Read active config name
         let active_config = std::fs::read_to_string(gcloud_dir.join("active_config"))
             .ok()
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|| "default".to_string());
-        
+
         // Read the config file
-        let config_path = gcloud_dir.join("configurations").join(format!("config_{}", active_config));
+        let config_path = gcloud_dir
+            .join("configurations")
+            .join(format!("config_{}", active_config));
         let contents = std::fs::read_to_string(config_path).ok()?;
-        
+
         // Parse INI-style config to find project
         for line in contents.lines() {
             let line = line.trim();
@@ -139,7 +143,7 @@ impl GcpProvider {
                 }
             }
         }
-        
+
         None
     }
 
@@ -192,7 +196,7 @@ impl GcpProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            
+
             // Check for common auth errors and provide helpful hints
             if body.contains("invalid_grant") || body.contains("invalid_rapt") {
                 anyhow::bail!(
@@ -200,7 +204,7 @@ impl GcpProvider {
                     You can refresh them with 'gcloud auth application-default login'."
                 );
             }
-            
+
             anyhow::bail!("Token refresh failed: {} - {}", status, body);
         }
 
@@ -208,7 +212,11 @@ impl GcpProvider {
         Ok(token_resp.access_token)
     }
 
-    async fn get_service_account_token(&self, _client: &Client, _creds: &AdcFile) -> Result<String> {
+    async fn get_service_account_token(
+        &self,
+        _client: &Client,
+        _creds: &AdcFile,
+    ) -> Result<String> {
         // Service account JWT generation requires signing, which needs more dependencies.
         // For now, we recommend using user credentials via `gcloud auth application-default login`.
         anyhow::bail!(
@@ -255,7 +263,8 @@ impl GcpProvider {
             anyhow::bail!("GCP API error listing services: {} - {}", status, body);
         }
 
-        let response: GcpServicesResponse = resp.json().await.context("Failed to parse services")?;
+        let response: GcpServicesResponse =
+            resp.json().await.context("Failed to parse services")?;
         Ok(response.services.unwrap_or_default())
     }
 
@@ -321,7 +330,7 @@ impl GcpProvider {
         // Build dashboard URL
         let dashboard_url = Some(format!(
             "https://console.cloud.google.com/monitoring/services/{}?project={}",
-            slo.name.split('/').last().unwrap_or(&slo.name),
+            slo.name.split('/').next_back().unwrap_or(&slo.name),
             self.project_id
         ));
 
@@ -332,7 +341,7 @@ impl GcpProvider {
             path_pattern,
             http_method,
             target_percent: slo.goal * 100.0, // GCP stores as 0.999, we want 99.9
-            current_percent: None, // Would need separate API call to get status
+            current_percent: None,            // Would need separate API call to get status
             error_budget_remaining: None,
             timeframe,
             dashboard_url,

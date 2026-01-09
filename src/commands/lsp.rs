@@ -350,9 +350,12 @@ impl UnfaultLsp {
         let mut version: Option<i32> = None;
 
         for cached in cached_findings.iter() {
-            version = version.map(|v| v.max(cached.version)).or(Some(cached.version));
+            version = version
+                .map(|v| v.max(cached.version))
+                .or(Some(cached.version));
 
-            let finding_severity = FindingSeverityThreshold::from_finding_severity(&cached.finding.severity);
+            let finding_severity =
+                FindingSeverityThreshold::from_finding_severity(&cached.finding.severity);
             if finding_severity.rank() < settings.diagnostics.min_severity.rank() {
                 continue;
             }
@@ -367,7 +370,11 @@ impl UnfaultLsp {
 
     async fn republish_diagnostics_for_open_documents(&self) {
         // Use findings_cache keys as our “open-ish” doc set.
-        let uris: Vec<Url> = self.findings_cache.iter().map(|e| e.key().clone()).collect();
+        let uris: Vec<Url> = self
+            .findings_cache
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
         for uri in uris {
             self.republish_diagnostics_for_uri(&uri).await;
         }
@@ -679,9 +686,7 @@ impl UnfaultLsp {
 
         self.log_debug(&format!(
             "Diagnostics: enabled={} published={} for {}",
-            settings.diagnostics.enabled,
-            diagnostics_count,
-            uri
+            settings.diagnostics.enabled, diagnostics_count, uri
         ));
     }
 
@@ -1944,8 +1949,7 @@ impl LanguageServer for UnfaultLsp {
             apply_lsp_settings(&mut settings, &options);
             self.log_debug(&format!(
                 "Settings: diagnostics.enabled={} minSeverity={:?}",
-                settings.diagnostics.enabled,
-                settings.diagnostics.min_severity
+                settings.diagnostics.enabled, settings.diagnostics.min_severity
             ));
         }
 
@@ -1996,8 +2000,7 @@ impl LanguageServer for UnfaultLsp {
             apply_lsp_settings(&mut settings, &params.settings);
             self.log_debug(&format!(
                 "Settings updated: diagnostics.enabled={} minSeverity={:?}",
-                settings.diagnostics.enabled,
-                settings.diagnostics.min_severity
+                settings.diagnostics.enabled, settings.diagnostics.min_severity
             ));
         }
 

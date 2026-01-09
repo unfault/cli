@@ -54,7 +54,10 @@ impl DynatraceProvider {
         let mut next_page_key: Option<String> = None;
 
         loop {
-            let mut url = format!("{}/api/v2/slo?pageSize=100&evaluate=true", self.environment_url);
+            let mut url = format!(
+                "{}/api/v2/slo?pageSize=100&evaluate=true",
+                self.environment_url
+            );
             if let Some(ref key) = next_page_key {
                 url = format!("{}/api/v2/slo?nextPageKey={}", self.environment_url, key);
             }
@@ -78,12 +81,7 @@ impl DynatraceProvider {
                 .await
                 .context("Failed to parse Dynatrace SLO response")?;
 
-            all_slos.extend(
-                response
-                    .slo
-                    .into_iter()
-                    .map(|slo| self.convert_slo(slo)),
-            );
+            all_slos.extend(response.slo.into_iter().map(|slo| self.convert_slo(slo)));
 
             // Check for more pages
             if let Some(key) = response.next_page_key {
@@ -99,8 +97,11 @@ impl DynatraceProvider {
     fn convert_slo(&self, slo: DynatraceSlo) -> SloDefinition {
         // Extract path pattern from filter or name
         // Dynatrace uses entity selectors; we look for URL patterns in the name/description
-        let path_pattern = extract_path_from_name(&slo.name)
-            .or_else(|| slo.description.as_ref().and_then(|d| extract_path_from_name(d)));
+        let path_pattern = extract_path_from_name(&slo.name).or_else(|| {
+            slo.description
+                .as_ref()
+                .and_then(|d| extract_path_from_name(d))
+        });
 
         // Dynatrace SLOs don't typically specify HTTP method
         let http_method = None;

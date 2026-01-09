@@ -83,22 +83,15 @@ impl DatadogProvider {
     fn convert_slo(&self, slo: DatadogSlo) -> SloDefinition {
         // Extract path pattern from tags (common convention: "path:/api/users/*")
         let path_pattern = slo.tags.iter().find_map(|tag| {
-            if let Some(path) = tag.strip_prefix("path:") {
-                Some(path.to_string())
-            } else if let Some(path) = tag.strip_prefix("endpoint:") {
-                Some(path.to_string())
-            } else {
-                None
-            }
+            tag.strip_prefix("path:")
+                .or_else(|| tag.strip_prefix("endpoint:"))
+                .map(|path| path.to_string())
         });
 
         // Extract HTTP method from tags if present
         let http_method = slo.tags.iter().find_map(|tag| {
-            if let Some(method) = tag.strip_prefix("method:") {
-                Some(method.to_uppercase())
-            } else {
-                None
-            }
+            tag.strip_prefix("method:")
+                .map(|method| method.to_uppercase())
         });
 
         // Get the primary threshold (typically 30d)
@@ -113,13 +106,13 @@ impl DatadogProvider {
             .unwrap_or((99.0, "30d".to_string()));
 
         // Build dashboard URL
-        let dashboard_url = Some(format!(
-            "https://app.{}/slo?slo_id={}",
-            self.site, slo.id
-        ));
+        let dashboard_url = Some(format!("https://app.{}/slo?slo_id={}", self.site, slo.id));
 
         let current_percent = slo.overall_status.as_ref().map(|s| s.sli_value);
-        let error_budget_remaining = slo.overall_status.as_ref().and_then(|s| s.error_budget_remaining);
+        let error_budget_remaining = slo
+            .overall_status
+            .as_ref()
+            .and_then(|s| s.error_budget_remaining);
 
         SloDefinition {
             id: slo.id,

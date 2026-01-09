@@ -360,10 +360,11 @@ fn is_test_path(path: &str) -> bool {
         || lower.ends_with(".spec.tsx")
         || lower
             .split('/')
-            .last()
+            .next_back()
             .is_some_and(|name| name.starts_with("test_") || name.starts_with("spec_"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_client_parse(
     args: &ReviewArgs,
     config: &mut Config,
@@ -444,7 +445,10 @@ async fn execute_client_parse(
     }
 
     // Split IR into components so we can free memory early
-    let unfault_core::IntermediateRepresentation { semantics, mut graph } = ir;
+    let unfault_core::IntermediateRepresentation {
+        semantics,
+        mut graph,
+    } = ir;
 
     // Extract package export info for cross-workspace dependency tracking
     let meta_files: Vec<MetaFileInfo> = workspace_info
@@ -477,30 +481,30 @@ async fn execute_client_parse(
 
     // Step 2.5: Discover and link SLOs (if --discover-observability flag is set)
     if args.discover_observability {
-        use crate::slo::{SloEnricher, get_service_level_slos, group_slos_by_service, get_service_display_name};
+        use crate::slo::{
+            SloEnricher, get_service_display_name, get_service_level_slos, group_slos_by_service,
+        };
         use std::io::{self, Write};
 
         let enricher = SloEnricher::new(args.verbose);
         if enricher.any_provider_available() {
             let providers = enricher.available_providers();
-            pb.set_message(format!(
-                "Discovering SLOs from {}...",
-                providers.join(", ")
-            ));
+            pb.set_message(format!("Discovering SLOs from {}...", providers.join(", ")));
 
             match enricher.fetch_all().await {
                 Ok(slos) => {
                     if !slos.is_empty() {
                         // First, link SLOs that have path patterns (automatic matching)
                         let linked = enricher.enrich_graph(&mut graph, &slos).unwrap_or(0);
-                        
+
                         // Check for service-level SLOs (no path pattern)
                         let service_slos = get_service_level_slos(&slos);
-                        
+
                         if !service_slos.is_empty() {
                             // Check if we have a stored mapping for this workspace
-                            let stored_service = config.get_workspace_service(&workspace_id).cloned();
-                            
+                            let stored_service =
+                                config.get_workspace_service(&workspace_id).cloned();
+
                             if let Some(ref service_name) = stored_service {
                                 // Use stored mapping - link all SLOs for that service
                                 pb.suspend(|| {
@@ -512,7 +516,7 @@ async fn execute_client_parse(
                                         );
                                     }
                                 });
-                                
+
                                 let grouped = group_slos_by_service(&slos);
                                 if let Some(service_slos) = grouped.get(service_name) {
                                     for slo in service_slos {
@@ -522,31 +526,33 @@ async fn execute_client_parse(
                             } else {
                                 // No stored mapping - prompt user
                                 let grouped = group_slos_by_service(&slos);
-                                
+
                                 if !grouped.is_empty() {
                                     // Finish the progress bar before prompting
                                     pb.finish_and_clear();
-                                    
+
                                     eprintln!();
                                     eprintln!(
                                         "We found SLOs in your GCP project that apply to entire services."
                                     );
-                                    eprintln!(
-                                        "Which service does this codebase deploy to?"
-                                    );
+                                    eprintln!("Which service does this codebase deploy to?");
                                     eprintln!();
-                                    
+
                                     let services: Vec<_> = grouped.keys().collect();
                                     for (i, service_name) in services.iter().enumerate() {
                                         let display_name = get_service_display_name(service_name);
                                         eprintln!("  [{}] {}", i + 1, display_name.cyan());
-                                        
+
                                         // Show SLOs for this service
                                         if let Some(slos) = grouped.get(*service_name) {
                                             for slo in slos {
-                                                let status = if let Some(budget) = slo.error_budget_remaining {
+                                                let status = if let Some(budget) =
+                                                    slo.error_budget_remaining
+                                                {
                                                     if budget < 20.0 {
-                                                        format!("{:.0}% budget remaining", budget).yellow().to_string()
+                                                        format!("{:.0}% budget remaining", budget)
+                                                            .yellow()
+                                                            .to_string()
                                                     } else {
                                                         "healthy".green().to_string()
                                                     }
@@ -566,24 +572,30 @@ async fn execute_client_parse(
                                     eprintln!();
                                     eprint!("> ");
                                     io::stderr().flush().ok();
-                                    
+
                                     // Read user input
                                     let mut input = String::new();
                                     if io::stdin().read_line(&mut input).is_ok() {
                                         let input = input.trim().to_lowercase();
-                                        
+
                                         if input != "s" && input != "skip" {
                                             if let Ok(choice) = input.parse::<usize>() {
                                                 if choice > 0 && choice <= services.len() {
-                                                    let selected_service = services[choice - 1].clone();
-                                                    
+                                                    let selected_service =
+                                                        services[choice - 1].clone();
+
                                                     // Link all SLOs for this service
-                                                    if let Some(slos_to_link) = grouped.get(&selected_service) {
+                                                    if let Some(slos_to_link) =
+                                                        grouped.get(&selected_service)
+                                                    {
                                                         let mut total_linked = 0;
                                                         for slo in slos_to_link {
-                                                            total_linked += enricher.link_service_slo_to_all_routes(&mut graph, slo);
+                                                            total_linked += enricher
+                                                                .link_service_slo_to_all_routes(
+                                                                    &mut graph, slo,
+                                                                );
                                                         }
-                                                        
+
                                                         eprintln!(
                                                             "\n{} Linked {} SLO(s) to {} route handler(s).",
                                                             "✓".green().bold(),
@@ -591,9 +603,12 @@ async fn execute_client_parse(
                                                             total_linked
                                                         );
                                                     }
-                                                    
+
                                                     // Save the mapping
-                                                    config.set_workspace_service(workspace_id.clone(), selected_service.clone());
+                                                    config.set_workspace_service(
+                                                        workspace_id.clone(),
+                                                        selected_service.clone(),
+                                                    );
                                                     if let Err(e) = config.save() {
                                                         if args.verbose {
                                                             eprintln!(
@@ -612,14 +627,14 @@ async fn execute_client_parse(
                                             }
                                         }
                                     }
-                                    
+
                                     // Recreate progress bar for remaining steps
                                     pb.reset();
                                     pb.set_message("Uploading code graph... 0%");
                                 }
                             }
                         }
-                        
+
                         if args.verbose {
                             eprintln!(
                                 "\n{} Discovered {} SLO(s), linked {} via path patterns",
@@ -628,10 +643,12 @@ async fn execute_client_parse(
                                 linked
                             );
                             for slo in &slos {
-                                let budget_info = slo.error_budget_remaining
+                                let budget_info = slo
+                                    .error_budget_remaining
                                     .map(|b| format!(", budget: {:.1}%", b))
                                     .unwrap_or_default();
-                                let current_info = slo.current_percent
+                                let current_info = slo
+                                    .current_percent
                                     .map(|c| format!(" (current: {:.2}%)", c))
                                     .unwrap_or_default();
                                 eprintln!(
@@ -659,11 +676,7 @@ async fn execute_client_parse(
                     let error_msg = e.to_string();
                     // Show auth errors even without verbose since they're actionable
                     if error_msg.contains("gcloud auth") {
-                        eprintln!(
-                            "\n{} {}",
-                            "⚠".yellow().bold(),
-                            error_msg
-                        );
+                        eprintln!("\n{} {}", "⚠".yellow().bold(), error_msg);
                     } else if args.verbose {
                         eprintln!("\n{} SLO discovery failed: {}", "DEBUG".yellow(), e);
                     }
@@ -1672,7 +1685,7 @@ fn display_session_insights(
         starts.push((i.scope_key.clone(), example));
     }
 
-    if let Some((h1, ex1)) = starts.get(0) {
+    if let Some((h1, ex1)) = starts.first() {
         paragraph.push_str(&format!(
             " Starting point: {}",
             h1.as_str().bright_purple().bold()
@@ -1758,7 +1771,7 @@ fn display_session_hotspots(
 
         for h in &hs {
             for b in &h.behaviors {
-                *bucket_counts.entry(b.bucket.clone()).or_insert(0) += b.count as i64;
+                *bucket_counts.entry(b.bucket.clone()).or_insert(0) += b.count;
             }
         }
 
@@ -1815,7 +1828,7 @@ fn display_session_hotspots(
             starts.push((h.hotspot.clone(), example));
         }
 
-        if let Some((h1, ex1)) = starts.get(0) {
+        if let Some((h1, ex1)) = starts.first() {
             paragraph.push_str(&format!(
                 " Starting point: {}",
                 h1.as_str().bright_purple().bold()
@@ -1895,11 +1908,7 @@ fn display_session_hotspots(
                 let wrapped_lines = wrap_text(&title, first_line_max, "        ");
 
                 if let Some(first_line) = wrapped_lines.first() {
-                    println!(
-                        "{}{}",
-                        format!("      [{}] ", ex.rule_id.cyan()),
-                        first_line.dimmed()
-                    );
+                    println!("      [{}] {}", ex.rule_id.cyan(), first_line.dimmed());
                 }
                 for line in wrapped_lines.iter().skip(1) {
                     println!("        {}", line.dimmed());
@@ -2137,11 +2146,7 @@ fn display_ir_hotspots_summary(findings: &[IrFinding]) {
                 let wrapped_lines = wrap_text(&title, first_line_max, "        ");
 
                 if let Some(first_line) = wrapped_lines.first() {
-                    println!(
-                        "{}{}",
-                        format!("      [{}] ", ex.rule_id.cyan()),
-                        first_line.dimmed()
-                    );
+                    println!("      [{}] {}", ex.rule_id.cyan(), first_line.dimmed());
                 }
                 for line in wrapped_lines.iter().skip(1) {
                     println!("        {}", line.dimmed());

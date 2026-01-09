@@ -926,6 +926,7 @@ impl ApiClient {
     /// * `package_export` - Package export info for cross-workspace dependency tracking
     /// * `graph` - The code graph to ingest
     /// * `on_progress` - Progress callback
+    #[allow(clippy::too_many_arguments)]
     pub async fn ingest_graph_with_progress<F>(
         &self,
         api_key: &str,
@@ -965,10 +966,7 @@ impl ApiClient {
                 urlencoding::encode(export.language),
             ));
             if let Some(remote) = git_remote {
-                start_url.push_str(&format!(
-                    "&git_remote={}",
-                    urlencoding::encode(remote),
-                ));
+                start_url.push_str(&format!("&git_remote={}", urlencoding::encode(remote),));
             }
         }
 

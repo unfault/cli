@@ -327,7 +327,7 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
     // Build a map from FileId to path for file nodes
     let mut file_id_to_path: std::collections::HashMap<FileId, String> =
         std::collections::HashMap::new();
-    
+
     // Map from SLO node index to SloNode for collecting monitored routes
     let mut slo_index_to_node: std::collections::HashMap<petgraph::graph::NodeIndex, SloNode> =
         std::collections::HashMap::new();

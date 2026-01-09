@@ -1330,11 +1330,7 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
                 println!("  {}", file_path.dimmed());
                 for (func_name, relation) in funcs {
                     let icon = if *relation == "calls" { "→" } else { "⤷" };
-                    println!(
-                        "    {} {}",
-                        icon.cyan(),
-                        func_name.bright_white()
-                    );
+                    println!("    {} {}", icon.cyan(), func_name.bright_white());
                 }
             }
         }
@@ -1342,10 +1338,7 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         // Transitive (upstream) section - only show if there are any
         if !transitive_call_only.is_empty() || !transitive_di_only.is_empty() {
             println!();
-            println!(
-                "{}",
-                "Upstream (indirect dependencies):".dimmed()
-            );
+            println!("{}", "Upstream (indirect dependencies):".dimmed());
 
             let mut upstream_by_file: std::collections::BTreeMap<&str, Vec<(&str, i32)>> =
                 std::collections::BTreeMap::new();
@@ -1381,27 +1374,23 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         // Contextual tip based on impact
         if framework_count > 0 && total_direct == 0 {
             println!(
-                "{}  {}",
-                "Tip:".cyan().bold(),
-                "This function is a framework hook. Changes may affect application lifecycle."
+                "{}  This function is a framework hook. Changes may affect application lifecycle.",
+                "Tip:".cyan().bold()
             );
         } else if response.total_affected >= 10 {
             println!(
-                "{}  {}",
-                "Tip:".yellow().bold(),
-                "This function has wide impact. Consider adding tests before changing it."
+                "{}  This function has wide impact. Consider adding tests before changing it.",
+                "Tip:".yellow().bold()
             );
         } else if response.total_affected >= 5 {
             println!(
-                "{}  {}",
-                "Tip:".yellow().bold(),
-                "Several functions depend on this. Review callers before making changes."
+                "{}  Several functions depend on this. Review callers before making changes.",
+                "Tip:".yellow().bold()
             );
         } else if direct_di_count > 0 && direct_call_count == 0 {
             println!(
-                "{}  {}",
-                "Tip:".cyan().bold(),
-                "This is a dependency provider. Changes affect all injected consumers."
+                "{}  This is a dependency provider. Changes affect all injected consumers.",
+                "Tip:".cyan().bold()
             );
         }
 
@@ -1446,7 +1435,11 @@ fn build_impact_summary(
 
     // Describe framework usage first (most important context)
     if framework_refs > 0 {
-        parts.push(format!("used by {} framework{}", framework_refs, if framework_refs == 1 { "" } else { "s" }));
+        parts.push(format!(
+            "used by {} framework{}",
+            framework_refs,
+            if framework_refs == 1 { "" } else { "s" }
+        ));
     }
 
     // Describe direct relationships
@@ -1473,10 +1466,7 @@ fn build_impact_summary(
 
     // Add upstream if significant
     if total_upstream > 0 {
-        parts.push(format!(
-            "{} more upstream",
-            total_upstream
-        ));
+        parts.push(format!("{} more upstream", total_upstream));
     }
 
     if parts.is_empty() {
@@ -1487,11 +1477,7 @@ fn build_impact_summary(
     }
 
     let description = parts.join(", ");
-    format!(
-        "{} is {}.",
-        func_name.bright_white().bold(),
-        description
-    )
+    format!("{} is {}.", func_name.bright_white().bold(), description)
 }
 
 fn output_stats_formatted(response: &GraphStatsResponse, verbose: bool) {
@@ -1738,10 +1724,9 @@ pub fn execute_dump(args: DumpArgs) -> Result<i32> {
                 .iter()
                 .filter(|d| {
                     // Find the provider's file
-                    graph
-                        .functions
-                        .iter()
-                        .any(|f| f.qualified_name == d.provider && f.file_path.contains(file_filter))
+                    graph.functions.iter().any(|f| {
+                        f.qualified_name == d.provider && f.file_path.contains(file_filter)
+                    })
                 })
                 .cloned()
                 .collect(),

@@ -146,10 +146,7 @@ impl SloEnricher {
             // Skip SLOs without a usable path pattern
             if !slo.has_path_pattern() {
                 if self.verbose {
-                    eprintln!(
-                        "  Skipping SLO '{}' (no path pattern)",
-                        slo.name
-                    );
+                    eprintln!("  Skipping SLO '{}' (no path pattern)", slo.name);
                 }
                 continue;
             }
@@ -231,16 +228,12 @@ impl SloEnricher {
         }
 
         if self.verbose {
-            eprintln!(
-                "  Linking SLO '{}' to {} route(s):",
-                slo.name,
-                route_count
-            );
+            eprintln!("  Linking SLO '{}' to {} route(s):", slo.name, route_count);
             for (idx, http_path, http_method) in &routes {
                 if let Some((_, _, func_name)) = graph.get_route_info(*idx) {
                     eprintln!(
                         "    → {} {} ({})",
-                        http_method.unwrap_or(&"*"),
+                        http_method.unwrap_or("*"),
                         http_path,
                         func_name
                     );
@@ -280,8 +273,11 @@ pub fn get_service_level_slos(slos: &[SloDefinition]) -> Vec<&SloDefinition> {
 ///
 /// For GCP, the service name is extracted from the SLO ID:
 /// `projects/xxx/services/SERVICE_NAME/serviceLevelObjectives/yyy`
-pub fn group_slos_by_service(slos: &[SloDefinition]) -> std::collections::HashMap<String, Vec<&SloDefinition>> {
-    let mut groups: std::collections::HashMap<String, Vec<&SloDefinition>> = std::collections::HashMap::new();
+pub fn group_slos_by_service(
+    slos: &[SloDefinition],
+) -> std::collections::HashMap<String, Vec<&SloDefinition>> {
+    let mut groups: std::collections::HashMap<String, Vec<&SloDefinition>> =
+        std::collections::HashMap::new();
 
     for slo in slos {
         let service_name = extract_service_name(&slo.id);

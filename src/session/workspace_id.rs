@@ -802,11 +802,7 @@ name = "python-pkg"
     #[test]
     fn test_compute_file_id_stable_across_git_formats() {
         // Same repo, different URL formats should produce same file_id
-        let id1 = compute_file_id(
-            Some("git@github.com:acme/repo.git"),
-            "wks_x",
-            "src/main.py",
-        );
+        let id1 = compute_file_id(Some("git@github.com:acme/repo.git"), "wks_x", "src/main.py");
         let id2 = compute_file_id(
             Some("https://github.com/acme/repo.git"),
             "wks_x",
@@ -857,8 +853,16 @@ name = "python-pkg"
 
     #[test]
     fn test_compute_file_id_different_repos_different_ids() {
-        let id1 = compute_file_id(Some("git@github.com:acme/repo1.git"), "wks_x", "src/main.py");
-        let id2 = compute_file_id(Some("git@github.com:acme/repo2.git"), "wks_x", "src/main.py");
+        let id1 = compute_file_id(
+            Some("git@github.com:acme/repo1.git"),
+            "wks_x",
+            "src/main.py",
+        );
+        let id2 = compute_file_id(
+            Some("git@github.com:acme/repo2.git"),
+            "wks_x",
+            "src/main.py",
+        );
 
         assert_ne!(id1, id2);
     }

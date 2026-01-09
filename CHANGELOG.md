@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-01-09
+
+### Added
+- Richer SLO context in `unfault ask`, including interactive mapping for service-level SLOs.
+- New LSP diagnostics settings for server-side diagnostics control.
+
+### Fixed
+- Clearer guidance when GCP credentials expire and more robust GCP project detection.
+
 ## [0.6.0] - 2025-12-23
 
 ### Added
@@ -80,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
+[0.6.2]: https://github.com/unfault/cli/releases/tag/v0.6.2
 [0.6.0]: https://github.com/unfault/cli/releases/tag/v0.6.0
 [0.5.1]: https://github.com/unfault/cli/releases/tag/v0.5.1
 [0.5.0]: https://github.com/unfault/cli/releases/tag/v0.5.0

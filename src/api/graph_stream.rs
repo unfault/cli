@@ -147,12 +147,9 @@ impl IdContext {
             return cached.clone();
         }
 
-        let file_id = compute_file_id(
-            self.git_remote.as_deref(),
-            &self.workspace_id,
-            path,
-        );
-        self.path_to_file_id.insert(path.to_string(), file_id.clone());
+        let file_id = compute_file_id(self.git_remote.as_deref(), &self.workspace_id, path);
+        self.path_to_file_id
+            .insert(path.to_string(), file_id.clone());
         file_id
     }
 
@@ -644,23 +641,34 @@ mod tests {
         let frames = decode_frames(&decoded);
 
         // Find node records (not control records)
-        let node_frames: Vec<_> = frames
-            .iter()
-            .filter(|f| f["type"] == "node")
-            .collect();
+        let node_frames: Vec<_> = frames.iter().filter(|f| f["type"] == "node").collect();
 
         assert_eq!(node_frames.len(), 2);
 
         // File node should have uf:file:v1: prefix
-        let file_node = node_frames.iter().find(|f| f["node_type"] == "file").unwrap();
+        let file_node = node_frames
+            .iter()
+            .find(|f| f["node_type"] == "file")
+            .unwrap();
         let file_node_id = file_node["node_id"].as_str().unwrap();
-        assert!(file_node_id.starts_with("uf:file:v1:"), "File node_id should start with uf:file:v1:, got: {}", file_node_id);
+        assert!(
+            file_node_id.starts_with("uf:file:v1:"),
+            "File node_id should start with uf:file:v1:, got: {}",
+            file_node_id
+        );
         assert_eq!(file_node_id.len(), 11 + 24); // prefix + 24 hex chars
 
         // Function node should have uf:sym:v1: prefix
-        let func_node = node_frames.iter().find(|f| f["node_type"] == "function").unwrap();
+        let func_node = node_frames
+            .iter()
+            .find(|f| f["node_type"] == "function")
+            .unwrap();
         let func_node_id = func_node["node_id"].as_str().unwrap();
-        assert!(func_node_id.starts_with("uf:sym:v1:"), "Function node_id should start with uf:sym:v1:, got: {}", func_node_id);
+        assert!(
+            func_node_id.starts_with("uf:sym:v1:"),
+            "Function node_id should start with uf:sym:v1:, got: {}",
+            func_node_id
+        );
         assert_eq!(func_node_id.len(), 10 + 24); // prefix + 24 hex chars
     }
 
@@ -683,11 +691,7 @@ mod tests {
 
         let mut ids = Vec::new();
         for git_remote in git_formats {
-            let mut ctx = IdContext::new(
-                &graph,
-                Some(git_remote.to_string()),
-                "wks_x".to_string(),
-            );
+            let mut ctx = IdContext::new(&graph, Some(git_remote.to_string()), "wks_x".to_string());
 
             let body = encode_nodes_chunk(&graph, &mut ctx, 0, 10, 0).unwrap();
             let decoded = zstd::stream::decode_all(std::io::Cursor::new(body)).unwrap();
@@ -698,7 +702,13 @@ mod tests {
         }
 
         // All IDs should be identical
-        assert_eq!(ids[0], ids[1], "SSH and HTTPS formats should produce same ID");
-        assert_eq!(ids[1], ids[2], "HTTPS and ssh:// formats should produce same ID");
+        assert_eq!(
+            ids[0], ids[1],
+            "SSH and HTTPS formats should produce same ID"
+        );
+        assert_eq!(
+            ids[1], ids[2],
+            "HTTPS and ssh:// formats should produce same ID"
+        );
     }
 }

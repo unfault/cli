@@ -153,18 +153,27 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
             if let Some(ref method) = s.http_method {
                 map.insert("http_method".to_string(), serde_json::json!(method));
             }
-            map.insert("target_percent".to_string(), serde_json::json!(s.target_percent));
+            map.insert(
+                "target_percent".to_string(),
+                serde_json::json!(s.target_percent),
+            );
             if let Some(current) = s.current_percent {
                 map.insert("current_percent".to_string(), serde_json::json!(current));
             }
             if let Some(budget) = s.error_budget_remaining {
-                map.insert("error_budget_remaining".to_string(), serde_json::json!(budget));
+                map.insert(
+                    "error_budget_remaining".to_string(),
+                    serde_json::json!(budget),
+                );
             }
             map.insert("timeframe".to_string(), serde_json::json!(s.timeframe));
             if let Some(ref url) = s.dashboard_url {
                 map.insert("dashboard_url".to_string(), serde_json::json!(url));
             }
-            map.insert("monitored_routes".to_string(), serde_json::json!(s.monitored_routes));
+            map.insert(
+                "monitored_routes".to_string(),
+                serde_json::json!(s.monitored_routes),
+            );
             map
         })
         .collect();
@@ -1182,10 +1191,10 @@ fn quick_take_seed(response: &RAGQueryResponse) -> String {
 /// Finds patterns like 'unfault review --discover-observability' and highlights them.
 fn highlight_unfault_commands(hint: &str) -> String {
     use regex::Regex;
-    
+
     // Match 'unfault <command> [--flags...]' patterns
     let re = Regex::new(r"'(unfault\s+[^']+)'").unwrap();
-    
+
     re.replace_all(hint, |caps: &regex::Captures| {
         format!("'{}'", caps[1].bright_yellow())
     })
@@ -1226,14 +1235,11 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
                 ],
             );
 
-            let mut summary = format!(
-                "{} You have {} SLO(s) configured.",
-                opener,
-                slo_count
-            );
+            let mut summary = format!("{} You have {} SLO(s) configured.", opener, slo_count);
 
             if total_routes > 0 {
-                let coverage = (monitored_count as f64 / total_routes as f64 * 100.0).round() as i32;
+                let coverage =
+                    (monitored_count as f64 / total_routes as f64 * 100.0).round() as i32;
                 summary.push_str(&format!(
                     " {}/{} routes are monitored ({}% coverage).",
                     monitored_count, total_routes, coverage
@@ -1245,7 +1251,7 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
                 .slos
                 .iter()
                 .take(3)
-                .filter_map(|s| Some(s.name.as_str()))
+                .map(|s| s.name.as_str())
                 .collect();
             if !slo_names.is_empty() {
                 summary.push_str(&format!(" SLOs: {}.", slo_names.join(", ")));
