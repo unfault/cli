@@ -487,12 +487,37 @@ async fn execute_client_parse(
                         let linked = enricher.enrich_graph(&mut graph, &slos).unwrap_or(0);
                         if args.verbose {
                             eprintln!(
-                                "\n{} Discovered {} SLOs, linked {} to routes",
+                                "\n{} Discovered {} SLO(s), linked {} to route handler(s)",
                                 "DEBUG".yellow(),
                                 slos.len(),
                                 linked
                             );
+                            for slo in &slos {
+                                let budget_info = slo.error_budget_remaining
+                                    .map(|b| format!(", budget: {:.1}%", b))
+                                    .unwrap_or_default();
+                                let current_info = slo.current_percent
+                                    .map(|c| format!(" (current: {:.2}%)", c))
+                                    .unwrap_or_default();
+                                eprintln!(
+                                    "  {} {} [{}]: target {:.2}%{}{}",
+                                    "→".cyan(),
+                                    slo.name,
+                                    slo.provider,
+                                    slo.target_percent,
+                                    current_info,
+                                    budget_info
+                                );
+                                if let Some(ref pattern) = slo.path_pattern {
+                                    eprintln!("    path pattern: {}", pattern.dimmed());
+                                }
+                            }
                         }
+                    } else if args.verbose {
+                        eprintln!(
+                            "\n{} No SLOs found from providers (check that SLOs exist and have URL/path metadata)",
+                            "DEBUG".yellow()
+                        );
                     }
                 }
                 Err(e) => {

@@ -170,10 +170,21 @@ impl SloEnricher {
 
             if self.verbose {
                 eprintln!(
-                    "  SLO '{}' matched {} route(s)",
+                    "  SLO '{}' matched {} route(s):",
                     slo.name,
                     matching_routes.len()
                 );
+                // Show matched route details
+                for idx in &matching_routes {
+                    if let Some((http_method, http_path, func_name)) = graph.get_route_info(*idx) {
+                        eprintln!(
+                            "    → {} {} ({})",
+                            http_method.unwrap_or("*".to_string()),
+                            http_path,
+                            func_name
+                        );
+                    }
+                }
             }
 
             // Add SLO node and edges to graph

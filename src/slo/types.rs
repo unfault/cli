@@ -1,5 +1,7 @@
 //! SLO type definitions shared across providers.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 /// The provider source for an SLO.
@@ -11,6 +13,16 @@ pub enum SloProviderKind {
     Datadog,
     /// Dynatrace
     Dynatrace,
+}
+
+impl fmt::Display for SloProviderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SloProviderKind::Gcp => write!(f, "GCP"),
+            SloProviderKind::Datadog => write!(f, "Datadog"),
+            SloProviderKind::Dynatrace => write!(f, "Dynatrace"),
+        }
+    }
 }
 
 impl SloProviderKind {
