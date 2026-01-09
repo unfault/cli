@@ -59,6 +59,9 @@ struct NodeRecord<'a> {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     category: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    var_name: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -178,9 +181,16 @@ fn node_id_for_node(node: &GraphNode, ctx: &mut IdContext) -> String {
             let file_node_id = ctx.get_file_id(&file_path);
             compute_symbol_id(&file_node_id, name)
         }
-        GraphNode::FastApiApp { .. }
-        | GraphNode::FastApiRoute { .. }
-        | GraphNode::FastApiMiddleware { .. } => {
+        GraphNode::FastApiApp { file_id, var_name } => {
+            let file_path = match ctx.get_path(file_id) {
+                Some(p) => p.clone(),
+                None => return String::new(),
+            };
+            let file_node_id = ctx.get_file_id(&file_path);
+            // Use "fastapi_app:{var_name}" as the symbol name for uniqueness
+            compute_symbol_id(&file_node_id, &format!("fastapi_app:{}", var_name))
+        }
+        GraphNode::FastApiRoute { .. } | GraphNode::FastApiMiddleware { .. } => {
             // Not currently persisted.
             String::new()
         }
@@ -251,6 +261,7 @@ pub fn encode_nodes_chunk(
                     http_method: None,
                     http_path: None,
                     category: None,
+                    var_name: None,
                 },
             )?,
             GraphNode::ExternalModule { name, category } => push_frame(
@@ -269,6 +280,7 @@ pub fn encode_nodes_chunk(
                     http_method: None,
                     http_path: None,
                     category: Some(format!("{:?}", category)),
+                    var_name: None,
                 },
             )?,
             GraphNode::Function {
@@ -301,6 +313,7 @@ pub fn encode_nodes_chunk(
                         http_method: http_method.as_deref(),
                         http_path: http_path.as_deref(),
                         category: None,
+                        var_name: None,
                     },
                 )?
             }
@@ -322,12 +335,33 @@ pub fn encode_nodes_chunk(
                         http_method: None,
                         http_path: None,
                         category: None,
+                        var_name: None,
                     },
                 )?
             }
-            GraphNode::FastApiApp { .. }
-            | GraphNode::FastApiRoute { .. }
-            | GraphNode::FastApiMiddleware { .. } => continue,
+            GraphNode::FastApiApp { file_id, var_name } => {
+                let file_path = ctx.get_path(file_id).cloned();
+                push_frame(
+                    &mut raw,
+                    &NodeRecord {
+                        record_type: "node",
+                        node_id,
+                        node_type: "fastapi_app",
+                        path: None,
+                        language: None,
+                        name: None,
+                        qualified_name: None,
+                        file_path,
+                        is_async: None,
+                        is_handler: None,
+                        http_method: None,
+                        http_path: None,
+                        category: None,
+                        var_name: Some(var_name),
+                    },
+                )?
+            }
+            GraphNode::FastApiRoute { .. } | GraphNode::FastApiMiddleware { .. } => continue,
         };
 
         hasher.update(&frame);
