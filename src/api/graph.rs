@@ -453,6 +453,24 @@ pub struct FunctionCaller {
     /// HTTP method if this is a route handler (e.g., "POST", "GET")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_method: Option<String>,
+    /// SLOs monitoring this route (if is_route_handler)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slos: Option<Vec<RouteSloInfo>>,
+}
+
+/// SLO information for a route handler
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RouteSloInfo {
+    /// Human-readable SLO name
+    pub name: String,
+    /// Monitoring provider (gcp, datadog, dynatrace)
+    pub provider: String,
+    /// Target availability/latency percentage
+    pub target_percent: Option<f64>,
+    /// Remaining error budget as percentage (0-100)
+    pub error_budget_remaining: Option<f64>,
+    /// Direct link to the SLO in the provider's dashboard
+    pub dashboard_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -137,6 +137,21 @@ pub struct FunctionImpactCaller {
 pub struct FunctionImpactRoute {
     pub method: String,
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slos: Option<Vec<FunctionImpactSlo>>,
+}
+
+/// SLO information for function impact response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionImpactSlo {
+    pub name: String,
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_budget_remaining: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dashboard_url: Option<String>,
 }
 
 /// Finding information for function impact response
@@ -2414,9 +2429,22 @@ impl LanguageServer for UnfaultLsp {
             .filter(|c| c.is_route_handler)
         {
             if let (Some(m), Some(p)) = (&c.route_method, &c.route_path) {
+                let slos = c.slos.as_ref().map(|slo_list| {
+                    slo_list
+                        .iter()
+                        .map(|s| FunctionImpactSlo {
+                            name: s.name.clone(),
+                            provider: s.provider.clone(),
+                            target_percent: s.target_percent,
+                            error_budget_remaining: s.error_budget_remaining,
+                            dashboard_url: s.dashboard_url.clone(),
+                        })
+                        .collect()
+                });
                 routes.push(FunctionImpactRoute {
                     method: m.to_uppercase(),
                     path: p.clone(),
+                    slos,
                 });
             }
         }
@@ -2539,9 +2567,22 @@ impl UnfaultLsp {
             .filter(|c| c.is_route_handler)
         {
             if let (Some(m), Some(p)) = (&c.route_method, &c.route_path) {
+                let slos = c.slos.as_ref().map(|slo_list| {
+                    slo_list
+                        .iter()
+                        .map(|s| FunctionImpactSlo {
+                            name: s.name.clone(),
+                            provider: s.provider.clone(),
+                            target_percent: s.target_percent,
+                            error_budget_remaining: s.error_budget_remaining,
+                            dashboard_url: s.dashboard_url.clone(),
+                        })
+                        .collect()
+                });
                 routes.push(FunctionImpactRoute {
                     method: m.to_uppercase(),
                     path: p.clone(),
+                    slos,
                 });
             }
         }
