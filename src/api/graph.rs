@@ -471,9 +471,17 @@ pub struct FunctionImpactResponse {
     /// The function being analyzed (file:function)
     pub function: String,
     /// Functions that directly call this function
+    #[serde(default)]
     pub direct_callers: Vec<FunctionCaller>,
-    /// All functions affected (including direct)
+    /// All functions affected via calls (including direct)
+    #[serde(default)]
     pub transitive_callers: Vec<FunctionCaller>,
+    /// Functions that directly use this function as a dependency (e.g., FastAPI Depends)
+    #[serde(default)]
+    pub direct_dependency_consumers: Vec<FunctionCaller>,
+    /// All functions affected via dependency injection (including direct)
+    #[serde(default)]
+    pub transitive_dependency_consumers: Vec<FunctionCaller>,
     /// Total number of affected functions
     pub total_affected: i32,
     /// Findings related to this function

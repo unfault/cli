@@ -1217,41 +1217,68 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         );
         println!();
 
+        let direct_call_count = response.direct_callers.len();
+        let direct_di_count = response.direct_dependency_consumers.len();
+        let total_direct = direct_call_count + direct_di_count;
+
+        let transitive_call_only: Vec<_> = response
+            .transitive_callers
+            .iter()
+            .filter(|c| c.depth > 1)
+            .collect();
+        let transitive_di_only: Vec<_> = response
+            .transitive_dependency_consumers
+            .iter()
+            .filter(|c| c.depth > 1)
+            .collect();
+
+        let transitive_call_count = transitive_call_only.len();
+        let transitive_di_count = transitive_di_only.len();
+
         if response.total_affected == 0 {
             println!(
-                "  {} No internal callers found in the call graph.",
+                "  {} No internal callers or dependency consumers found.",
                 "ℹ".blue()
             );
             println!(
-                "  {} That can mean it’s unused, or it’s called indirectly (framework hooks, dependency injection, reflection).",
+                "  {} This can still be invoked indirectly (framework hooks, reflection).",
                 "".dimmed()
             );
             println!();
             return Ok(EXIT_SUCCESS);
         }
 
-        // Calculate direct vs transitive
-        let direct_count = response.direct_callers.len();
-        let transitive_only: Vec<_> = response
-            .transitive_callers
-            .iter()
-            .filter(|c| c.depth > 1)
-            .collect();
-        let transitive_count = transitive_only.len();
-
-        println!(
-            "  {} This function is called from {} place(s)",
-            "→".cyan(),
-            response.total_affected.to_string().bold()
-        );
-        if transitive_count > 0 {
+        if response.direct_callers.is_empty() && !response.direct_dependency_consumers.is_empty() {
             println!(
-                "  {} {} direct, {} through call chains",
+                "  {} No callers found, but used as a dependency by {} place(s)",
+                "→".cyan(),
+                direct_di_count.to_string().bold()
+            );
+        } else {
+            println!(
+                "  {} This function is referenced from {} place(s)",
+                "→".cyan(),
+                response.total_affected.to_string().bold()
+            );
+            println!(
+                "  {} {} direct ({} calls, {} DI)",
                 "".dimmed(),
-                direct_count,
-                transitive_count
+                total_direct,
+                direct_call_count,
+                direct_di_count
             );
         }
+
+        if transitive_call_count > 0 || transitive_di_count > 0 {
+            println!(
+                "  {} {} through chains ({} call, {} DI)",
+                "".dimmed(),
+                transitive_call_count + transitive_di_count,
+                transitive_call_count,
+                transitive_di_count
+            );
+        }
+
         println!();
 
         // Direct callers
@@ -1270,15 +1297,34 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
             println!();
         }
 
+        // Direct dependency consumers
+        if !response.direct_dependency_consumers.is_empty() {
+            println!("{}", "Direct Dependency Consumers".bold().underline());
+            println!(
+                "{}",
+                "Functions that use this via dependency injection (Depends)".dimmed()
+            );
+            println!("{}", "─".repeat(60).dimmed());
+            for consumer in &response.direct_dependency_consumers {
+                println!(
+                    "  {} {} ({})",
+                    "•".cyan(),
+                    consumer.function.bright_white(),
+                    consumer.path.dimmed()
+                );
+            }
+            println!();
+        }
+
         // Transitive callers
-        if !transitive_only.is_empty() {
+        if !transitive_call_only.is_empty() {
             println!("{}", "Upstream Callers".bold().underline());
             println!(
                 "{}",
                 "Functions that depend on this through call chains".dimmed()
             );
             println!("{}", "─".repeat(60).dimmed());
-            for caller in transitive_only {
+            for caller in transitive_call_only {
                 let depth_indicator = "→".repeat(caller.depth as usize);
                 println!(
                     "  {} {} ({}) {}",
@@ -1286,6 +1332,27 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
                     caller.function.bright_white(),
                     caller.path.dimmed(),
                     format!("({} hops)", caller.depth).dimmed()
+                );
+            }
+            println!();
+        }
+
+        // Transitive dependency consumers
+        if !transitive_di_only.is_empty() {
+            println!("{}", "Upstream Dependency Consumers".bold().underline());
+            println!(
+                "{}",
+                "Functions that depend on this through DI chains".dimmed()
+            );
+            println!("{}", "─".repeat(60).dimmed());
+            for consumer in transitive_di_only {
+                let depth_indicator = "→".repeat(consumer.depth as usize);
+                println!(
+                    "  {} {} ({}) {}",
+                    depth_indicator.dimmed(),
+                    consumer.function.bright_white(),
+                    consumer.path.dimmed(),
+                    format!("({} hops)", consumer.depth).dimmed()
                 );
             }
             println!();
@@ -1302,10 +1369,14 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
 
         if args.verbose {
             println!(
-                "  {} Direct: {}, Upstream: {}, Total: {}",
+                "  {} Direct: {} ({} calls, {} DI), Upstream: {} ({} calls, {} DI), Total: {}",
                 "Stats:".dimmed(),
-                direct_count,
-                transitive_count,
+                total_direct,
+                direct_call_count,
+                direct_di_count,
+                transitive_call_count + transitive_di_count,
+                transitive_call_count,
+                transitive_di_count,
                 response.total_affected
             );
             println!();
