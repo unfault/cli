@@ -42,6 +42,8 @@ pub struct SerializableGraph {
     pub library_usage: Vec<LibraryUsage>,
     /// Framework references (e.g., FastAPI lifespan handlers)
     pub framework_references: Vec<FrameworkReferenceEdge>,
+    /// SLO nodes from observability providers
+    pub slos: Vec<SloNode>,
     /// Graph statistics
     pub stats: GraphStats,
 }
@@ -114,6 +116,38 @@ pub struct FrameworkReferenceEdge {
     pub target_function: String,
     /// File containing the target function
     pub target_file: String,
+}
+
+/// An SLO (Service Level Objective) from an external observability provider.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SloNode {
+    /// Unique identifier from the provider
+    pub id: String,
+    /// Human-readable name
+    pub name: String,
+    /// Provider source (gcp, datadog, dynatrace)
+    pub provider: String,
+    /// URL path pattern this SLO monitors (e.g., "/api/users/*")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_pattern: Option<String>,
+    /// HTTP method if specific (e.g., "GET")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_method: Option<String>,
+    /// Target percentage (e.g., 99.9)
+    pub target_percent: f64,
+    /// Current evaluated percentage
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_percent: Option<f64>,
+    /// Error budget remaining as percentage
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_budget_remaining: Option<f64>,
+    /// Evaluation timeframe (e.g., "30d")
+    pub timeframe: String,
+    /// Direct link to SLO in provider dashboard
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dashboard_url: Option<String>,
+    /// Function names of route handlers this SLO monitors
+    pub monitored_routes: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -288,9 +322,14 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
     let mut dependency_injections = Vec::new();
     let mut library_usage = Vec::new();
     let mut framework_references = Vec::new();
+    let mut slos = Vec::new();
 
     // Build a map from FileId to path for file nodes
     let mut file_id_to_path: std::collections::HashMap<FileId, String> =
+        std::collections::HashMap::new();
+    
+    // Map from SLO node index to SloNode for collecting monitored routes
+    let mut slo_index_to_node: std::collections::HashMap<petgraph::graph::NodeIndex, SloNode> =
         std::collections::HashMap::new();
 
     // Extract nodes - iterate over all node indices
@@ -330,6 +369,44 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
                     http_method: http_method.clone(),
                     http_path: http_path.clone(),
                 });
+            }
+            GraphNode::Slo {
+                id,
+                name,
+                provider,
+                path_pattern,
+                http_method,
+                target_percent,
+                current_percent,
+                error_budget_remaining,
+                timeframe,
+                dashboard_url,
+            } => {
+                let provider_str = match provider {
+                    unfault_core::graph::SloProvider::Gcp => "gcp",
+                    unfault_core::graph::SloProvider::Datadog => "datadog",
+                    unfault_core::graph::SloProvider::Dynatrace => "dynatrace",
+                };
+                slo_index_to_node.insert(
+                    node_idx,
+                    SloNode {
+                        id: id.clone(),
+                        name: name.clone(),
+                        provider: provider_str.to_string(),
+                        path_pattern: if path_pattern.is_empty() {
+                            None
+                        } else {
+                            Some(path_pattern.clone())
+                        },
+                        http_method: http_method.clone(),
+                        target_percent: *target_percent,
+                        current_percent: *current_percent,
+                        error_budget_remaining: *error_budget_remaining,
+                        timeframe: timeframe.clone(),
+                        dashboard_url: dashboard_url.clone(),
+                        monitored_routes: Vec::new(), // Will be populated from MonitoredBy edges
+                    },
+                );
             }
             _ => {}
         }
@@ -485,9 +562,25 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
                     target_file,
                 });
             }
+            GraphEdgeKind::MonitoredBy => {
+                // Source is a Function (route handler), target is an SLO
+                let source_node = &graph.graph[source_idx];
+                let route_name = match source_node {
+                    GraphNode::Function { qualified_name, .. } => qualified_name.clone(),
+                    _ => continue,
+                };
+
+                // Add the route to the SLO's monitored_routes list
+                if let Some(slo_node) = slo_index_to_node.get_mut(&target_idx) {
+                    slo_node.monitored_routes.push(route_name);
+                }
+            }
             _ => {}
         }
     }
+
+    // Collect SLOs from the map into the vector
+    slos.extend(slo_index_to_node.into_values());
 
     let graph_stats = graph.stats();
 
@@ -502,6 +595,7 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
         dependency_injections,
         library_usage,
         framework_references,
+        slos,
         stats: GraphStats {
             file_count: graph_stats.file_count,
             function_count: graph_stats.function_count,

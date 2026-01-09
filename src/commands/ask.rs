@@ -138,6 +138,37 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
         })
         .collect();
 
+    // Convert SLOs
+    let slos: Vec<HashMap<String, serde_json::Value>> = graph
+        .slos
+        .iter()
+        .map(|s| {
+            let mut map = HashMap::new();
+            map.insert("id".to_string(), serde_json::json!(s.id));
+            map.insert("name".to_string(), serde_json::json!(s.name));
+            map.insert("provider".to_string(), serde_json::json!(s.provider));
+            if let Some(ref pattern) = s.path_pattern {
+                map.insert("path_pattern".to_string(), serde_json::json!(pattern));
+            }
+            if let Some(ref method) = s.http_method {
+                map.insert("http_method".to_string(), serde_json::json!(method));
+            }
+            map.insert("target_percent".to_string(), serde_json::json!(s.target_percent));
+            if let Some(current) = s.current_percent {
+                map.insert("current_percent".to_string(), serde_json::json!(current));
+            }
+            if let Some(budget) = s.error_budget_remaining {
+                map.insert("error_budget_remaining".to_string(), serde_json::json!(budget));
+            }
+            map.insert("timeframe".to_string(), serde_json::json!(s.timeframe));
+            if let Some(ref url) = s.dashboard_url {
+                map.insert("dashboard_url".to_string(), serde_json::json!(url));
+            }
+            map.insert("monitored_routes".to_string(), serde_json::json!(s.monitored_routes));
+            map
+        })
+        .collect();
+
     // Convert stats
     let mut stats = HashMap::new();
     stats.insert("file_count".to_string(), graph.stats.file_count as i32);
@@ -163,6 +194,7 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
         imports,
         contains,
         library_usage,
+        slos,
         stats,
     }
 }

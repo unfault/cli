@@ -38,6 +38,9 @@ pub struct ClientGraphData {
     /// External library usage.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub library_usage: Vec<HashMap<String, serde_json::Value>>,
+    /// SLO nodes from observability providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slos: Vec<HashMap<String, serde_json::Value>>,
     /// Graph statistics.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub stats: HashMap<String, i32>,

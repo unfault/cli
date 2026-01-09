@@ -62,6 +62,22 @@ struct NodeRecord<'a> {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     var_name: Option<&'a str>,
+
+    // SLO-specific fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slo_provider: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slo_path_pattern: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slo_target_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slo_current_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slo_error_budget_remaining: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slo_timeframe: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slo_dashboard_url: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -266,6 +282,13 @@ pub fn encode_nodes_chunk(
                     http_path: None,
                     category: None,
                     var_name: None,
+                    slo_provider: None,
+                    slo_path_pattern: None,
+                    slo_target_percent: None,
+                    slo_current_percent: None,
+                    slo_error_budget_remaining: None,
+                    slo_timeframe: None,
+                    slo_dashboard_url: None,
                 },
             )?,
             GraphNode::ExternalModule { name, category } => push_frame(
@@ -285,6 +308,13 @@ pub fn encode_nodes_chunk(
                     http_path: None,
                     category: Some(format!("{:?}", category)),
                     var_name: None,
+                    slo_provider: None,
+                    slo_path_pattern: None,
+                    slo_target_percent: None,
+                    slo_current_percent: None,
+                    slo_error_budget_remaining: None,
+                    slo_timeframe: None,
+                    slo_dashboard_url: None,
                 },
             )?,
             GraphNode::Function {
@@ -318,6 +348,13 @@ pub fn encode_nodes_chunk(
                         http_path: http_path.as_deref(),
                         category: None,
                         var_name: None,
+                        slo_provider: None,
+                        slo_path_pattern: None,
+                        slo_target_percent: None,
+                        slo_current_percent: None,
+                        slo_error_budget_remaining: None,
+                        slo_timeframe: None,
+                        slo_dashboard_url: None,
                     },
                 )?
             }
@@ -340,6 +377,13 @@ pub fn encode_nodes_chunk(
                         http_path: None,
                         category: None,
                         var_name: None,
+                        slo_provider: None,
+                        slo_path_pattern: None,
+                        slo_target_percent: None,
+                        slo_current_percent: None,
+                        slo_error_budget_remaining: None,
+                        slo_timeframe: None,
+                        slo_dashboard_url: None,
                     },
                 )?
             }
@@ -362,13 +406,61 @@ pub fn encode_nodes_chunk(
                         http_path: None,
                         category: None,
                         var_name: Some(var_name),
+                        slo_provider: None,
+                        slo_path_pattern: None,
+                        slo_target_percent: None,
+                        slo_current_percent: None,
+                        slo_error_budget_remaining: None,
+                        slo_timeframe: None,
+                        slo_dashboard_url: None,
                     },
                 )?
             }
             GraphNode::FastApiRoute { .. } | GraphNode::FastApiMiddleware { .. } => continue,
-            // SLO nodes are not persisted to the API for now
-            // They're used locally for graph enrichment
-            GraphNode::Slo { .. } => continue,
+            GraphNode::Slo {
+                name,
+                provider,
+                path_pattern,
+                http_method,
+                target_percent,
+                current_percent,
+                error_budget_remaining,
+                timeframe,
+                dashboard_url,
+                ..
+            } => {
+                let provider_str = match provider {
+                    unfault_core::graph::SloProvider::Gcp => "gcp",
+                    unfault_core::graph::SloProvider::Datadog => "datadog",
+                    unfault_core::graph::SloProvider::Dynatrace => "dynatrace",
+                };
+                push_frame(
+                    &mut raw,
+                    &NodeRecord {
+                        record_type: "node",
+                        node_id,
+                        node_type: "slo",
+                        path: None,
+                        language: None,
+                        name: Some(name),
+                        qualified_name: None,
+                        file_path: None,
+                        is_async: None,
+                        is_handler: None,
+                        http_method: http_method.as_deref(),
+                        http_path: None,
+                        category: None,
+                        var_name: None,
+                        slo_provider: Some(provider_str),
+                        slo_path_pattern: Some(path_pattern),
+                        slo_target_percent: Some(*target_percent),
+                        slo_current_percent: *current_percent,
+                        slo_error_budget_remaining: *error_budget_remaining,
+                        slo_timeframe: Some(timeframe),
+                        slo_dashboard_url: dashboard_url.as_deref(),
+                    },
+                )?
+            }
         };
 
         hasher.update(&frame);
