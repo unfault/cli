@@ -135,6 +135,10 @@ enum Commands {
         /// Include test files in analysis (default: skip tests)
         #[arg(long)]
         include_tests: bool,
+        /// Discover SLOs from observability platforms (GCP, Datadog, Dynatrace)
+        /// and link them to HTTP routes in the code graph
+        #[arg(long)]
+        discover_observability: bool,
     },
     /// Check authentication and service configuration status
     Status,
@@ -448,6 +452,7 @@ async fn run_command(command: Commands) -> i32 {
             dry_run,
             raw_findings,
             include_tests,
+            discover_observability,
         } => {
             init_logger(verbose);
             // Convert OutputFormat to string for backward compatibility
@@ -481,6 +486,7 @@ async fn run_command(command: Commands) -> i32 {
                 dry_run,
                 raw_findings,
                 include_tests,
+                discover_observability,
             };
             match commands::review::execute(args).await {
                 Ok(exit_code) => exit_code,

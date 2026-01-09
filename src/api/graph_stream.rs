@@ -194,6 +194,10 @@ fn node_id_for_node(node: &GraphNode, ctx: &mut IdContext) -> String {
             // Not currently persisted.
             String::new()
         }
+        GraphNode::Slo { id, .. } => {
+            // SLO nodes use their provider ID directly
+            format!("slo:{id}")
+        }
     }
 }
 
@@ -362,6 +366,9 @@ pub fn encode_nodes_chunk(
                 )?
             }
             GraphNode::FastApiRoute { .. } | GraphNode::FastApiMiddleware { .. } => continue,
+            // SLO nodes are not persisted to the API for now
+            // They're used locally for graph enrichment
+            GraphNode::Slo { .. } => continue,
         };
 
         hasher.update(&frame);
@@ -438,6 +445,7 @@ pub fn encode_edges_chunk(
             GraphEdgeKind::FastApiAppHasMiddleware => ("fastapi_app_has_middleware", None),
             GraphEdgeKind::DependencyInjection => ("dependency_injection", None),
             GraphEdgeKind::FastApiAppLifespan => ("fastapi_app_lifespan", None),
+            GraphEdgeKind::MonitoredBy => ("monitored_by", None),
         };
 
         let frame = push_frame(

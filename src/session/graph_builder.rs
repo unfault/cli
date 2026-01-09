@@ -525,6 +525,7 @@ fn get_file_path(
         | GraphNode::FastApiRoute { file_id, .. }
         | GraphNode::FastApiMiddleware { file_id, .. } => file_id_to_path.get(file_id).cloned(),
         GraphNode::ExternalModule { .. } => None,
+        GraphNode::Slo { .. } => None, // SLO nodes don't have a file association
     }
 }
 

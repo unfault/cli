@@ -93,6 +93,8 @@ pub struct ReviewArgs {
     pub raw_findings: bool,
     /// Include test files in analysis (default: skip tests)
     pub include_tests: bool,
+    /// Discover SLOs from observability platforms (GCP, Datadog, Dynatrace)
+    pub discover_observability: bool,
 }
 
 /// Execute the review command
@@ -454,7 +456,7 @@ async fn execute_client_parse(
         .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
 
     // Split IR into components so we can free memory early
-    let unfault_core::IntermediateRepresentation { semantics, graph } = ir;
+    let unfault_core::IntermediateRepresentation { semantics, mut graph } = ir;
 
     // Extract package export info for cross-workspace dependency tracking
     let meta_files: Vec<MetaFileInfo> = workspace_info
@@ -466,6 +468,46 @@ async fn execute_client_parse(
         })
         .collect();
     let package_export = extract_package_export(&meta_files);
+
+    // Step 2.5: Discover and link SLOs (if --discover-observability flag is set)
+    if args.discover_observability {
+        use crate::slo::SloEnricher;
+
+        let enricher = SloEnricher::new(args.verbose);
+        if enricher.any_provider_available() {
+            let providers = enricher.available_providers();
+            pb.set_message(format!(
+                "Discovering SLOs from {}...",
+                providers.join(", ")
+            ));
+
+            match enricher.fetch_all().await {
+                Ok(slos) => {
+                    if !slos.is_empty() {
+                        let linked = enricher.enrich_graph(&mut graph, &slos).unwrap_or(0);
+                        if args.verbose {
+                            eprintln!(
+                                "\n{} Discovered {} SLOs, linked {} to routes",
+                                "DEBUG".yellow(),
+                                slos.len(),
+                                linked
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    if args.verbose {
+                        eprintln!("\n{} SLO discovery failed: {}", "DEBUG".yellow(), e);
+                    }
+                }
+            }
+        } else if args.verbose {
+            eprintln!(
+                "\n{} No SLO provider credentials found (checked: DD_API_KEY, GCP ADC, DT_API_TOKEN)",
+                "DEBUG".yellow()
+            );
+        }
+    }
 
     // Step 3: Ingest full graph to API (streaming, compressed)
     pb.set_message("Uploading code graph... 0%");
