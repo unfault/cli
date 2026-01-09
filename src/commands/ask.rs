@@ -25,7 +25,7 @@ use crate::api::ApiClient;
 use crate::api::llm::{LlmClient, build_llm_context};
 use crate::api::rag::{
     ClientGraphData, RAGFlowContext, RAGFlowPathNode, RAGGraphContext, RAGQueryRequest,
-    RAGQueryResponse,
+    RAGQueryResponse, RAGSloContext,
 };
 use crate::config::Config;
 use crate::exit_codes::*;
@@ -371,6 +371,8 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
     };
 
     // Build local graph for flow analysis
+    // Note: SLOs are NOT discovered here - they come from stored graph data
+    // from a previous `review --discover-observability` run
     let graph_data = if args.verbose {
         eprintln!("{} Building local code graph...", "→".cyan());
 
@@ -382,7 +384,16 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
                     graph.stats.function_count,
                     graph.stats.calls_edge_count
                 );
-                Some(graph_to_client_data(&graph))
+                let client_data = graph_to_client_data(&graph);
+                if client_data.slos.is_empty() {
+                    eprintln!(
+                        "  {} No SLOs in local graph (will use stored SLOs if available)",
+                        "ℹ".dimmed()
+                    );
+                } else {
+                    eprintln!("  {} SLOs: {}", "→".cyan(), client_data.slos.len());
+                }
+                Some(client_data)
             }
             Err(e) => {
                 eprintln!("  {} Failed to build graph: {}", "⚠".yellow(), e);
@@ -982,6 +993,108 @@ fn render_impact_relation(idx: usize, rel: &crate::api::rag::RAGGraphFileRelatio
     }
 }
 
+/// Render SLO context showing SLO status and route monitoring coverage.
+fn render_slo_context(slo_context: &RAGSloContext, verbose: bool) {
+    println!("{} {}", "📊".cyan(), "SLO Status".bold());
+
+    // Summary line
+    let slo_count = slo_context.slos.len();
+    let monitored_count = slo_context.monitored_routes.len();
+    let unmonitored_count = slo_context.unmonitored_routes.len();
+    let total_routes = monitored_count + unmonitored_count;
+
+    if total_routes > 0 {
+        let coverage = (monitored_count as f64 / total_routes as f64 * 100.0).round() as i32;
+        println!(
+            "  {} {}/{} routes monitored ({}% coverage)",
+            "→".cyan(),
+            monitored_count.to_string().green(),
+            total_routes,
+            coverage
+        );
+    }
+
+    println!();
+
+    // List SLOs
+    println!("  {} SLOs ({}):", "→".cyan(), slo_count);
+    for slo in &slo_context.slos {
+        let target = slo
+            .target_percent
+            .map(|t| format!("{:.1}%", t))
+            .unwrap_or_else(|| "n/a".to_string());
+
+        let status = if let Some(budget) = slo.error_budget_remaining {
+            if budget < 10.0 {
+                format!("{:.1}% budget", budget).red().to_string()
+            } else if budget < 30.0 {
+                format!("{:.1}% budget", budget).yellow().to_string()
+            } else {
+                format!("{:.1}% budget", budget).green().to_string()
+            }
+        } else {
+            "budget n/a".dimmed().to_string()
+        };
+
+        println!(
+            "    {} {} [target: {}, {}]",
+            "•".cyan(),
+            slo.name.bright_white(),
+            target,
+            status
+        );
+
+        if verbose {
+            if let Some(ref url) = slo.dashboard_url {
+                println!("      {} {}", "Dashboard:".dimmed(), url.dimmed());
+            }
+            if let Some(ref pattern) = slo.path_pattern {
+                println!("      {} {}", "Pattern:".dimmed(), pattern.dimmed());
+            }
+        }
+    }
+
+    // Show unmonitored routes if any (in verbose mode or if there are few)
+    if !slo_context.unmonitored_routes.is_empty() {
+        let show_unmonitored = verbose || slo_context.unmonitored_routes.len() <= 5;
+
+        if show_unmonitored {
+            println!();
+            println!(
+                "  {} Unmonitored routes ({}):",
+                "⚠".yellow(),
+                slo_context.unmonitored_routes.len()
+            );
+            for route in slo_context.unmonitored_routes.iter().take(10) {
+                let method = route.http_method.as_deref().unwrap_or("?");
+                let path = route.http_path.as_deref().unwrap_or("?");
+                let file = route.file_path.as_deref().unwrap_or("");
+                println!(
+                    "    {} {} {} ({})",
+                    "•".dimmed(),
+                    method.yellow(),
+                    path,
+                    file.dimmed()
+                );
+            }
+            if slo_context.unmonitored_routes.len() > 10 {
+                println!(
+                    "    {} ... and {} more",
+                    "".dimmed(),
+                    slo_context.unmonitored_routes.len() - 10
+                );
+            }
+        } else {
+            println!();
+            println!(
+                "  {} {} unmonitored routes (use --verbose to see them)",
+                "⚠".yellow(),
+                slo_context.unmonitored_routes.len()
+            );
+        }
+    }
+}
+
 const MAX_ASK_WIDTH: usize = 80;
 
 fn wrap_paragraph(text: &str, width: usize) -> Vec<String> {
@@ -1094,6 +1207,52 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
         // Highlight unfault commands within the hint (e.g., 'unfault review --discover-observability')
         let styled_hint = highlight_unfault_commands(hint);
         return format!("{} {}", prefix, styled_hint);
+    }
+
+    // Handle SLO/Observability context
+    if let Some(slo_context) = &response.slo_context {
+        if !slo_context.slos.is_empty() {
+            let slo_count = slo_context.slos.len();
+            let monitored_count = slo_context.monitored_routes.len();
+            let unmonitored_count = slo_context.unmonitored_routes.len();
+            let total_routes = monitored_count + unmonitored_count;
+
+            let opener = pick_variant(
+                &seed,
+                &[
+                    "Here's what I found on SLOs:",
+                    "I found some SLO data:",
+                    "Here's the observability picture:",
+                ],
+            );
+
+            let mut summary = format!(
+                "{} You have {} SLO(s) configured.",
+                opener,
+                slo_count
+            );
+
+            if total_routes > 0 {
+                let coverage = (monitored_count as f64 / total_routes as f64 * 100.0).round() as i32;
+                summary.push_str(&format!(
+                    " {}/{} routes are monitored ({}% coverage).",
+                    monitored_count, total_routes, coverage
+                ));
+            }
+
+            // List SLO names
+            let slo_names: Vec<&str> = slo_context
+                .slos
+                .iter()
+                .take(3)
+                .filter_map(|s| Some(s.name.as_str()))
+                .collect();
+            if !slo_names.is_empty() {
+                summary.push_str(&format!(" SLOs: {}.", slo_names.join(", ")));
+            }
+
+            return summary;
+        }
     }
 
     if let Some(flow_context) = &response.flow_context {
@@ -1618,6 +1777,14 @@ fn output_formatted(
         }
     }
 
+    // Render SLO context if present
+    if let Some(slo_context) = &response.slo_context {
+        if !slo_context.slos.is_empty() {
+            render_slo_context(slo_context, verbose);
+            println!();
+        }
+    }
+
     // Print context summary (only in verbose mode when flow context is shown, or when no flow context)
     let show_summary = verbose;
 
@@ -1761,6 +1928,7 @@ mod tests {
                     },
                 ]],
             }),
+            slo_context: None,
             hint: None,
         };
 
@@ -1791,6 +1959,7 @@ mod tests {
             topic_label: None,
             graph_context: None,
             flow_context: None,
+            slo_context: None,
             hint: None,
         };
 
@@ -1835,6 +2004,7 @@ mod tests {
             topic_label: None,
             graph_context: None,
             flow_context: None,
+            slo_context: None,
             hint: Some("Please specify a file path or symbol".to_string()),
         };
 

@@ -443,18 +443,6 @@ async fn execute_client_parse(
         );
     }
 
-    // Step 2: Compute workspace ID
-    let git_remote = get_git_remote(current_dir);
-    let workspace_id_result = compute_workspace_id(
-        git_remote.as_deref(),
-        None, // No meta files in client-side parsing (could be added later)
-        Some(workspace_label),
-    );
-    let workspace_id = workspace_id_result
-        .as_ref()
-        .map(|r| r.id.clone())
-        .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
-
     // Split IR into components so we can free memory early
     let unfault_core::IntermediateRepresentation { semantics, mut graph } = ir;
 
@@ -468,6 +456,24 @@ async fn execute_client_parse(
         })
         .collect();
     let package_export = extract_package_export(&meta_files);
+
+    // Step 2: Compute workspace ID
+    // Use git remote first, then manifest files (pyproject.toml, etc.), then fallback to label
+    // This must match the workspace ID computation in `ask` command for consistency
+    let git_remote = get_git_remote(current_dir);
+    let workspace_id_result = compute_workspace_id(
+        git_remote.as_deref(),
+        if meta_files.is_empty() {
+            None
+        } else {
+            Some(&meta_files)
+        },
+        Some(workspace_label),
+    );
+    let workspace_id = workspace_id_result
+        .as_ref()
+        .map(|r| r.id.clone())
+        .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
 
     // Step 2.5: Discover and link SLOs (if --discover-observability flag is set)
     if args.discover_observability {

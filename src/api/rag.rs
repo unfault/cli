@@ -215,6 +215,8 @@ pub struct RAGQueryResponse {
     pub graph_context: Option<RAGGraphContext>,
     /// Flow-based context for call path tracing queries.
     pub flow_context: Option<RAGFlowContext>,
+    /// SLO/Observability context for monitoring queries.
+    pub slo_context: Option<RAGSloContext>,
     /// Actionable hint when the query cannot be fully answered.
     pub hint: Option<String>,
 }
@@ -258,6 +260,86 @@ pub struct RAGGraphDependency {
     pub category: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+}
+
+/// SLO (Service Level Objective) information.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGSloInfo {
+    /// Unique identifier for the SLO.
+    pub id: String,
+    /// Human-readable name (e.g., "Availability - 99.9% over 30d").
+    pub name: String,
+    /// Provider (gcp, datadog, dynatrace).
+    pub provider: String,
+    /// Path pattern this SLO monitors (e.g., "/api/*").
+    pub path_pattern: Option<String>,
+    /// HTTP method filter (e.g., "GET").
+    pub http_method: Option<String>,
+    /// Target percentage for the SLO.
+    pub target_percent: Option<f64>,
+    /// Current percentage (if available from provider).
+    pub current_percent: Option<f64>,
+    /// Remaining error budget percentage.
+    pub error_budget_remaining: Option<f64>,
+    /// Timeframe (e.g., "rolling_2592000").
+    pub timeframe: Option<String>,
+    /// URL to the SLO dashboard.
+    pub dashboard_url: Option<String>,
+}
+
+/// SLO reference in a route (simplified version of RAGSloInfo).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGRouteSloRef {
+    /// SLO identifier.
+    pub slo_id: String,
+    /// Human-readable name.
+    pub slo_name: String,
+    /// Provider (gcp, datadog, dynatrace).
+    pub provider: String,
+    /// Target percentage for the SLO.
+    pub target_percent: Option<f64>,
+    /// Current percentage (if available).
+    pub current_percent: Option<f64>,
+    /// Remaining error budget percentage.
+    pub error_budget_remaining: Option<f64>,
+}
+
+/// Route monitoring status from SLO context.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGMonitoredRoute {
+    /// Route identifier.
+    pub route_id: Option<String>,
+    /// Route name (function name).
+    pub route_name: Option<String>,
+    /// HTTP method (GET, POST, etc.).
+    pub http_method: Option<String>,
+    /// HTTP path (e.g., "/users/{id}").
+    pub http_path: Option<String>,
+    /// File path where the route is defined.
+    pub file_path: Option<String>,
+    /// Whether this route is monitored by an SLO.
+    #[serde(default)]
+    pub is_monitored: bool,
+    /// SLOs monitoring this route (for monitored routes).
+    #[serde(default)]
+    pub slos: Vec<RAGRouteSloRef>,
+}
+
+/// SLO context for observability queries.
+///
+/// Returned when the query asks about SLOs, monitoring, or observability.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGSloContext {
+    /// List of SLOs discovered from observability providers.
+    pub slos: Vec<RAGSloInfo>,
+    /// Routes that are monitored by at least one SLO.
+    #[serde(default)]
+    pub monitored_routes: Vec<RAGMonitoredRoute>,
+    /// Routes that are NOT monitored by any SLO.
+    #[serde(default)]
+    pub unmonitored_routes: Vec<RAGMonitoredRoute>,
+    /// Summary string for display.
+    pub summary: Option<String>,
 }
 
 // =============================================================================
