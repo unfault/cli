@@ -2422,6 +2422,31 @@ impl LanguageServer for UnfaultLsp {
             }
         }
         let mut routes = Vec::new();
+
+        // If the target function itself is a route handler, include it first
+        if response.is_route_handler {
+            if let (Some(m), Some(p)) = (&response.route_method, &response.route_path) {
+                let slos = response.slos.as_ref().map(|slo_list| {
+                    slo_list
+                        .iter()
+                        .map(|s| FunctionImpactSlo {
+                            name: s.name.clone(),
+                            provider: s.provider.clone(),
+                            target_percent: s.target_percent,
+                            error_budget_remaining: s.error_budget_remaining,
+                            dashboard_url: s.dashboard_url.clone(),
+                        })
+                        .collect()
+                });
+                routes.push(FunctionImpactRoute {
+                    method: m.to_uppercase(),
+                    path: p.clone(),
+                    slos,
+                });
+            }
+        }
+
+        // Also include routes from callers (for nested functions)
         for c in response
             .direct_callers
             .iter()
@@ -2448,6 +2473,7 @@ impl LanguageServer for UnfaultLsp {
                 });
             }
         }
+
         let findings: Vec<FunctionImpactFinding> = response
             .findings
             .into_iter()
@@ -2560,6 +2586,31 @@ impl UnfaultLsp {
             }
         }
         let mut routes = Vec::new();
+
+        // If the target function itself is a route handler, include it first
+        if response.is_route_handler {
+            if let (Some(m), Some(p)) = (&response.route_method, &response.route_path) {
+                let slos = response.slos.as_ref().map(|slo_list| {
+                    slo_list
+                        .iter()
+                        .map(|s| FunctionImpactSlo {
+                            name: s.name.clone(),
+                            provider: s.provider.clone(),
+                            target_percent: s.target_percent,
+                            error_budget_remaining: s.error_budget_remaining,
+                            dashboard_url: s.dashboard_url.clone(),
+                        })
+                        .collect()
+                });
+                routes.push(FunctionImpactRoute {
+                    method: m.to_uppercase(),
+                    path: p.clone(),
+                    slos,
+                });
+            }
+        }
+
+        // Also include routes from callers (for nested functions)
         for c in response
             .direct_callers
             .iter()
@@ -2586,6 +2637,7 @@ impl UnfaultLsp {
                 });
             }
         }
+
         let findings: Vec<FunctionImpactFinding> = response
             .findings
             .into_iter()

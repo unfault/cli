@@ -693,6 +693,16 @@ async fn execute_client_parse(
     // Step 3: Ingest full graph to API (streaming, compressed)
     pb.set_message("Uploading code graph... 0%");
 
+    if args.verbose {
+        eprintln!(
+            "\n{} Graph stats before upload: {} SLO nodes, {} total nodes, {} edges",
+            "DEBUG".yellow(),
+            graph.slo_nodes.len(),
+            graph.graph.node_count(),
+            graph.graph.edge_count()
+        );
+    }
+
     let ingest_start = Instant::now();
     let pb_upload = pb.clone();
     let ingest = match api_client

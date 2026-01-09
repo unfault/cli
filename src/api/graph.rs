@@ -504,6 +504,18 @@ pub struct FrameworkReference {
 pub struct FunctionImpactResponse {
     /// The function being analyzed (file:function)
     pub function: String,
+    /// Whether the target function is an HTTP route handler
+    #[serde(default)]
+    pub is_route_handler: bool,
+    /// HTTP method if target is a route handler (GET, POST, etc.)
+    #[serde(default)]
+    pub route_method: Option<String>,
+    /// HTTP path if target is a route handler (/api/users, etc.)
+    #[serde(default)]
+    pub route_path: Option<String>,
+    /// SLOs monitoring this function if it's a route handler
+    #[serde(default)]
+    pub slos: Option<Vec<RouteSloInfo>>,
     /// Functions that directly call this function
     #[serde(default)]
     pub direct_callers: Vec<FunctionCaller>,
