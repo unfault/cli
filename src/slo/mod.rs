@@ -207,6 +207,114 @@ impl SloEnricher {
 
         Ok(added)
     }
+
+    /// Link a service-level SLO to all HTTP route handlers in the graph.
+    ///
+    /// This is used when an SLO covers an entire service (e.g., Cloud Run)
+    /// rather than specific paths.
+    ///
+    /// Returns the number of routes linked.
+    pub fn link_service_slo_to_all_routes(
+        &self,
+        graph: &mut CodeGraph,
+        slo: &SloDefinition,
+    ) -> usize {
+        let routes = graph.get_http_route_handlers();
+        let route_count = routes.len();
+        let route_indices: Vec<_> = routes.iter().map(|(idx, _, _)| *idx).collect();
+
+        if route_indices.is_empty() {
+            if self.verbose {
+                eprintln!("  No HTTP routes found to link to SLO '{}'", slo.name);
+            }
+            return 0;
+        }
+
+        if self.verbose {
+            eprintln!(
+                "  Linking SLO '{}' to {} route(s):",
+                slo.name,
+                route_count
+            );
+            for (idx, http_path, http_method) in &routes {
+                if let Some((_, _, func_name)) = graph.get_route_info(*idx) {
+                    eprintln!(
+                        "    → {} {} ({})",
+                        http_method.unwrap_or(&"*"),
+                        http_path,
+                        func_name
+                    );
+                }
+            }
+        }
+
+        // Drop the borrow before mutating
+        drop(routes);
+
+        graph.add_slo(
+            slo.id.clone(),
+            slo.name.clone(),
+            slo.provider.to_core(),
+            slo.path_pattern.clone().unwrap_or_else(|| "*".to_string()),
+            slo.http_method.clone(),
+            slo.target_percent,
+            slo.current_percent,
+            slo.error_budget_remaining,
+            slo.timeframe.clone(),
+            slo.dashboard_url.clone(),
+            route_indices,
+        );
+
+        route_count
+    }
+}
+
+/// Get service-level SLOs (those without path patterns).
+///
+/// These are SLOs that apply to an entire service rather than specific paths.
+pub fn get_service_level_slos(slos: &[SloDefinition]) -> Vec<&SloDefinition> {
+    slos.iter().filter(|s| !s.has_path_pattern()).collect()
+}
+
+/// Group SLOs by their service name.
+///
+/// For GCP, the service name is extracted from the SLO ID:
+/// `projects/xxx/services/SERVICE_NAME/serviceLevelObjectives/yyy`
+pub fn group_slos_by_service(slos: &[SloDefinition]) -> std::collections::HashMap<String, Vec<&SloDefinition>> {
+    let mut groups: std::collections::HashMap<String, Vec<&SloDefinition>> = std::collections::HashMap::new();
+
+    for slo in slos {
+        let service_name = extract_service_name(&slo.id);
+        groups.entry(service_name).or_default().push(slo);
+    }
+
+    groups
+}
+
+/// Extract the service name from an SLO ID.
+///
+/// GCP format: `projects/xxx/services/SERVICE_ID/serviceLevelObjectives/yyy`
+/// Returns the full service path up to (and including) the service ID.
+fn extract_service_name(slo_id: &str) -> String {
+    // Find the position of "/serviceLevelObjectives/"
+    if let Some(pos) = slo_id.find("/serviceLevelObjectives/") {
+        slo_id[..pos].to_string()
+    } else {
+        // Fallback: use the whole ID
+        slo_id.to_string()
+    }
+}
+
+/// Get a human-friendly display name for a service.
+///
+/// Extracts just the service ID from the full path.
+pub fn get_service_display_name(service_name: &str) -> String {
+    // GCP format: projects/xxx/services/SERVICE_ID
+    if let Some(pos) = service_name.rfind("/services/") {
+        service_name[pos + "/services/".len()..].to_string()
+    } else {
+        service_name.to_string()
+    }
 }
 
 #[cfg(test)]

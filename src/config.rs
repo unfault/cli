@@ -169,6 +169,11 @@ pub struct Config {
     /// LLM configuration for AI-powered insights (optional)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm: Option<LlmConfig>,
+    /// Workspace to GCP service mappings for SLO linking
+    /// Key: workspace_id (e.g., "wks_abc123")
+    /// Value: GCP service name (e.g., "projects/xxx/services/api-service")
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub workspace_services: std::collections::HashMap<String, String>,
 }
 
 /// Default base URL for storage (without env var override)
@@ -198,6 +203,7 @@ impl Config {
             api_key,
             stored_base_url: DEFAULT_BASE_URL.to_string(),
             llm: None,
+            workspace_services: std::collections::HashMap::new(),
         }
     }
 
@@ -212,6 +218,7 @@ impl Config {
             api_key,
             stored_base_url: base_url,
             llm: None,
+            workspace_services: std::collections::HashMap::new(),
         }
     }
 
@@ -234,6 +241,21 @@ impl Config {
     /// Check if LLM is configured and ready to use
     pub fn llm_ready(&self) -> bool {
         self.llm.as_ref().map(|l| l.is_ready()).unwrap_or(false)
+    }
+
+    /// Get the GCP service mapped to a workspace
+    pub fn get_workspace_service(&self, workspace_id: &str) -> Option<&String> {
+        self.workspace_services.get(workspace_id)
+    }
+
+    /// Set the GCP service for a workspace
+    pub fn set_workspace_service(&mut self, workspace_id: String, service_name: String) {
+        self.workspace_services.insert(workspace_id, service_name);
+    }
+
+    /// Remove the GCP service mapping for a workspace
+    pub fn remove_workspace_service(&mut self, workspace_id: &str) -> Option<String> {
+        self.workspace_services.remove(workspace_id)
     }
 
     /// Load configuration from the default config file

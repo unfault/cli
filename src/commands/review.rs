@@ -223,7 +223,7 @@ fn format_list_dimmed(values: &[String], separator: &str) -> String {
 
 pub async fn execute(args: ReviewArgs) -> Result<i32> {
     // Load configuration
-    let config = match Config::load() {
+    let mut config = match Config::load() {
         Ok(config) => config,
         Err(e) => {
             display_config_error(&format!("{}", e));
@@ -314,7 +314,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     // Client-side parsing
     execute_client_parse(
         &args,
-        &config,
+        &mut config,
         &api_client,
         &trace_id,
         &current_dir,
@@ -366,7 +366,7 @@ fn is_test_path(path: &str) -> bool {
 
 async fn execute_client_parse(
     args: &ReviewArgs,
-    config: &Config,
+    config: &mut Config,
     api_client: &ApiClient,
     trace_id: &str,
     current_dir: &std::path::Path,
@@ -471,7 +471,8 @@ async fn execute_client_parse(
 
     // Step 2.5: Discover and link SLOs (if --discover-observability flag is set)
     if args.discover_observability {
-        use crate::slo::SloEnricher;
+        use crate::slo::{SloEnricher, get_service_level_slos, group_slos_by_service, get_service_display_name};
+        use std::io::{self, Write};
 
         let enricher = SloEnricher::new(args.verbose);
         if enricher.any_provider_available() {
@@ -484,10 +485,138 @@ async fn execute_client_parse(
             match enricher.fetch_all().await {
                 Ok(slos) => {
                     if !slos.is_empty() {
+                        // First, link SLOs that have path patterns (automatic matching)
                         let linked = enricher.enrich_graph(&mut graph, &slos).unwrap_or(0);
+                        
+                        // Check for service-level SLOs (no path pattern)
+                        let service_slos = get_service_level_slos(&slos);
+                        
+                        if !service_slos.is_empty() {
+                            // Check if we have a stored mapping for this workspace
+                            let stored_service = config.get_workspace_service(&workspace_id).cloned();
+                            
+                            if let Some(ref service_name) = stored_service {
+                                // Use stored mapping - link all SLOs for that service
+                                pb.suspend(|| {
+                                    if args.verbose {
+                                        eprintln!(
+                                            "\n{} Using saved service mapping: {}",
+                                            "DEBUG".yellow(),
+                                            get_service_display_name(service_name)
+                                        );
+                                    }
+                                });
+                                
+                                let grouped = group_slos_by_service(&slos);
+                                if let Some(service_slos) = grouped.get(service_name) {
+                                    for slo in service_slos {
+                                        enricher.link_service_slo_to_all_routes(&mut graph, slo);
+                                    }
+                                }
+                            } else {
+                                // No stored mapping - prompt user
+                                let grouped = group_slos_by_service(&slos);
+                                
+                                if !grouped.is_empty() {
+                                    // Finish the progress bar before prompting
+                                    pb.finish_and_clear();
+                                    
+                                    eprintln!();
+                                    eprintln!(
+                                        "We found SLOs in your GCP project that apply to entire services."
+                                    );
+                                    eprintln!(
+                                        "Which service does this codebase deploy to?"
+                                    );
+                                    eprintln!();
+                                    
+                                    let services: Vec<_> = grouped.keys().collect();
+                                    for (i, service_name) in services.iter().enumerate() {
+                                        let display_name = get_service_display_name(service_name);
+                                        eprintln!("  [{}] {}", i + 1, display_name.cyan());
+                                        
+                                        // Show SLOs for this service
+                                        if let Some(slos) = grouped.get(*service_name) {
+                                            for slo in slos {
+                                                let status = if let Some(budget) = slo.error_budget_remaining {
+                                                    if budget < 20.0 {
+                                                        format!("{:.0}% budget remaining", budget).yellow().to_string()
+                                                    } else {
+                                                        "healthy".green().to_string()
+                                                    }
+                                                } else {
+                                                    "".to_string()
+                                                };
+                                                eprintln!(
+                                                    "      └─ {:.0}% {} {}",
+                                                    slo.target_percent,
+                                                    slo.name.dimmed(),
+                                                    status
+                                                );
+                                            }
+                                        }
+                                    }
+                                    eprintln!("  [s] Skip (don't link SLOs)");
+                                    eprintln!();
+                                    eprint!("> ");
+                                    io::stderr().flush().ok();
+                                    
+                                    // Read user input
+                                    let mut input = String::new();
+                                    if io::stdin().read_line(&mut input).is_ok() {
+                                        let input = input.trim().to_lowercase();
+                                        
+                                        if input != "s" && input != "skip" {
+                                            if let Ok(choice) = input.parse::<usize>() {
+                                                if choice > 0 && choice <= services.len() {
+                                                    let selected_service = services[choice - 1].clone();
+                                                    
+                                                    // Link all SLOs for this service
+                                                    if let Some(slos_to_link) = grouped.get(&selected_service) {
+                                                        let mut total_linked = 0;
+                                                        for slo in slos_to_link {
+                                                            total_linked += enricher.link_service_slo_to_all_routes(&mut graph, slo);
+                                                        }
+                                                        
+                                                        eprintln!(
+                                                            "\n{} Linked {} SLO(s) to {} route handler(s).",
+                                                            "✓".green().bold(),
+                                                            slos_to_link.len(),
+                                                            total_linked
+                                                        );
+                                                    }
+                                                    
+                                                    // Save the mapping
+                                                    config.set_workspace_service(workspace_id.clone(), selected_service.clone());
+                                                    if let Err(e) = config.save() {
+                                                        if args.verbose {
+                                                            eprintln!(
+                                                                "{} Failed to save config: {}",
+                                                                "DEBUG".yellow(),
+                                                                e
+                                                            );
+                                                        }
+                                                    } else {
+                                                        eprintln!(
+                                                            "  {}",
+                                                            "(Saved to config, won't ask again for this workspace)".dimmed()
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Recreate progress bar for remaining steps
+                                    pb.reset();
+                                    pb.set_message("Uploading code graph... 0%");
+                                }
+                            }
+                        }
+                        
                         if args.verbose {
                             eprintln!(
-                                "\n{} Discovered {} SLO(s), linked {} to route handler(s)",
+                                "\n{} Discovered {} SLO(s), linked {} via path patterns",
                                 "DEBUG".yellow(),
                                 slos.len(),
                                 linked
