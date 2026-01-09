@@ -55,8 +55,8 @@ pub use workspace::{
     DetectedFramework, ProgressCallback, ScanProgress, WorkspaceInfo, WorkspaceScanner,
 };
 pub use workspace_id::{
-    MetaFileInfo, WorkspaceIdResult, WorkspaceIdSource, compute_workspace_id, get_git_remote,
-    normalize_git_remote,
+    MetaFileInfo, WorkspaceIdResult, WorkspaceIdSource, compute_file_id, compute_symbol_id,
+    compute_workspace_id, get_git_remote, normalize_git_remote, normalize_rel_path,
 };
 pub use workspace_settings::{
     LoadedSettings, RuleSettings, SettingsSource, WorkspaceSettings, load_settings,

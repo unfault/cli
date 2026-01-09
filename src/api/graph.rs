@@ -875,10 +875,18 @@ impl ApiClient {
         api_key: &str,
         workspace_id: &str,
         workspace_label: Option<&str>,
+        git_remote: Option<&str>,
         graph: unfault_core::graph::CodeGraph,
     ) -> Result<GraphIngestResponse, ApiError> {
-        self.ingest_graph_with_progress(api_key, workspace_id, workspace_label, graph, |_| {})
-            .await
+        self.ingest_graph_with_progress(
+            api_key,
+            workspace_id,
+            workspace_label,
+            git_remote,
+            graph,
+            |_| {},
+        )
+        .await
     }
 
     /// Ingest a full code graph into the API, reporting progress snapshots.
@@ -886,20 +894,38 @@ impl ApiClient {
     /// This is identical to `ingest_graph` but calls `on_progress` after each
     /// accepted chunk (and after state refreshes), allowing the CLI to show
     /// a percentage to users.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - API authentication key
+    /// * `workspace_id` - Workspace identifier (e.g., "wks_abc123...")
+    /// * `workspace_label` - Human-readable workspace label
+    /// * `git_remote` - Git remote URL for computing stable file IDs. If provided,
+    ///   file IDs will be globally unique across machines for the same repo.
+    /// * `graph` - The code graph to ingest
+    /// * `on_progress` - Progress callback
     pub async fn ingest_graph_with_progress<F>(
         &self,
         api_key: &str,
         workspace_id: &str,
         workspace_label: Option<&str>,
+        git_remote: Option<&str>,
         graph: unfault_core::graph::CodeGraph,
         mut on_progress: F,
     ) -> Result<GraphIngestResponse, ApiError>
     where
         F: FnMut(GraphIngestProgress),
     {
-        use crate::api::graph_stream::{encode_edges_chunk, encode_nodes_chunk};
+        use crate::api::graph_stream::{encode_edges_chunk, encode_nodes_chunk, IdContext};
 
         let t0 = std::time::Instant::now();
+
+        // Create ID context for computing stable node identifiers
+        let mut id_ctx = IdContext::new(
+            &graph,
+            git_remote.map(|s| s.to_string()),
+            workspace_id.to_string(),
+        );
 
         let start_url = format!(
             "{}/api/v1/graph/ingest/start?workspace_id={}&workspace_label={}",
@@ -965,10 +991,11 @@ impl ApiClient {
                 break;
             }
 
-            let chunk_bytes = encode_nodes_chunk(&graph, start_idx, NODE_CHUNK, next_seq as u32)
-                .map_err(|e| ApiError::Network {
-                    message: format!("Failed to encode node chunk: {}", e),
-                })?;
+            let chunk_bytes =
+                encode_nodes_chunk(&graph, &mut id_ctx, start_idx, NODE_CHUNK, next_seq as u32)
+                    .map_err(|e| ApiError::Network {
+                        message: format!("Failed to encode node chunk: {}", e),
+                    })?;
 
             let chunk_url = format!(
                 "{}/api/v1/graph/ingest/chunk?session_id={}&phase=nodes&seq={}",
@@ -1050,10 +1077,11 @@ impl ApiClient {
                 break;
             }
 
-            let chunk_bytes = encode_edges_chunk(&graph, start_idx, EDGE_CHUNK, next_seq as u32)
-                .map_err(|e| ApiError::Network {
-                    message: format!("Failed to encode edge chunk: {}", e),
-                })?;
+            let chunk_bytes =
+                encode_edges_chunk(&graph, &mut id_ctx, start_idx, EDGE_CHUNK, next_seq as u32)
+                    .map_err(|e| ApiError::Network {
+                        message: format!("Failed to encode edge chunk: {}", e),
+                    })?;
 
             let chunk_url = format!(
                 "{}/api/v1/graph/ingest/chunk?session_id={}&phase=edges&seq={}",

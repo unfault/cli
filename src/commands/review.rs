@@ -466,6 +466,7 @@ async fn execute_client_parse(
             &config.api_key,
             &workspace_id,
             Some(workspace_label),
+            git_remote.as_deref(),
             graph,
             move |progress| {
                 pb_upload.set_message(format!("Uploading code graph... {}%", progress.percent));

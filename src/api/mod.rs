@@ -14,7 +14,7 @@ pub mod session;
 // Re-export commonly used types for convenience
 pub use client::{ApiClient, ApiError};
 pub use graph::*;
-pub use graph_stream::{encode_edges_chunk, encode_nodes_chunk};
+pub use graph_stream::{IdContext, encode_edges_chunk, encode_nodes_chunk};
 pub use llm::{LlmClient, LlmError, build_llm_context};
 pub use rag::*;
 pub use semantics_stream::{SemanticsChunker, encode_semantics_chunk};

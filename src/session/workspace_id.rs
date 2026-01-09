@@ -1,12 +1,21 @@
-//! Workspace identifier computation.
+//! Workspace and node identifier computation.
 //!
-//! This module provides functions to compute stable workspace identifiers
-//! that remain consistent across CLI and LSP analysis sessions.
+//! This module provides functions to compute stable identifiers:
 //!
-//! The workspace_id is a fingerprint computed from stable workspace characteristics:
+//! ## Workspace IDs (`wks_*`)
+//! Fingerprint computed from stable workspace characteristics:
 //! 1. Git remote URL (most reliable)
 //! 2. Project manifest name (fallback)
 //! 3. Workspace label scoped to org (last resort)
+//!
+//! ## File IDs (`uf:file:v1:*`)
+//! Stable, globally unique identifier for files. Computed from:
+//! - Git remote + relative path (if git remote available)
+//! - Workspace ID + relative path (fallback, localized to workspace)
+//!
+//! ## Symbol IDs (`uf:sym:v1:*`)
+//! Stable, globally unique identifier for functions/classes. Computed from:
+//! - File ID + qualified name
 
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -93,6 +102,131 @@ fn compute_hash(source: &str) -> String {
     hasher.update(source.as_bytes());
     let result = hasher.finalize();
     hex::encode(&result[..8]) // 8 bytes = 16 hex chars
+}
+
+/// Compute SHA256 hash and return first 24 hex chars (for file/symbol IDs).
+fn compute_hash_24(source: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(source.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..12]) // 12 bytes = 24 hex chars
+}
+
+/// Normalize a relative file path to canonical form.
+///
+/// This ensures consistent path representation across different platforms
+/// and client implementations.
+///
+/// Rules:
+/// 1. Convert `\` to `/`
+/// 2. Strip leading `./`
+/// 3. Collapse `//` to `/`
+/// 4. Resolve `.` and `..` segments syntactically
+/// 5. Strip leading `/` (must be relative)
+/// 6. No trailing `/`
+/// 7. Case-sensitive (matches git behavior)
+///
+/// # Examples
+///
+/// ```
+/// use unfault::session::normalize_rel_path;
+///
+/// assert_eq!(normalize_rel_path("src/main.py"), "src/main.py");
+/// assert_eq!(normalize_rel_path("./src/main.py"), "src/main.py");
+/// assert_eq!(normalize_rel_path("src//main.py"), "src/main.py");
+/// assert_eq!(normalize_rel_path("src/foo/../main.py"), "src/main.py");
+/// assert_eq!(normalize_rel_path("\\src\\main.py"), "src/main.py");
+/// ```
+pub fn normalize_rel_path(path: &str) -> String {
+    // Step 1: Convert backslashes to forward slashes
+    let mut path = path.replace('\\', "/");
+
+    // Step 2: Strip leading ./
+    while path.starts_with("./") {
+        path = path[2..].to_string();
+    }
+
+    // Step 3: Collapse // to /
+    while path.contains("//") {
+        path = path.replace("//", "/");
+    }
+
+    // Step 4: Resolve . and .. segments syntactically
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => {
+                // Only pop if we have segments and the last one isn't ".."
+                if !segments.is_empty() && segments.last() != Some(&"..") {
+                    segments.pop();
+                }
+                // If we can't go up, we silently drop the ".." to avoid
+                // escaping above the workspace root
+            }
+            s => segments.push(s),
+        }
+    }
+
+    // Step 5 & 6: Join (no leading or trailing /)
+    segments.join("/")
+}
+
+/// Compute a stable file identifier.
+///
+/// Format: `uf:file:v1:{24_hex_chars}`
+///
+/// The identifier is computed from:
+/// - If `git_remote` is available: `sha256(normalized_git_remote + "\0" + normalized_rel_path)`
+/// - Otherwise: `sha256(workspace_id + "\0" + normalized_rel_path)` (localized, no cross-workspace linking)
+///
+/// # Arguments
+///
+/// * `git_remote` - Git remote URL (e.g., "git@github.com:acme/repo.git")
+/// * `workspace_id` - Workspace identifier (e.g., "wks_abc123...")
+/// * `rel_path` - File path relative to workspace root
+///
+/// # Returns
+///
+/// A stable file ID string in the format `uf:file:v1:{24_hex_chars}`
+pub fn compute_file_id(git_remote: Option<&str>, workspace_id: &str, rel_path: &str) -> String {
+    let norm_path = normalize_rel_path(rel_path);
+
+    let canonical = if let Some(remote) = git_remote {
+        let norm_remote = normalize_git_remote(remote);
+        if !norm_remote.is_empty() {
+            format!("{}\x00{}", norm_remote, norm_path)
+        } else {
+            // Git remote normalized to empty, fall back to workspace_id
+            format!("{}\x00{}", workspace_id, norm_path)
+        }
+    } else {
+        // No git remote, use workspace_id (localized)
+        format!("{}\x00{}", workspace_id, norm_path)
+    };
+
+    let hash = compute_hash_24(&canonical);
+    format!("uf:file:v1:{}", hash)
+}
+
+/// Compute a stable symbol identifier for functions and classes.
+///
+/// Format: `uf:sym:v1:{24_hex_chars}`
+///
+/// The identifier is computed from: `sha256(file_id + "\0" + qualified_name)`
+///
+/// # Arguments
+///
+/// * `file_id` - The file ID containing this symbol (from `compute_file_id`)
+/// * `qualified_name` - Qualified name of the symbol (e.g., "MyClass.my_method")
+///
+/// # Returns
+///
+/// A stable symbol ID string in the format `uf:sym:v1:{24_hex_chars}`
+pub fn compute_symbol_id(file_id: &str, qualified_name: &str) -> String {
+    let canonical = format!("{}\x00{}", file_id, qualified_name);
+    let hash = compute_hash_24(&canonical);
+    format!("uf:sym:v1:{}", hash)
 }
 
 /// Get the git remote URL for a workspace.
@@ -412,5 +546,199 @@ go 1.21
             extract_go_mod_module(content),
             Some("github.com/acme/myservice".to_string())
         );
+    }
+
+    // =========================================================================
+    // normalize_rel_path tests
+    // =========================================================================
+
+    #[test]
+    fn test_normalize_rel_path_simple() {
+        assert_eq!(normalize_rel_path("src/main.py"), "src/main.py");
+    }
+
+    #[test]
+    fn test_normalize_rel_path_leading_dot_slash() {
+        assert_eq!(normalize_rel_path("./src/main.py"), "src/main.py");
+        assert_eq!(normalize_rel_path("././src/main.py"), "src/main.py");
+    }
+
+    #[test]
+    fn test_normalize_rel_path_backslashes() {
+        assert_eq!(normalize_rel_path("src\\main.py"), "src/main.py");
+        assert_eq!(normalize_rel_path("src\\foo\\main.py"), "src/foo/main.py");
+    }
+
+    #[test]
+    fn test_normalize_rel_path_double_slashes() {
+        assert_eq!(normalize_rel_path("src//main.py"), "src/main.py");
+        assert_eq!(normalize_rel_path("src///foo//main.py"), "src/foo/main.py");
+    }
+
+    #[test]
+    fn test_normalize_rel_path_dot_segments() {
+        assert_eq!(normalize_rel_path("src/./main.py"), "src/main.py");
+        assert_eq!(normalize_rel_path("src/foo/../main.py"), "src/main.py");
+        assert_eq!(
+            normalize_rel_path("src/foo/bar/../../main.py"),
+            "src/main.py"
+        );
+    }
+
+    #[test]
+    fn test_normalize_rel_path_leading_slash_stripped() {
+        assert_eq!(normalize_rel_path("/src/main.py"), "src/main.py");
+    }
+
+    #[test]
+    fn test_normalize_rel_path_trailing_slash_stripped() {
+        assert_eq!(normalize_rel_path("src/foo/"), "src/foo");
+    }
+
+    #[test]
+    fn test_normalize_rel_path_escape_above_root_dropped() {
+        // Trying to escape above root just drops those segments
+        assert_eq!(normalize_rel_path("../src/main.py"), "src/main.py");
+        assert_eq!(normalize_rel_path("../../src/main.py"), "src/main.py");
+    }
+
+    #[test]
+    fn test_normalize_rel_path_complex() {
+        assert_eq!(
+            normalize_rel_path(".\\src//foo\\..\\bar/./baz.py"),
+            "src/bar/baz.py"
+        );
+    }
+
+    // =========================================================================
+    // compute_file_id tests
+    // =========================================================================
+
+    #[test]
+    fn test_compute_file_id_with_git_remote() {
+        let file_id = compute_file_id(
+            Some("git@github.com:acme/payments.git"),
+            "wks_ignored",
+            "src/billing/plans.py",
+        );
+
+        assert!(file_id.starts_with("uf:file:v1:"));
+        assert_eq!(file_id.len(), 11 + 24); // "uf:file:v1:" + 24 hex chars
+    }
+
+    #[test]
+    fn test_compute_file_id_without_git_remote() {
+        let file_id = compute_file_id(None, "wks_abc123def456", "src/billing/plans.py");
+
+        assert!(file_id.starts_with("uf:file:v1:"));
+        assert_eq!(file_id.len(), 11 + 24);
+    }
+
+    #[test]
+    fn test_compute_file_id_stable_across_git_formats() {
+        // Same repo, different URL formats should produce same file_id
+        let id1 = compute_file_id(
+            Some("git@github.com:acme/repo.git"),
+            "wks_x",
+            "src/main.py",
+        );
+        let id2 = compute_file_id(
+            Some("https://github.com/acme/repo.git"),
+            "wks_x",
+            "src/main.py",
+        );
+        let id3 = compute_file_id(
+            Some("ssh://git@github.com/acme/repo.git"),
+            "wks_x",
+            "src/main.py",
+        );
+
+        assert_eq!(id1, id2);
+        assert_eq!(id2, id3);
+    }
+
+    #[test]
+    fn test_compute_file_id_stable_across_path_formats() {
+        // Same file, different path formats should produce same file_id
+        let id1 = compute_file_id(Some("git@github.com:acme/repo.git"), "wks_x", "src/main.py");
+        let id2 = compute_file_id(
+            Some("git@github.com:acme/repo.git"),
+            "wks_x",
+            "./src/main.py",
+        );
+        let id3 = compute_file_id(
+            Some("git@github.com:acme/repo.git"),
+            "wks_x",
+            "src//main.py",
+        );
+        let id4 = compute_file_id(
+            Some("git@github.com:acme/repo.git"),
+            "wks_x",
+            "src/foo/../main.py",
+        );
+
+        assert_eq!(id1, id2);
+        assert_eq!(id2, id3);
+        assert_eq!(id3, id4);
+    }
+
+    #[test]
+    fn test_compute_file_id_different_files_different_ids() {
+        let id1 = compute_file_id(Some("git@github.com:acme/repo.git"), "wks_x", "src/a.py");
+        let id2 = compute_file_id(Some("git@github.com:acme/repo.git"), "wks_x", "src/b.py");
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_compute_file_id_different_repos_different_ids() {
+        let id1 = compute_file_id(Some("git@github.com:acme/repo1.git"), "wks_x", "src/main.py");
+        let id2 = compute_file_id(Some("git@github.com:acme/repo2.git"), "wks_x", "src/main.py");
+
+        assert_ne!(id1, id2);
+    }
+
+    // =========================================================================
+    // compute_symbol_id tests
+    // =========================================================================
+
+    #[test]
+    fn test_compute_symbol_id_format() {
+        let file_id = "uf:file:v1:a1b2c3d4e5f6a1b2c3d4e5f6";
+        let symbol_id = compute_symbol_id(file_id, "MyClass.my_method");
+
+        assert!(symbol_id.starts_with("uf:sym:v1:"));
+        assert_eq!(symbol_id.len(), 10 + 24); // "uf:sym:v1:" + 24 hex chars
+    }
+
+    #[test]
+    fn test_compute_symbol_id_different_symbols_different_ids() {
+        let file_id = "uf:file:v1:a1b2c3d4e5f6a1b2c3d4e5f6";
+
+        let id1 = compute_symbol_id(file_id, "func_a");
+        let id2 = compute_symbol_id(file_id, "func_b");
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_compute_symbol_id_same_name_different_files() {
+        let file_id1 = "uf:file:v1:aaaaaaaaaaaaaaaaaaaaaaaa";
+        let file_id2 = "uf:file:v1:bbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let id1 = compute_symbol_id(file_id1, "process");
+        let id2 = compute_symbol_id(file_id2, "process");
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_compute_symbol_id_stable() {
+        let file_id = "uf:file:v1:a1b2c3d4e5f6a1b2c3d4e5f6";
+
+        let id1 = compute_symbol_id(file_id, "MyClass.my_method");
+        let id2 = compute_symbol_id(file_id, "MyClass.my_method");
+
+        assert_eq!(id1, id2);
     }
 }

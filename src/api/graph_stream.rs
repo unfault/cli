@@ -10,6 +10,13 @@
 //! - phase, seq
 //! - nodes/edges counts in the chunk
 //! - checksum: xxh3_64 of all framed bytes before chunk_done
+//!
+//! ## Node IDs
+//!
+//! Nodes are identified by stable, globally unique IDs:
+//! - Files: `uf:file:v1:{24_hex_chars}` - computed from git remote + path
+//! - Functions/Classes: `uf:sym:v1:{24_hex_chars}` - computed from file_id + qualified name
+//! - External modules: `ext:{name}` - simple format, not cross-workspace linkable
 
 use std::collections::HashMap;
 
@@ -17,6 +24,8 @@ use serde::Serialize;
 use unfault_core::graph::{CodeGraph, GraphEdgeKind, GraphNode};
 use unfault_core::parse::ast::FileId;
 use xxhash_rust::xxh3::Xxh3;
+
+use crate::session::{compute_file_id, compute_symbol_id};
 
 #[derive(Serialize)]
 struct NodeRecord<'a> {
@@ -78,53 +87,104 @@ struct ChunkDoneRecord {
     checksum: u64,
 }
 
-fn node_id_for_node(node: &GraphNode, file_id_to_path: &HashMap<FileId, String>) -> String {
+/// Context for computing stable node IDs.
+///
+/// This struct holds the information needed to compute globally unique,
+/// stable identifiers for graph nodes.
+pub struct IdContext {
+    /// Git remote URL (e.g., "git@github.com:acme/repo.git").
+    /// If available, file IDs will be globally unique across machines.
+    pub git_remote: Option<String>,
+    /// Workspace ID (e.g., "wks_abc123...").
+    /// Used as fallback when git_remote is not available.
+    pub workspace_id: String,
+    /// Map from internal FileId to relative file path.
+    file_id_to_path: HashMap<FileId, String>,
+    /// Cache: path -> computed file_id (avoids recomputing)
+    path_to_file_id: HashMap<String, String>,
+}
+
+impl IdContext {
+    /// Create a new IdContext from the graph and workspace information.
+    pub fn new(graph: &CodeGraph, git_remote: Option<String>, workspace_id: String) -> Self {
+        let mut file_id_to_path = HashMap::new();
+        for node_idx in graph.graph.node_indices() {
+            if let GraphNode::File { file_id, path, .. } = &graph.graph[node_idx] {
+                file_id_to_path.insert(*file_id, path.clone());
+            }
+        }
+
+        Self {
+            git_remote,
+            workspace_id,
+            file_id_to_path,
+            path_to_file_id: HashMap::new(),
+        }
+    }
+
+    /// Get or compute the file_id for a given path.
+    fn get_file_id(&mut self, path: &str) -> String {
+        if let Some(cached) = self.path_to_file_id.get(path) {
+            return cached.clone();
+        }
+
+        let file_id = compute_file_id(
+            self.git_remote.as_deref(),
+            &self.workspace_id,
+            path,
+        );
+        self.path_to_file_id.insert(path.to_string(), file_id.clone());
+        file_id
+    }
+
+    /// Get the file path for an internal FileId.
+    fn get_path(&self, file_id: &FileId) -> Option<&String> {
+        self.file_id_to_path.get(file_id)
+    }
+}
+
+fn node_id_for_node(node: &GraphNode, ctx: &mut IdContext) -> String {
     match node {
-        GraphNode::File { path, .. } => path.clone(),
-        GraphNode::ExternalModule { name, .. } => format!("ext:{name}"),
+        GraphNode::File { path, .. } => ctx.get_file_id(path),
+        GraphNode::ExternalModule { name, .. } => {
+            // External modules use simple format - not cross-workspace linkable
+            format!("ext:{name}")
+        }
         GraphNode::Function {
             file_id,
             qualified_name,
             name,
             ..
         } => {
-            let file_path = file_id_to_path.get(file_id).cloned().unwrap_or_default();
-            let func_name = if qualified_name.is_empty() {
+            // Clone the path to avoid borrow issues
+            let file_path = match ctx.get_path(file_id) {
+                Some(p) => p.clone(),
+                None => return String::new(),
+            };
+            let file_node_id = ctx.get_file_id(&file_path);
+            let symbol_name = if qualified_name.is_empty() {
                 name.as_str()
             } else {
                 qualified_name.as_str()
             };
-            if file_path.is_empty() {
-                func_name.to_string()
-            } else {
-                format!("{file_path}:{func_name}")
-            }
+            compute_symbol_id(&file_node_id, symbol_name)
         }
         GraphNode::Class { file_id, name } => {
-            let file_path = file_id_to_path.get(file_id).cloned().unwrap_or_default();
-            if file_path.is_empty() {
-                name.clone()
-            } else {
-                format!("{file_path}:{name}")
-            }
+            // Clone the path to avoid borrow issues
+            let file_path = match ctx.get_path(file_id) {
+                Some(p) => p.clone(),
+                None => return String::new(),
+            };
+            let file_node_id = ctx.get_file_id(&file_path);
+            compute_symbol_id(&file_node_id, name)
         }
         GraphNode::FastApiApp { .. }
         | GraphNode::FastApiRoute { .. }
         | GraphNode::FastApiMiddleware { .. } => {
             // Not currently persisted.
-            "".to_string()
+            String::new()
         }
     }
-}
-
-fn build_file_id_map(graph: &CodeGraph) -> HashMap<FileId, String> {
-    let mut map = HashMap::new();
-    for node_idx in graph.graph.node_indices() {
-        if let GraphNode::File { file_id, path, .. } = &graph.graph[node_idx] {
-            map.insert(*file_id, path.clone());
-        }
-    }
-    map
 }
 
 fn push_frame(buf: &mut Vec<u8>, value: &impl Serialize) -> anyhow::Result<Vec<u8>> {
@@ -139,13 +199,26 @@ fn push_frame(buf: &mut Vec<u8>, value: &impl Serialize) -> anyhow::Result<Vec<u
     Ok(frame)
 }
 
+/// Encode a chunk of graph nodes into the wire format.
+///
+/// # Arguments
+///
+/// * `graph` - The code graph containing nodes to encode
+/// * `ctx` - ID context for computing stable node identifiers
+/// * `start` - Starting index in the node list
+/// * `max_records` - Maximum number of records to include in this chunk
+/// * `seq` - Sequence number for this chunk
+///
+/// # Returns
+///
+/// Zstd-compressed bytes containing the framed msgpack records.
 pub fn encode_nodes_chunk(
     graph: &CodeGraph,
+    ctx: &mut IdContext,
     start: usize,
     max_records: usize,
     seq: u32,
 ) -> anyhow::Result<Vec<u8>> {
-    let file_id_to_path = build_file_id_map(graph);
     let mut raw = Vec::with_capacity(1024 * 1024);
     let mut hasher = Xxh3::new();
 
@@ -156,7 +229,7 @@ pub fn encode_nodes_chunk(
 
     for idx in &node_indices[start..end] {
         let node = &graph.graph[*idx];
-        let node_id = node_id_for_node(node, &file_id_to_path);
+        let node_id = node_id_for_node(node, ctx);
         if node_id.is_empty() {
             continue;
         }
@@ -207,7 +280,7 @@ pub fn encode_nodes_chunk(
                 http_method,
                 http_path,
             } => {
-                let file_path = file_id_to_path.get(file_id).cloned();
+                let file_path = ctx.get_path(file_id).cloned();
                 push_frame(
                     &mut raw,
                     &NodeRecord {
@@ -232,7 +305,7 @@ pub fn encode_nodes_chunk(
                 )?
             }
             GraphNode::Class { file_id, name } => {
-                let file_path = file_id_to_path.get(file_id).cloned();
+                let file_path = ctx.get_path(file_id).cloned();
                 push_frame(
                     &mut raw,
                     &NodeRecord {
@@ -279,13 +352,26 @@ pub fn encode_nodes_chunk(
     Ok(zstd::stream::encode_all(std::io::Cursor::new(raw), 3)?)
 }
 
+/// Encode a chunk of graph edges into the wire format.
+///
+/// # Arguments
+///
+/// * `graph` - The code graph containing edges to encode
+/// * `ctx` - ID context for computing stable node identifiers
+/// * `start` - Starting index in the edge list
+/// * `max_records` - Maximum number of records to include in this chunk
+/// * `seq` - Sequence number for this chunk
+///
+/// # Returns
+///
+/// Zstd-compressed bytes containing the framed msgpack records.
 pub fn encode_edges_chunk(
     graph: &CodeGraph,
+    ctx: &mut IdContext,
     start: usize,
     max_records: usize,
     seq: u32,
 ) -> anyhow::Result<Vec<u8>> {
-    let file_id_to_path = build_file_id_map(graph);
     let mut raw = Vec::with_capacity(1024 * 1024);
     let mut hasher = Xxh3::new();
 
@@ -301,8 +387,8 @@ pub fn encode_edges_chunk(
 
         let source_node = &graph.graph[source];
         let target_node = &graph.graph[target];
-        let source_node_id = node_id_for_node(source_node, &file_id_to_path);
-        let target_node_id = node_id_for_node(target_node, &file_id_to_path);
+        let source_node_id = node_id_for_node(source_node, ctx);
+        let target_node_id = node_id_for_node(target_node, ctx);
         if source_node_id.is_empty() || target_node_id.is_empty() {
             continue;
         }
@@ -380,9 +466,104 @@ mod tests {
             language: unfault_core::types::context::Language::Python,
         });
 
-        let body = encode_nodes_chunk(&graph, 0, 10, 0).unwrap();
+        let mut ctx = IdContext::new(
+            &graph,
+            Some("git@github.com:test/repo.git".to_string()),
+            "wks_test123".to_string(),
+        );
+
+        let body = encode_nodes_chunk(&graph, &mut ctx, 0, 10, 0).unwrap();
         let decoded = zstd::stream::decode_all(std::io::Cursor::new(body)).unwrap();
         let frames = decode_frames(&decoded);
         assert!(frames.iter().any(|v| v["event"] == "chunk_done"));
+    }
+
+    #[test]
+    fn node_ids_use_stable_format() {
+        let mut graph = CodeGraph::new();
+
+        let file_id = FileId(1);
+        let _ = graph.graph.add_node(GraphNode::File {
+            file_id,
+            path: "src/main.py".to_string(),
+            language: unfault_core::types::context::Language::Python,
+        });
+        let _ = graph.graph.add_node(GraphNode::Function {
+            file_id,
+            name: "process".to_string(),
+            qualified_name: "MyClass.process".to_string(),
+            is_async: false,
+            is_handler: false,
+            http_method: None,
+            http_path: None,
+        });
+
+        let mut ctx = IdContext::new(
+            &graph,
+            Some("git@github.com:acme/payments.git".to_string()),
+            "wks_ignored".to_string(),
+        );
+
+        let body = encode_nodes_chunk(&graph, &mut ctx, 0, 10, 0).unwrap();
+        let decoded = zstd::stream::decode_all(std::io::Cursor::new(body)).unwrap();
+        let frames = decode_frames(&decoded);
+
+        // Find node records (not control records)
+        let node_frames: Vec<_> = frames
+            .iter()
+            .filter(|f| f["type"] == "node")
+            .collect();
+
+        assert_eq!(node_frames.len(), 2);
+
+        // File node should have uf:file:v1: prefix
+        let file_node = node_frames.iter().find(|f| f["node_type"] == "file").unwrap();
+        let file_node_id = file_node["node_id"].as_str().unwrap();
+        assert!(file_node_id.starts_with("uf:file:v1:"), "File node_id should start with uf:file:v1:, got: {}", file_node_id);
+        assert_eq!(file_node_id.len(), 11 + 24); // prefix + 24 hex chars
+
+        // Function node should have uf:sym:v1: prefix
+        let func_node = node_frames.iter().find(|f| f["node_type"] == "function").unwrap();
+        let func_node_id = func_node["node_id"].as_str().unwrap();
+        assert!(func_node_id.starts_with("uf:sym:v1:"), "Function node_id should start with uf:sym:v1:, got: {}", func_node_id);
+        assert_eq!(func_node_id.len(), 10 + 24); // prefix + 24 hex chars
+    }
+
+    #[test]
+    fn same_file_same_id_different_git_formats() {
+        // Test that the same file produces the same ID regardless of git URL format
+        let mut graph = CodeGraph::new();
+        let file_id = FileId(1);
+        let _ = graph.graph.add_node(GraphNode::File {
+            file_id,
+            path: "src/main.py".to_string(),
+            language: unfault_core::types::context::Language::Python,
+        });
+
+        let git_formats = [
+            "git@github.com:acme/repo.git",
+            "https://github.com/acme/repo.git",
+            "ssh://git@github.com/acme/repo.git",
+        ];
+
+        let mut ids = Vec::new();
+        for git_remote in git_formats {
+            let mut ctx = IdContext::new(
+                &graph,
+                Some(git_remote.to_string()),
+                "wks_x".to_string(),
+            );
+
+            let body = encode_nodes_chunk(&graph, &mut ctx, 0, 10, 0).unwrap();
+            let decoded = zstd::stream::decode_all(std::io::Cursor::new(body)).unwrap();
+            let frames = decode_frames(&decoded);
+
+            let file_node = frames.iter().find(|f| f["node_type"] == "file").unwrap();
+            ids.push(file_node["node_id"].as_str().unwrap().to_string());
+        }
+
+        // All IDs should be identical
+        assert_eq!(ids[0], ids[1], "SSH and HTTPS formats should produce same ID");
+        assert_eq!(ids[1], ids[2], "HTTPS and ssh:// formats should produce same ID");
     }
 }

@@ -397,7 +397,13 @@ impl UnfaultLsp {
         debug!("[LSP] Uploading graph for analysis...");
         let ingest = match self
             .api_client
-            .ingest_graph(&api_key, &workspace_id, Some(workspace_label_str), graph)
+            .ingest_graph(
+                &api_key,
+                &workspace_id,
+                Some(workspace_label_str),
+                git_remote.as_deref(),
+                graph,
+            )
             .await
         {
             Ok(resp) => resp,
