@@ -654,7 +654,13 @@ async fn execute_client_parse(
             pb.set_message(format!("Discovering SLOs from {}...", providers.join(", ")));
 
             match enricher.fetch_all().await {
-                Ok(slos) => {
+                Ok(fetch_result) => {
+                    // Track credential issues from the fetch
+                    if fetch_result.credentials_expired {
+                        slo_stats.credentials_expired = true;
+                    }
+
+                    let slos = fetch_result.slos;
                     if !slos.is_empty() {
                         // First, link SLOs that have path patterns (automatic matching)
                         let linked = enricher.enrich_graph(&mut graph, &slos).unwrap_or(0);

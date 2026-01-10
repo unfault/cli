@@ -34,6 +34,15 @@ use self::datadog::DatadogProvider;
 use self::dynatrace::DynatraceProvider;
 use self::gcp::GcpProvider;
 
+/// Result of fetching SLOs from providers.
+#[derive(Default)]
+pub struct SloFetchResult {
+    /// SLOs successfully fetched
+    pub slos: Vec<SloDefinition>,
+    /// Whether any provider had expired/invalid credentials
+    pub credentials_expired: bool,
+}
+
 /// SLO enricher that discovers, fetches, and links SLOs to the code graph.
 pub struct SloEnricher {
     client: Client,
@@ -76,8 +85,9 @@ impl SloEnricher {
     /// Fetch SLOs from all available providers.
     ///
     /// Errors from individual providers are logged but don't fail the overall fetch.
-    pub async fn fetch_all(&self) -> Result<Vec<SloDefinition>> {
-        let mut all_slos = Vec::new();
+    /// Returns both the SLOs and metadata about any credential issues encountered.
+    pub async fn fetch_all(&self) -> Result<SloFetchResult> {
+        let mut result = SloFetchResult::default();
 
         // Fetch from Datadog
         if let Some(provider) = DatadogProvider::from_env() {
@@ -86,9 +96,13 @@ impl SloEnricher {
                     if self.verbose {
                         eprintln!("  Fetched {} SLOs from Datadog", slos.len());
                     }
-                    all_slos.extend(slos);
+                    result.slos.extend(slos);
                 }
                 Err(e) => {
+                    let error_msg = e.to_string();
+                    if error_msg.contains("401") || error_msg.contains("403") {
+                        result.credentials_expired = true;
+                    }
                     if self.verbose {
                         eprintln!("  Warning: Failed to fetch Datadog SLOs: {}", e);
                     }
@@ -103,9 +117,16 @@ impl SloEnricher {
                     if self.verbose {
                         eprintln!("  Fetched {} SLOs from GCP", slos.len());
                     }
-                    all_slos.extend(slos);
+                    result.slos.extend(slos);
                 }
                 Err(e) => {
+                    let error_msg = e.to_string();
+                    if error_msg.contains("expired")
+                        || error_msg.contains("gcloud auth")
+                        || error_msg.contains("401")
+                    {
+                        result.credentials_expired = true;
+                    }
                     if self.verbose {
                         eprintln!("  Warning: Failed to fetch GCP SLOs: {}", e);
                     }
@@ -120,9 +141,13 @@ impl SloEnricher {
                     if self.verbose {
                         eprintln!("  Fetched {} SLOs from Dynatrace", slos.len());
                     }
-                    all_slos.extend(slos);
+                    result.slos.extend(slos);
                 }
                 Err(e) => {
+                    let error_msg = e.to_string();
+                    if error_msg.contains("401") || error_msg.contains("403") {
+                        result.credentials_expired = true;
+                    }
                     if self.verbose {
                         eprintln!("  Warning: Failed to fetch Dynatrace SLOs: {}", e);
                     }
@@ -130,7 +155,7 @@ impl SloEnricher {
             }
         }
 
-        Ok(all_slos)
+        Ok(result)
     }
 
     /// Enrich a code graph with SLO nodes and MonitoredBy edges.
