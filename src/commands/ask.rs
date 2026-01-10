@@ -24,8 +24,8 @@ use termimad::MadSkin;
 use crate::api::ApiClient;
 use crate::api::llm::{LlmClient, build_llm_context};
 use crate::api::rag::{
-    ClientGraphData, RAGFlowContext, RAGFlowPathNode, RAGGraphContext, RAGQueryRequest,
-    RAGQueryResponse, RAGSloContext,
+    ClientGraphData, RAGEnumerateContext, RAGEnumerateItem, RAGFlowContext, RAGFlowPathNode,
+    RAGGraphContext, RAGQueryRequest, RAGQueryResponse, RAGSloContext,
 };
 use crate::config::Config;
 use crate::exit_codes::*;
@@ -1104,6 +1104,109 @@ fn render_slo_context(slo_context: &RAGSloContext, verbose: bool) {
     }
 }
 
+/// Render enumerate context showing counts and listings of code elements.
+fn render_enumerate_context(enumerate_context: &RAGEnumerateContext, verbose: bool) {
+    use colored::Colorize;
+
+    // Header with count
+    println!(
+        "{} {}",
+        "📋".cyan(),
+        enumerate_context.summary.bold()
+    );
+
+    if enumerate_context.items.is_empty() {
+        return;
+    }
+
+    println!();
+
+    // Group items by file for better organization
+    let mut items_by_file: std::collections::HashMap<String, Vec<&RAGEnumerateItem>> =
+        std::collections::HashMap::new();
+    for item in &enumerate_context.items {
+        let file = item.file_path.as_deref().unwrap_or("(unknown)").to_string();
+        items_by_file.entry(file).or_default().push(item);
+    }
+
+    // Determine how many items to show
+    let max_items = if verbose { 50 } else { 10 };
+    let mut shown = 0;
+
+    for (file, items) in items_by_file.iter() {
+        if shown >= max_items {
+            break;
+        }
+
+        println!("  {} {}", "→".cyan(), file.dimmed());
+
+        for item in items.iter() {
+            if shown >= max_items {
+                break;
+            }
+
+            match item.item_type.as_str() {
+                "route" => {
+                    let method = item.http_method.as_deref().unwrap_or("?");
+                    let path = item.http_path.as_deref().unwrap_or("?");
+
+                    // Color the HTTP method
+                    let method_colored = match method.to_uppercase().as_str() {
+                        "GET" => method.green(),
+                        "POST" => method.blue(),
+                        "PUT" | "PATCH" => method.yellow(),
+                        "DELETE" => method.red(),
+                        _ => method.normal(),
+                    };
+
+                    println!(
+                        "    {} {} {}",
+                        "•".dimmed(),
+                        method_colored,
+                        path.bright_white()
+                    );
+
+                    if verbose {
+                        if let Some(ref name) = item.qualified_name {
+                            println!("      {} {}", "fn:".dimmed(), name.dimmed());
+                        }
+                    }
+                }
+                "function" => {
+                    let name = item.qualified_name.as_deref().unwrap_or(&item.name);
+                    println!("    {} {}", "•".dimmed(), name.bright_white());
+                }
+                "file" => {
+                    // Files are already shown as headers, skip individual items
+                }
+                "class" => {
+                    println!("    {} class {}", "•".dimmed(), item.name.bright_white());
+                }
+                _ => {
+                    println!("    {} {}", "•".dimmed(), item.name);
+                }
+            }
+
+            shown += 1;
+        }
+    }
+
+    if enumerate_context.truncated || shown < enumerate_context.count as usize {
+        println!();
+        println!(
+            "  {} Showing {} of {} total{}",
+            "…".dimmed(),
+            shown,
+            enumerate_context.count,
+            if !verbose {
+                " (use --verbose for more)"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
 const MAX_ASK_WIDTH: usize = 80;
 
 fn wrap_paragraph(text: &str, width: usize) -> Vec<String> {
@@ -1216,6 +1319,19 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
         // Highlight unfault commands within the hint (e.g., 'unfault review --discover-observability')
         let styled_hint = highlight_unfault_commands(hint);
         return format!("{} {}", prefix, styled_hint);
+    }
+
+    // Handle enumerate context (how many routes, list functions, etc.)
+    if let Some(enumerate_context) = &response.enumerate_context {
+        let opener = pick_variant(
+            &seed,
+            &[
+                "Here's what I found:",
+                "Got it. Here's the breakdown:",
+                "Alright, here's the count:",
+            ],
+        );
+        return format!("{} {}", opener, enumerate_context.summary);
     }
 
     // Handle SLO/Observability context
@@ -1791,6 +1907,12 @@ fn output_formatted(
         }
     }
 
+    // Render enumerate context if present (for "how many routes" type queries)
+    if let Some(enumerate_context) = &response.enumerate_context {
+        render_enumerate_context(enumerate_context, verbose);
+        println!();
+    }
+
     // Print context summary (only in verbose mode when flow context is shown, or when no flow context)
     let show_summary = verbose;
 
@@ -1935,6 +2057,9 @@ mod tests {
                 ]],
             }),
             slo_context: None,
+            enumerate_context: None,
+            graph_stats: None,
+            routing_confidence: None,
             hint: None,
         };
 
@@ -1966,6 +2091,9 @@ mod tests {
             graph_context: None,
             flow_context: None,
             slo_context: None,
+            enumerate_context: None,
+            graph_stats: None,
+            routing_confidence: None,
             hint: None,
         };
 
@@ -2011,6 +2139,9 @@ mod tests {
             graph_context: None,
             flow_context: None,
             slo_context: None,
+            enumerate_context: None,
+            graph_stats: None,
+            routing_confidence: None,
             hint: Some("Please specify a file path or symbol".to_string()),
         };
 

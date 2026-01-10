@@ -3062,6 +3062,7 @@ mod tests {
             routes: vec![FunctionImpactRoute {
                 method: "POST".to_string(),
                 path: "/api/test".to_string(),
+                slos: None,
             }],
             findings: vec![FunctionImpactFinding {
                 severity: "warning".to_string(),

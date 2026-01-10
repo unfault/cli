@@ -217,6 +217,16 @@ pub struct RAGQueryResponse {
     pub flow_context: Option<RAGFlowContext>,
     /// SLO/Observability context for monitoring queries.
     pub slo_context: Option<RAGSloContext>,
+    /// Enumerate context for counting/listing queries.
+    #[serde(default)]
+    pub enumerate_context: Option<RAGEnumerateContext>,
+    /// Basic graph statistics, always included when graph data is available.
+    #[serde(default)]
+    pub graph_stats: Option<std::collections::HashMap<String, i32>>,
+    /// Confidence score for query intent classification (0-1).
+    /// Low confidence suggests the query may not be well understood.
+    #[serde(default)]
+    pub routing_confidence: Option<f64>,
     /// Actionable hint when the query cannot be fully answered.
     pub hint: Option<String>,
 }
@@ -340,6 +350,45 @@ pub struct RAGSloContext {
     pub unmonitored_routes: Vec<RAGMonitoredRoute>,
     /// Summary string for display.
     pub summary: Option<String>,
+}
+
+/// An item in an enumeration result (route, function, file, etc.).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGEnumerateItem {
+    /// Name of the item (function name, file path, etc.).
+    pub name: String,
+    /// Fully qualified name if applicable.
+    pub qualified_name: Option<String>,
+    /// File path where the item is defined.
+    pub file_path: Option<String>,
+    /// Type of item: route, function, file, class.
+    pub item_type: String,
+    /// HTTP method for routes (GET, POST, etc.).
+    pub http_method: Option<String>,
+    /// HTTP path for routes (/api/users, etc.).
+    pub http_path: Option<String>,
+    /// Line number where the item is defined.
+    pub line: Option<i32>,
+}
+
+/// Enumerate context for counting/listing queries.
+///
+/// Returned when the query asks about counts or listings of code elements,
+/// e.g., "how many routes do I have?" or "list all my API endpoints".
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGEnumerateContext {
+    /// What is being enumerated: routes, functions, files, classes, endpoints.
+    pub query_target: String,
+    /// Total count of items matching the query.
+    pub count: i32,
+    /// List of enumerated items (may be truncated for large results).
+    #[serde(default)]
+    pub items: Vec<RAGEnumerateItem>,
+    /// Whether the items list was truncated due to size limits.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Human-readable summary (e.g., "Found 15 routes across 4 files").
+    pub summary: String,
 }
 
 // =============================================================================
