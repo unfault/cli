@@ -1251,6 +1251,13 @@ async fn execute_client_parse(
         // Show SLO coverage summary if --discover-observability was used
         display_slo_summary(&slo_stats);
 
+        // Show tip at the very end
+        println!();
+        println!(
+            "{}",
+            "Tip: use --output full to drill into hotspots.".dimmed()
+        );
+
         if has_any {
             Ok(EXIT_FINDINGS_FOUND)
         } else {
@@ -1930,11 +1937,6 @@ fn display_session_insights(
         println!("{}", line);
     }
 
-    println!();
-    println!(
-        "{}",
-        "Tip: use --output full to drill into hotspots.".dimmed()
-    );
 }
 
 fn display_session_hotspots(
@@ -2073,12 +2075,6 @@ fn display_session_hotspots(
         for line in wrapped {
             println!("{}", line);
         }
-
-        println!();
-        println!(
-            "{}",
-            "Tip: use --output full to drill into hotspots.".dimmed()
-        );
 
         return;
     }
