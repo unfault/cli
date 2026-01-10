@@ -108,6 +108,10 @@ struct SloDiscoveryStats {
     total_routes: usize,
     /// Whether discovery was attempted
     attempted: bool,
+    /// Whether credentials expired (need re-auth)
+    credentials_expired: bool,
+    /// Whether no provider credentials were found
+    no_credentials: bool,
 }
 
 /// Display SLO coverage summary with positive feedback.
@@ -119,8 +123,57 @@ fn display_slo_summary(stats: &SloDiscoveryStats) {
     eprintln!();
     eprintln!("{}", "─".repeat(60).dimmed());
 
+    // Handle credential issues first
+    if stats.credentials_expired {
+        eprintln!(
+            "{} {} Your GCP credentials have expired.",
+            "📊".cyan(),
+            "Observability:".bold()
+        );
+        eprintln!();
+        eprintln!(
+            "   {} Run {} to refresh them.",
+            "→".cyan(),
+            "gcloud auth application-default login".bright_yellow()
+        );
+        eprintln!(
+            "   {}",
+            "Once refreshed, SLO discovery will link your routes to your monitoring.".dimmed()
+        );
+        return;
+    }
+
+    if stats.no_credentials {
+        eprintln!(
+            "{} {} No observability provider credentials found.",
+            "📊".cyan(),
+            "Observability:".bold()
+        );
+        eprintln!();
+        eprintln!(
+            "   {}",
+            "To discover SLOs, configure one of:".dimmed()
+        );
+        eprintln!(
+            "   {} GCP: {}",
+            "•".dimmed(),
+            "gcloud auth application-default login".bright_yellow()
+        );
+        eprintln!(
+            "   {} Datadog: set {}",
+            "•".dimmed(),
+            "DD_API_KEY".bright_yellow()
+        );
+        eprintln!(
+            "   {} Dynatrace: set {}",
+            "•".dimmed(),
+            "DT_API_TOKEN".bright_yellow()
+        );
+        return;
+    }
+
     if stats.slo_count == 0 {
-        // No SLOs found
+        // No SLOs found (but credentials were valid)
         eprintln!(
             "{} {} No SLOs discovered from your observability provider.",
             "📊".cyan(),
@@ -808,19 +861,23 @@ async fn execute_client_parse(
                 }
                 Err(e) => {
                     let error_msg = e.to_string();
-                    // Show auth errors even without verbose since they're actionable
-                    if error_msg.contains("gcloud auth") {
-                        eprintln!("\n{} {}", "⚠".yellow().bold(), error_msg);
-                    } else if args.verbose {
+                    // Track auth errors for summary display
+                    if error_msg.contains("gcloud auth") || error_msg.contains("expired") {
+                        slo_stats.credentials_expired = true;
+                    }
+                    if args.verbose {
                         eprintln!("\n{} SLO discovery failed: {}", "DEBUG".yellow(), e);
                     }
                 }
             }
-        } else if args.verbose {
-            eprintln!(
-                "\n{} No SLO provider credentials found (checked: DD_API_KEY, GCP ADC, DT_API_TOKEN)",
-                "DEBUG".yellow()
-            );
+        } else {
+            slo_stats.no_credentials = true;
+            if args.verbose {
+                eprintln!(
+                    "\n{} No SLO provider credentials found (checked: DD_API_KEY, GCP ADC, DT_API_TOKEN)",
+                    "DEBUG".yellow()
+                );
+            }
         }
     }
 
