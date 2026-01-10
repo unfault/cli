@@ -888,6 +888,7 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
         "impact" => "Impact analysis",
         "library" => "Library usage",
         "dependencies" => "External dependencies",
+        "centrality" => "Most connected files",
         other => other,
     };
 
@@ -963,6 +964,40 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
             let name = dep.name.as_deref().unwrap_or("dependency");
             let category = dep.category.as_deref().unwrap_or("library");
             println!("  • {} ({})", name.green(), category.dimmed());
+        }
+    }
+
+    if ctx.query_type == "centrality" && !ctx.affected_files.is_empty() {
+        println!();
+        println!(
+            "  {} These files have the most imports/calls — changes here ripple the furthest:",
+            "→".cyan()
+        );
+        for (idx, rel) in ctx.affected_files.iter().enumerate() {
+            let path = rel.path.as_deref().unwrap_or("<unknown>");
+            // Show metrics if available in verbose mode
+            if verbose {
+                if let Some(depth) = rel.depth {
+                    println!(
+                        "  {} {} (connections: {})",
+                        format!("{}.", idx + 1).bright_white(),
+                        path.cyan(),
+                        depth
+                    );
+                } else {
+                    println!(
+                        "  {} {}",
+                        format!("{}.", idx + 1).bright_white(),
+                        path.cyan()
+                    );
+                }
+            } else {
+                println!(
+                    "  {} {}",
+                    format!("{}.", idx + 1).bright_white(),
+                    path.cyan()
+                );
+            }
         }
     }
 
@@ -1567,10 +1602,19 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
                 let list = if top.is_empty() {
                     "".to_string()
                 } else {
-                    format!(" Top files: {}.", top.join(", "))
+                    format!(" {}", top.join(", "))
                 };
 
-                return format!("Here are the hotspots I’d keep an eye on first.{}", list);
+                let opener = pick_variant(
+                    &seed,
+                    &[
+                        "These are the most connected files in your codebase — changes here ripple the furthest:",
+                        "Based on the call graph, these files have the most connections:",
+                        "Here are the most central files (by import/call count):",
+                    ],
+                );
+
+                return format!("{}{}", opener, list);
             }
 
             // Generic graph fallback.
