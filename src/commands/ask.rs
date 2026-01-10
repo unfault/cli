@@ -888,7 +888,14 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
         "impact" => "Impact analysis",
         "library" => "Library usage",
         "dependencies" => "External dependencies",
-        "centrality" => "Most connected files",
+        "centrality" => {
+            // Check if this is function or file centrality
+            if ctx.centrality_target.as_deref() == Some("function") {
+                "Most called functions"
+            } else {
+                "Most connected files"
+            }
+        }
         other => other,
     };
 
@@ -968,21 +975,70 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
     }
 
     if ctx.query_type == "centrality" && !ctx.affected_files.is_empty() {
+        let is_function_centrality = ctx.centrality_target.as_deref() == Some("function");
+
         println!();
-        println!(
-            "  {} These files have the most imports/calls — changes here ripple the furthest:",
-            "→".cyan()
-        );
+        if is_function_centrality {
+            println!(
+                "  {} These functions are called by the most other functions:",
+                "→".cyan()
+            );
+        } else {
+            println!(
+                "  {} These files have the most imports/calls — changes here ripple the furthest:",
+                "→".cyan()
+            );
+        }
+
         for (idx, rel) in ctx.affected_files.iter().enumerate() {
-            let path = rel.path.as_deref().unwrap_or("<unknown>");
-            // Show metrics if available in verbose mode
-            if verbose {
-                if let Some(depth) = rel.depth {
+            if is_function_centrality {
+                // Function centrality display
+                let name = rel
+                    .name
+                    .as_deref()
+                    .or(rel.qualified_name.as_deref())
+                    .unwrap_or("<unknown>");
+                let file_path = rel.path.as_deref().unwrap_or("");
+                let in_degree = rel.in_degree.unwrap_or(0);
+
+                // Show route info if this is a route handler
+                let route_info = if rel.is_route == Some(true) {
+                    let method = rel.http_method.as_deref().unwrap_or("?");
+                    let path = rel.http_path.as_deref().unwrap_or("?");
+                    format!(" {} {}", method.green(), path)
+                } else {
+                    String::new()
+                };
+
+                if verbose {
                     println!(
-                        "  {} {} (connections: {})",
+                        "  {} {}{} ({}, {} callers)",
+                        format!("{}.", idx + 1).bright_white(),
+                        name.cyan(),
+                        route_info,
+                        file_path.dimmed(),
+                        in_degree
+                    );
+                } else {
+                    println!(
+                        "  {} {}{} ({} callers)",
+                        format!("{}.", idx + 1).bright_white(),
+                        name.cyan(),
+                        route_info,
+                        in_degree
+                    );
+                }
+            } else {
+                // File centrality display
+                let path = rel.path.as_deref().unwrap_or("<unknown>");
+                let in_degree = rel.in_degree.unwrap_or(0);
+
+                if verbose {
+                    println!(
+                        "  {} {} ({} importers)",
                         format!("{}.", idx + 1).bright_white(),
                         path.cyan(),
-                        depth
+                        in_degree
                     );
                 } else {
                     println!(
@@ -991,12 +1047,6 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
                         path.cyan()
                     );
                 }
-            } else {
-                println!(
-                    "  {} {}",
-                    format!("{}.", idx + 1).bright_white(),
-                    path.cyan()
-                );
             }
         }
     }
@@ -1592,29 +1642,66 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
 
             if graph_context.query_type == "centrality" && !graph_context.affected_files.is_empty()
             {
-                let top: Vec<&str> = graph_context
-                    .affected_files
-                    .iter()
-                    .filter_map(|r| r.path.as_deref())
-                    .take(5)
-                    .collect();
+                let is_function_centrality =
+                    graph_context.centrality_target.as_deref() == Some("function");
 
-                let list = if top.is_empty() {
-                    "".to_string()
+                if is_function_centrality {
+                    // Function centrality: show function names
+                    let top: Vec<String> = graph_context
+                        .affected_files
+                        .iter()
+                        .take(5)
+                        .map(|r| {
+                            r.name
+                                .as_deref()
+                                .or(r.qualified_name.as_deref())
+                                .unwrap_or("<unknown>")
+                                .to_string()
+                        })
+                        .collect();
+
+                    let list = if top.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(" {}", top.join(", "))
+                    };
+
+                    let opener = pick_variant(
+                        &seed,
+                        &[
+                            "These functions are called by the most other code — changes here have the widest impact:",
+                            "Based on the call graph, these are your most central functions:",
+                            "Here are the most called functions (by caller count):",
+                        ],
+                    );
+
+                    return format!("{}{}", opener, list);
                 } else {
-                    format!(" {}", top.join(", "))
-                };
+                    // File centrality: show file paths
+                    let top: Vec<&str> = graph_context
+                        .affected_files
+                        .iter()
+                        .filter_map(|r| r.path.as_deref())
+                        .take(5)
+                        .collect();
 
-                let opener = pick_variant(
-                    &seed,
-                    &[
-                        "These are the most connected files in your codebase — changes here ripple the furthest:",
-                        "Based on the call graph, these files have the most connections:",
-                        "Here are the most central files (by import/call count):",
-                    ],
-                );
+                    let list = if top.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(" {}", top.join(", "))
+                    };
 
-                return format!("{}{}", opener, list);
+                    let opener = pick_variant(
+                        &seed,
+                        &[
+                            "These are the most connected files in your codebase — changes here ripple the furthest:",
+                            "Based on the import graph, these files have the most connections:",
+                            "Here are the most central files (by import count):",
+                        ],
+                    );
+
+                    return format!("{}{}", opener, list);
+                }
             }
 
             // Generic graph fallback.

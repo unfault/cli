@@ -247,6 +247,9 @@ pub struct RAGGraphContext {
     /// Files using a specific library / symbol.
     #[serde(default)]
     pub library_users: Vec<RAGGraphFileRelation>,
+    /// For centrality queries: "function" or "file" indicating what was analyzed.
+    #[serde(default)]
+    pub centrality_target: Option<String>,
 }
 
 /// A relationship between a file/function and the target.
@@ -261,6 +264,33 @@ pub struct RAGGraphFileRelation {
     pub usage: Option<String>,
     #[serde(default)]
     pub relationship: Option<String>,
+    /// For function centrality: the function name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// For function centrality: the qualified function name.
+    #[serde(default)]
+    pub qualified_name: Option<String>,
+    /// For centrality: number of incoming edges (callers for functions, importers for files).
+    #[serde(default)]
+    pub in_degree: Option<i32>,
+    /// For centrality: number of outgoing edges.
+    #[serde(default)]
+    pub out_degree: Option<i32>,
+    /// For centrality: computed importance score.
+    #[serde(default)]
+    pub importance_score: Option<i32>,
+    /// Whether this is an HTTP route handler.
+    #[serde(default)]
+    pub is_route: Option<bool>,
+    /// HTTP method if this is a route handler.
+    #[serde(default)]
+    pub http_method: Option<String>,
+    /// HTTP path if this is a route handler.
+    #[serde(default)]
+    pub http_path: Option<String>,
+    /// Type of centrality: "function" or "file".
+    #[serde(default)]
+    pub centrality_type: Option<String>,
 }
 
 /// External dependency entry in graph context.
