@@ -97,6 +97,98 @@ pub struct ReviewArgs {
     pub discover_observability: bool,
 }
 
+/// Stats from SLO discovery for display in review summary.
+#[derive(Default)]
+struct SloDiscoveryStats {
+    /// Number of SLOs discovered
+    slo_count: usize,
+    /// Number of routes linked to at least one SLO
+    monitored_routes: usize,
+    /// Total number of HTTP routes in the codebase
+    total_routes: usize,
+    /// Whether discovery was attempted
+    attempted: bool,
+}
+
+/// Display SLO coverage summary with positive feedback.
+fn display_slo_summary(stats: &SloDiscoveryStats) {
+    if !stats.attempted {
+        return;
+    }
+
+    eprintln!();
+    eprintln!("{}", "─".repeat(60).dimmed());
+
+    if stats.slo_count == 0 {
+        // No SLOs found
+        eprintln!(
+            "{} {} No SLOs discovered from your observability provider.",
+            "📊".cyan(),
+            "Observability:".bold()
+        );
+        eprintln!(
+            "   {}",
+            "Consider setting up SLOs to track how users experience your service.".dimmed()
+        );
+        return;
+    }
+
+    // SLOs were found - show coverage
+    let coverage_percent = if stats.total_routes > 0 {
+        (stats.monitored_routes as f64 / stats.total_routes as f64 * 100.0).round() as i32
+    } else {
+        0
+    };
+
+    eprintln!(
+        "{} {} {} SLO(s) linked to {}/{} routes ({}% coverage)",
+        "📊".cyan(),
+        "Observability:".bold(),
+        stats.slo_count,
+        stats.monitored_routes,
+        stats.total_routes,
+        coverage_percent
+    );
+
+    if stats.total_routes > 0 && stats.monitored_routes == stats.total_routes {
+        // Full coverage - celebrate!
+        eprintln!();
+        eprintln!(
+            "   {} {}",
+            "✓".green().bold(),
+            "All your HTTP routes are covered by SLOs.".green()
+        );
+        eprintln!(
+            "   {}",
+            "This gives you visibility into how users are experiencing your service.".dimmed()
+        );
+    } else if stats.monitored_routes > 0 {
+        // Partial coverage
+        let unmonitored = stats.total_routes - stats.monitored_routes;
+        eprintln!();
+        eprintln!(
+            "   {} {} route(s) are not covered by any SLO.",
+            "⚠".yellow(),
+            unmonitored
+        );
+        eprintln!(
+            "   {}",
+            "Consider adding SLOs for these routes to ensure full observability.".dimmed()
+        );
+    } else if stats.total_routes > 0 {
+        // No routes linked despite having SLOs
+        eprintln!();
+        eprintln!(
+            "   {} Your SLOs don't have path patterns that match your routes.",
+            "ℹ".blue()
+        );
+        eprintln!(
+            "   {}",
+            "Run with --verbose to see SLO details, or configure service-level SLOs.".dimmed()
+        );
+    }
+}
+
 /// Execute the review command
 ///
 /// Analyzes the current directory and displays findings.
@@ -480,11 +572,28 @@ async fn execute_client_parse(
         .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
 
     // Step 2.5: Discover and link SLOs (if --discover-observability flag is set)
+    let mut slo_stats = SloDiscoveryStats::default();
+
     if args.discover_observability {
         use crate::slo::{
             SloEnricher, get_service_display_name, get_service_level_slos, group_slos_by_service,
         };
         use std::io::{self, Write};
+
+        slo_stats.attempted = true;
+
+        // Count total HTTP routes before linking
+        slo_stats.total_routes = graph
+            .function_nodes
+            .values()
+            .filter(|&node_idx| {
+                if let Some(node) = graph.graph.node_weight(*node_idx) {
+                    node.http_method().is_some()
+                } else {
+                    false
+                }
+            })
+            .count();
 
         let enricher = SloEnricher::new(args.verbose);
         if enricher.any_provider_available() {
@@ -634,6 +743,31 @@ async fn execute_client_parse(
                                 }
                             }
                         }
+
+                        // Update SLO stats after all linking is complete
+                        slo_stats.slo_count = graph.slo_nodes.len();
+                        // Count routes that have at least one MONITORED_BY edge
+                        slo_stats.monitored_routes = graph
+                            .function_nodes
+                            .values()
+                            .filter(|&node_idx| {
+                                // Only count HTTP routes (have http_method)
+                                let is_route = graph
+                                    .graph
+                                    .node_weight(*node_idx)
+                                    .is_some_and(|n| n.http_method().is_some());
+                                if !is_route {
+                                    return false;
+                                }
+                                // Check if this route has a MonitoredBy edge
+                                graph.graph.edges(*node_idx).any(|edge| {
+                                    matches!(
+                                        edge.weight(),
+                                        unfault_core::graph::GraphEdgeKind::MonitoredBy
+                                    )
+                                })
+                            })
+                            .count();
 
                         if args.verbose {
                             eprintln!(
@@ -971,6 +1105,9 @@ async fn execute_client_parse(
 
         display_ir_findings(args, &findings, applied_patches, &display_context);
 
+        // Show SLO coverage summary if --discover-observability was used
+        display_slo_summary(&slo_stats);
+
         if finding_count > 0 {
             Ok(EXIT_FINDINGS_FOUND)
         } else {
@@ -1047,6 +1184,9 @@ async fn execute_client_parse(
             display_session_hotspots(args, &hotspots, &display_context);
             hotspots.hotspots.iter().any(|h| h.total_count > 0)
         };
+
+        // Show SLO coverage summary if --discover-observability was used
+        display_slo_summary(&slo_stats);
 
         if has_any {
             Ok(EXIT_FINDINGS_FOUND)
