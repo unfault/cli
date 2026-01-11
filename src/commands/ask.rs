@@ -1729,14 +1729,7 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
     }
 
     if !response.sessions.is_empty() {
-        let msg = pick_variant(
-            &seed,
-            &[
-                "I found a bit of relevant past context. `--verbose` will show the raw details.",
-                "There are a couple of related sessions here. `--verbose` will show what I pulled.",
-            ],
-        );
-        return msg.to_string();
+        return "I found relevant review data but need `--llm` to interpret it for this type of question. Try `--llm` for a detailed answer, or `--verbose` to see the raw context.".to_string();
     }
 
     let msg = pick_variant(
