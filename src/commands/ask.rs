@@ -1742,13 +1742,13 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
     let msg = pick_variant(
         &seed,
         &[
-            "I don’t have enough context to answer that cleanly yet.",
-            "I’m missing a bit of context to answer that well.",
+            "I couldn't find relevant context for this question.",
+            "I don't have enough context to answer that cleanly yet.",
         ],
     );
 
     format!(
-        "{} Try running `unfault review` first, then ask again.",
+        "{} Try asking about specific code (e.g. 'what calls X?', 'impact of changing Y'), or use `--llm` for an AI-powered answer.",
         msg
     )
 }
@@ -1943,16 +1943,9 @@ fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
     }
 
     if response.sessions.is_empty() {
-        let msg = pick_variant(
-            &seed,
-            &[
-                "I didn’t find enough context to answer that cleanly yet.",
-                "I don’t have enough context to answer that cleanly yet.",
-                "I’m missing a bit of context to answer that well.",
-                "I couldn’t find enough to give you a confident answer yet.",
-            ],
+        return Some(
+            "I couldn't find relevant context. Try asking about specific code, or use `--llm` for an AI-powered answer.".to_string()
         );
-        return Some(msg.to_string());
     }
 
     None
