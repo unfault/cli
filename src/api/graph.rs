@@ -344,6 +344,10 @@ pub struct FileInfo {
     pub language: Option<String>,
     /// Distance from the target file (for transitive queries)
     pub depth: Option<i32>,
+    /// How this file depends on the target (imports, calls)
+    pub relationship: Option<String>,
+    /// Function names from the target file that this file uses
+    pub functions: Option<Vec<String>>,
 }
 
 /// Information about a function in a file (for LSP hover/navigation)
@@ -364,6 +368,42 @@ pub struct ExternalModuleInfo {
     pub category: Option<String>,
 }
 
+/// HTTP route that would be affected by code changes
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AffectedRoute {
+    /// HTTP method (GET, POST, etc.)
+    pub http_method: String,
+    /// URL path pattern
+    pub http_path: String,
+    /// Name of the handler function
+    pub handler_name: String,
+    /// File containing the handler function
+    pub handler_file: Option<String>,
+    /// Functions from the target file this route calls
+    pub called_functions: Vec<String>,
+}
+
+/// SLO that monitors an affected route
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AffectedSlo {
+    /// Name of the SLO
+    pub slo_name: String,
+    /// SLO provider (Datadog, etc.)
+    pub provider: Option<String>,
+    /// Target percentage
+    pub target_percent: Option<f64>,
+    /// Current measured percentage
+    pub current_percent: Option<f64>,
+    /// Remaining error budget percentage
+    pub error_budget_remaining: Option<f64>,
+    /// HTTP method of monitored route
+    pub route_method: Option<String>,
+    /// Path of monitored route
+    pub route_path: Option<String>,
+    /// URL to the SLO dashboard
+    pub dashboard_url: Option<String>,
+}
+
 /// Response for impact analysis query
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ImpactAnalysisResponse {
@@ -375,6 +415,12 @@ pub struct ImpactAnalysisResponse {
     pub transitive_importers: Vec<FileInfo>,
     /// Total number of affected files
     pub total_affected: i32,
+    /// HTTP routes that depend on this file
+    #[serde(default)]
+    pub affected_routes: Vec<AffectedRoute>,
+    /// SLOs monitoring the affected routes
+    #[serde(default)]
+    pub affected_slos: Vec<AffectedSlo>,
 }
 
 /// Response for dependency queries

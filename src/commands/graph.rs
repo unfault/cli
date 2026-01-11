@@ -704,7 +704,7 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
         "{} {} {}",
         "🔍".cyan(),
         "Impact Analysis:".bold(),
-        response.file_path.bright_white()
+        response.file_path.bright_purple().bold()
     );
     println!();
 
@@ -795,6 +795,154 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
         println!();
     }
 
+    // Affected routes section
+    if !response.affected_routes.is_empty() {
+        println!("{}", "Affected Routes".bold().underline());
+        println!(
+            "{}",
+            "API endpoints that call functions in this file".dimmed()
+        );
+        println!("{}", "─".repeat(60).dimmed());
+        for route in &response.affected_routes {
+            let method_colored = match route.http_method.as_str() {
+                "GET" => route.http_method.green(),
+                "POST" => route.http_method.yellow(),
+                "PUT" => route.http_method.blue(),
+                "DELETE" => route.http_method.red(),
+                "PATCH" => route.http_method.cyan(),
+                _ => route.http_method.normal(),
+            };
+            println!(
+                "  {} {} {}",
+                "→".cyan(),
+                method_colored.bold(),
+                route.http_path.bright_white()
+            );
+            if verbose {
+                println!(
+                    "    {} {} in {}",
+                    "⤷".dimmed(),
+                    route.handler_name.dimmed(),
+                    route.handler_file.as_deref().unwrap_or("?").dimmed()
+                );
+                if !route.called_functions.is_empty() {
+                    println!(
+                        "      {} calls: {}",
+                        "".dimmed(),
+                        route.called_functions.join(", ").dimmed()
+                    );
+                }
+            }
+        }
+        println!();
+    }
+
+    // Affected SLOs section - group by SLO name to avoid duplicates
+    if !response.affected_slos.is_empty() {
+        use std::collections::HashMap;
+        
+        // Group SLOs by name, keeping track of routes each monitors
+        let mut slo_groups: HashMap<String, Vec<&crate::api::graph::AffectedSlo>> = HashMap::new();
+        for slo in &response.affected_slos {
+            slo_groups.entry(slo.slo_name.clone()).or_default().push(slo);
+        }
+        
+        // Count unique SLOs
+        let unique_slo_count = slo_groups.len();
+        
+        println!("{}", "Affected SLOs".bold().underline());
+        println!(
+            "{}",
+            format!("{} SLO(s) monitoring the affected routes", unique_slo_count).dimmed()
+        );
+        println!("{}", "─".repeat(60).dimmed());
+        
+        // Sort SLO names for consistent output
+        let mut slo_names: Vec<_> = slo_groups.keys().collect();
+        slo_names.sort();
+        
+        for slo_name in slo_names {
+            let slos = &slo_groups[slo_name];
+            let first_slo = slos[0];
+            let route_count = slos.len();
+            
+            let budget_status = if let Some(budget) = first_slo.error_budget_remaining {
+                if budget < 10.0 {
+                    format!("({:.1}% budget left)", budget).red().bold()
+                } else if budget < 30.0 {
+                    format!("({:.1}% budget left)", budget).yellow()
+                } else {
+                    format!("({:.1}% budget left)", budget).green()
+                }
+            } else {
+                "".normal()
+            };
+            
+            // Show route count if SLO covers multiple affected routes
+            let route_info = if route_count > 1 {
+                format!(" [{} routes]", route_count).dimmed()
+            } else {
+                "".normal()
+            };
+            
+            println!(
+                "  {} {}{} {}",
+                "⚠".yellow(),
+                slo_name.bright_white().bold(),
+                route_info,
+                budget_status
+            );
+            
+            if verbose {
+                if let (Some(target), Some(current)) = (first_slo.target_percent, first_slo.current_percent) {
+                    println!(
+                        "    {} Target: {:.2}%, Current: {:.2}%",
+                        "".dimmed(),
+                        target,
+                        current
+                    );
+                }
+                // In verbose mode, list all affected routes for this SLO
+                if route_count > 1 {
+                    println!("    {} Affected routes:", "".dimmed());
+                    for slo in slos.iter().take(5) {
+                        if let (Some(method), Some(path)) = (&slo.route_method, &slo.route_path) {
+                            println!("      {} {} {}", "•".dimmed(), method, path);
+                        }
+                    }
+                    if route_count > 5 {
+                        println!("      {} ...and {} more", "".dimmed(), route_count - 5);
+                    }
+                } else if let (Some(method), Some(path)) = (&first_slo.route_method, &first_slo.route_path) {
+                    println!(
+                        "    {} Monitors: {} {}",
+                        "".dimmed(),
+                        method,
+                        path
+                    );
+                }
+                if let Some(url) = &first_slo.dashboard_url {
+                    println!("    {} Dashboard: {}", "".dimmed(), url.blue().underline());
+                }
+            }
+        }
+        println!();
+
+        // Warning if any SLOs have low error budget (check unique SLOs only)
+        let low_budget_count = slo_groups.values()
+            .filter_map(|slos| slos.first())
+            .filter(|s| s.error_budget_remaining.map(|b| b < 30.0).unwrap_or(false))
+            .count();
+        if low_budget_count > 0 {
+            println!(
+                "  {} {} SLO(s) have low error budget. Test thoroughly before deploying.",
+                "⚠".red().bold(),
+                low_budget_count
+            );
+            println!();
+        }
+    }
+
     // Actionable insight
     if response.total_affected >= 5 {
         println!(
@@ -806,11 +954,13 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
 
     if verbose {
         println!(
-            "  {} Direct: {}, Transitive: {}, Total: {}",
+            "  {} Direct: {}, Transitive: {}, Total: {}, Routes: {}, SLOs: {}",
             "Stats:".dimmed(),
             direct_count,
             transitive_count,
-            response.total_affected
+            response.total_affected,
+            response.affected_routes.len(),
+            response.affected_slos.len()
         );
         println!();
     }
