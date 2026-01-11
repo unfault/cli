@@ -1393,6 +1393,20 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
     let seed = quick_take_seed(response);
 
     if let Some(hint) = &response.hint {
+        // If hint indicates "no results found" style message, don't add a confusing prefix
+        let is_no_results_hint = hint.contains("couldn't find")
+            || hint.contains("don't have any context")
+            || hint.contains("no graph data")
+            || hint.contains("no SLO data");
+
+        let styled_hint = highlight_unfault_commands(hint);
+
+        if is_no_results_hint {
+            // Just return the hint as-is for "no results" messages
+            return styled_hint;
+        }
+
+        // For clarification-seeking hints, add a friendly prefix
         let prefix = pick_variant(
             &seed,
             &[
@@ -1401,8 +1415,6 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
                 "Happy to help. Quick clarification first:",
             ],
         );
-        // Highlight unfault commands within the hint (e.g., 'unfault review --discover-observability')
-        let styled_hint = highlight_unfault_commands(hint);
         return format!("{} {}", prefix, styled_hint);
     }
 
@@ -1905,16 +1917,30 @@ fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
     }
 
     if !response.findings.is_empty() {
-        // Derive themes from dimensions.
-        let mut dim_counts: HashMap<&str, i32> = HashMap::new();
-        for f in &response.findings {
-            if let Some(dim) = f.dimension.as_deref() {
-                *dim_counts.entry(dim).or_insert(0) += 1;
+        // Use session dimension_counts when available (gives overall picture),
+        // otherwise fall back to counting returned findings (biased by query similarity)
+        let dim_counts: HashMap<String, i32> = if !response.sessions.is_empty() {
+            // Aggregate dimension counts from session metadata
+            let mut counts: HashMap<String, i32> = HashMap::new();
+            for session in &response.sessions {
+                for (dim, count) in &session.dimension_counts {
+                    *counts.entry(dim.clone()).or_insert(0) += count;
+                }
             }
-        }
+            counts
+        } else {
+            // Fall back to counting from returned findings
+            let mut counts: HashMap<String, i32> = HashMap::new();
+            for f in &response.findings {
+                if let Some(dim) = f.dimension.as_deref() {
+                    *counts.entry(dim.to_string()).or_insert(0) += 1;
+                }
+            }
+            counts
+        };
 
-        let mut dims: Vec<(&str, i32)> = dim_counts.into_iter().collect();
-        dims.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut dims: Vec<(&String, &i32)> = dim_counts.iter().collect();
+        dims.sort_by(|a, b| b.1.cmp(a.1));
         dims.truncate(2);
 
         let describe_dim = |d: &str| -> &'static str {
