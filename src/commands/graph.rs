@@ -708,13 +708,17 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
     );
     println!();
 
-    if response.total_affected == 0 {
+    if response.total_affected == 0 && response.direct_importers.is_empty() {
         println!(
-            "  {} This file is a leaf node — no other files depend on it.",
+            "  {} No direct dependencies found in the code graph.",
             "ℹ".blue()
         );
         println!(
-            "  {} Changes here are isolated and safe to refactor.",
+            "  {} This could mean the file is used via dynamic imports, reflection,",
+            "".dimmed()
+        );
+        println!(
+            "  {} or the graph doesn't capture all call relationships yet.",
             "".dimmed()
         );
         println!();
@@ -730,14 +734,17 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
         .collect();
     let transitive_count = transitive_only.len();
 
+    // Use actual counts - direct_importers now includes both imports AND callers
+    let total_count = direct_count + transitive_count;
+
     println!(
-        "  {} This file is imported by {} file(s)",
+        "  {} This file is used by {} file(s)",
         "→".cyan(),
-        response.total_affected.to_string().bold()
+        total_count.to_string().bold()
     );
     if transitive_count > 0 {
         println!(
-            "  {} {} direct, {} through transitive imports",
+            "  {} {} direct, {} through transitive dependencies",
             "".dimmed(),
             direct_count,
             transitive_count
