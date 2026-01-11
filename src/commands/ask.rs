@@ -1729,7 +1729,44 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
     }
 
     if !response.sessions.is_empty() {
-        return "I found relevant review data but need `--llm` to interpret it for this type of question. Try `--llm` for a detailed answer, or `--verbose` to see the raw context.".to_string();
+        // We have session context - summarize what we know
+        let total_findings: i32 = response.sessions.iter().map(|s| s.total_findings).sum();
+        
+        if total_findings == 0 {
+            return "Your codebase looks clean — no findings from the last review. That's a good sign!".to_string();
+        }
+        
+        // Aggregate dimension counts across sessions
+        let mut dim_totals: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+        for session in &response.sessions {
+            for (dim, count) in &session.dimension_counts {
+                *dim_totals.entry(dim.clone()).or_insert(0) += count;
+            }
+        }
+        
+        if dim_totals.is_empty() {
+            return format!(
+                "I found {} finding(s) from your last review. Use `--verbose` to see details, or ask about a specific file or function.",
+                total_findings
+            );
+        }
+        
+        // Format dimension summary
+        let mut dims: Vec<(&String, &i32)> = dim_totals.iter().collect();
+        dims.sort_by(|a, b| b.1.cmp(a.1)); // Sort by count descending
+        
+        let dim_summary: String = dims
+            .iter()
+            .take(3)
+            .map(|(dim, count)| format!("{} ({})", dim, count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        return format!(
+            "From your last review: {} finding(s) across {}. Ask about a specific area or use `--verbose` for details.",
+            total_findings,
+            dim_summary
+        );
     }
 
     let msg = pick_variant(
