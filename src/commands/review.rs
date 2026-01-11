@@ -1050,6 +1050,35 @@ async fn execute_client_parse(
         );
     }
 
+    // Step 6b: Generate embeddings for RAG (ask command)
+    // This runs async on the server, so we fire-and-forget
+    pb.set_message("Generating embeddings...");
+    match api_client
+        .generate_embeddings(&config.api_key, &ingest.session_id)
+        .await
+    {
+        Ok(embed_resp) => {
+            if args.verbose {
+                eprintln!(
+                    "\n{} Embeddings: {} session, {} findings",
+                    "DEBUG".yellow(),
+                    embed_resp.session_embeddings_created,
+                    embed_resp.finding_embeddings_created
+                );
+            }
+        }
+        Err(e) => {
+            // Non-fatal: embeddings are optional for RAG, log and continue
+            if args.verbose {
+                eprintln!(
+                    "\n{} Failed to generate embeddings: {}",
+                    "WARN".yellow(),
+                    e
+                );
+            }
+        }
+    }
+
     // Step 7: Fetch results (hotspots by default; full findings only when needed)
     pb.set_message("Fetching results...");
 
