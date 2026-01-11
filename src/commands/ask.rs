@@ -2056,7 +2056,13 @@ fn output_formatted(
 
         for session in &response.sessions {
             let workspace = session.workspace_label.as_deref().unwrap_or("Unknown");
-            let similarity_pct = (session.similarity * 100.0).round() as i32;
+            // Similarity is inner product score, normalize to 0-100% for display
+            // Scores > 1 indicate very high similarity, cap at 99%
+            let similarity_pct = if session.similarity >= 1.0 {
+                99
+            } else {
+                (session.similarity * 100.0).round() as i32
+            };
 
             println!(
                 "  {} {} {} ({}% match)",
@@ -2106,7 +2112,12 @@ fn output_formatted(
             let rule = finding.rule_id.as_deref().unwrap_or("unknown");
             let severity = finding.severity.as_deref().unwrap_or("unknown");
             let dimension = finding.dimension.as_deref().unwrap_or("unknown");
-            let similarity_pct = (finding.similarity * 100.0).round() as i32;
+            // Similarity is inner product score, normalize to 0-100% for display
+            let similarity_pct = if finding.similarity >= 1.0 {
+                99
+            } else {
+                (finding.similarity * 100.0).round() as i32
+            };
 
             // Color severity
             let severity_colored = match severity.to_lowercase().as_str() {
