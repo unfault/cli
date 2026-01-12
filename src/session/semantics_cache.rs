@@ -28,7 +28,9 @@ use xxhash_rust::xxh3::xxh3_64;
 use unfault_core::semantics::SourceSemantics;
 
 /// Current cache format version. Bump this when semantics structure changes.
-const CACHE_VERSION: u32 = 1;
+/// v2: Fixed HTTP call filtering (httpx.URL, httpx.Headers, requests.Session excluded)
+/// v3: Detect HTTP calls on client instances (with statements, assignments)
+const CACHE_VERSION: u32 = 3;
 
 /// Cache metadata stored in meta.json
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
