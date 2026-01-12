@@ -1350,6 +1350,47 @@ fn color_paths(line: &str) -> String {
     out
 }
 
+/// Convert a rule_id to a human-readable description.
+/// e.g., "python.http.missing_timeout" -> "HTTP calls missing timeout"
+fn describe_rule_id(rule_id: &str) -> String {
+    // Common rule patterns and their descriptions
+    let descriptions: &[(&str, &str)] = &[
+        ("missing_timeout", "HTTP calls missing timeout"),
+        ("missing_error_handling", "missing error handling"),
+        ("unhandled_exception", "unhandled exceptions"),
+        ("sql_injection", "potential SQL injection"),
+        ("hardcoded_secret", "hardcoded secrets"),
+        ("missing_auth", "missing authentication"),
+        ("n_plus_one", "N+1 query patterns"),
+        ("missing_index", "missing database indexes"),
+        ("unbounded_query", "unbounded queries"),
+        ("missing_logging", "missing logging"),
+        ("missing_tracing", "missing tracing"),
+        ("deprecated_api", "deprecated API usage"),
+        ("race_condition", "potential race conditions"),
+        ("memory_leak", "potential memory leaks"),
+        ("blocking_call", "blocking calls in async context"),
+    ];
+
+    // Check for known patterns
+    let rule_lower = rule_id.to_lowercase();
+    for (pattern, desc) in descriptions {
+        if rule_lower.contains(pattern) {
+            return desc.to_string();
+        }
+    }
+
+    // Fallback: clean up the rule_id itself
+    // "python.http.missing_timeout" -> "missing timeout"
+    let parts: Vec<&str> = rule_id.split('.').collect();
+    if let Some(last) = parts.last() {
+        // Convert snake_case to spaces
+        return last.replace('_', " ");
+    }
+
+    rule_id.to_string()
+}
+
 fn pick_variant<'a>(seed: &str, variants: &'a [&'a str]) -> &'a str {
     use std::hash::{Hash, Hasher};
 
@@ -1917,84 +1958,104 @@ fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
     }
 
     if !response.findings.is_empty() {
-        // Use session dimension_counts when available (gives overall picture),
-        // otherwise fall back to counting returned findings (biased by query similarity)
-        let dim_counts: HashMap<String, i32> = if !response.sessions.is_empty() {
-            // Aggregate dimension counts from session metadata
-            let mut counts: HashMap<String, i32> = HashMap::new();
-            for session in &response.sessions {
-                for (dim, count) in &session.dimension_counts {
-                    *counts.entry(dim.clone()).or_insert(0) += count;
-                }
-            }
-            counts
-        } else {
-            // Fall back to counting from returned findings
-            let mut counts: HashMap<String, i32> = HashMap::new();
-            for f in &response.findings {
-                if let Some(dim) = f.dimension.as_deref() {
-                    *counts.entry(dim.to_string()).or_insert(0) += 1;
-                }
-            }
-            counts
-        };
-
-        let mut dims: Vec<(&String, &i32)> = dim_counts.iter().collect();
-        dims.sort_by(|a, b| b.1.cmp(a.1));
-        dims.truncate(2);
-
-        let describe_dim = |d: &str| -> &'static str {
-            match d.to_lowercase().as_str() {
-                "stability" => "stability / resilience",
-                "security" => "security hygiene",
-                "performance" => "performance hot paths",
-                "correctness" => "correctness edge cases",
-                "observability" => "logging / tracing",
-                _ => "general cleanup",
-            }
-        };
-
-        let opener = pick_variant(
-            &seed,
-            &[
-                "Feels mostly steady.",
-                "Looks mostly steady.",
-                "Nothing jumps out as wild.",
-                "Seems in decent shape.",
-                "Overall this looks pretty steady.",
-            ],
-        );
-        let mut take = opener.to_string();
-        if !dims.is_empty() {
-            if dims.len() == 1 {
-                take.push_str(&format!(" Main theme: {}.", describe_dim(dims[0].0)));
-            } else {
-                take.push_str(&format!(
-                    " Two themes keep showing up: {} and {}.",
-                    describe_dim(dims[0].0),
-                    describe_dim(dims[1].0)
-                ));
+        use std::collections::HashSet;
+        
+        // Deduplicate findings by (rule_id, file_path, line)
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut deduped: Vec<&crate::api::rag::RAGFindingContext> = Vec::new();
+        
+        for f in &response.findings {
+            let key = format!(
+                "{}:{}:{}",
+                f.rule_id.as_deref().unwrap_or(""),
+                f.file_path.as_deref().unwrap_or(""),
+                f.line.unwrap_or(0)
+            );
+            if seen.insert(key) {
+                deduped.push(f);
             }
         }
 
-        // Starting point from the best finding location.
+        // Group findings by rule_id to give a more specific answer
+        let mut rule_counts: HashMap<String, Vec<&crate::api::rag::RAGFindingContext>> = HashMap::new();
+        for f in deduped {
+            if let Some(rule_id) = &f.rule_id {
+                rule_counts.entry(rule_id.clone()).or_default().push(f);
+            }
+        }
+
+        // If we have specific rules, report on them directly
+        if !rule_counts.is_empty() {
+            let mut rules: Vec<(&String, &Vec<&crate::api::rag::RAGFindingContext>)> = 
+                rule_counts.iter().collect();
+            rules.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+            // Build a response based on the top rules found
+            let top_rule = rules[0].0;
+            let top_findings = rules[0].1;
+            let count = top_findings.len();
+
+            // Get unique file paths for this rule
+            let mut files: Vec<&str> = top_findings
+                .iter()
+                .filter_map(|f| f.file_path.as_deref())
+                .collect();
+            files.sort();
+            files.dedup();
+
+            // Format rule_id nicely (e.g., "python.http.missing_timeout" -> "HTTP calls missing timeout")
+            let rule_desc = describe_rule_id(top_rule);
+
+            let mut take = if count == 1 {
+                format!("Found 1 instance of {}", rule_desc)
+            } else {
+                format!("Found {} instances of {}", count, rule_desc)
+            };
+
+            // List affected files
+            if !files.is_empty() {
+                let file_list: String = if files.len() <= 3 {
+                    files.join(", ")
+                } else {
+                    format!("{}, and {} more", files[..2].join(", "), files.len() - 2)
+                };
+                take.push_str(&format!(" in {}.", file_list));
+            } else {
+                take.push('.');
+            }
+
+            // If there are other rules, mention them
+            if rules.len() > 1 {
+                let other_rules: Vec<String> = rules[1..]
+                    .iter()
+                    .take(2)
+                    .map(|(r, fs)| format!("{} ({})", describe_rule_id(r), fs.len()))
+                    .collect();
+                if !other_rules.is_empty() {
+                    take.push_str(&format!(" Also found: {}.", other_rules.join(", ")));
+                }
+            }
+
+            return Some(take);
+        }
+
+        // Fallback: just mention we found findings
+        let count = response.findings.len();
         let best = response
             .findings
             .iter()
             .max_by(|a, b| a.similarity.partial_cmp(&b.similarity).unwrap());
+        
+        let mut take = format!("Found {} related finding(s)", count);
         if let Some(best) = best {
             if let Some(file) = &best.file_path {
                 if let Some(line) = best.line {
-                    take.push_str(&format!(
-                        " If you want a starting point: {}:{}.",
-                        file, line
-                    ));
+                    take.push_str(&format!(". Best match: {}:{}.", file, line));
                 } else {
-                    take.push_str(&format!(" If you want a starting point: {}.", file));
+                    take.push_str(&format!(". Best match: {}.", file));
                 }
             }
         }
-
         return Some(take);
     }
 
@@ -2061,6 +2122,12 @@ fn output_formatted(
                 println!("{}", color_paths(&line));
             }
             println!();
+        }
+
+        // Show findings with code snippets (non-verbose mode)
+        // Group by rule and show top findings with actual code
+        if !response.findings.is_empty() && !verbose {
+            render_findings_with_snippets(&response.findings);
         }
     }
 
@@ -2203,6 +2270,125 @@ fn output_formatted(
         }
         println!();
     }
+}
+
+/// Render findings with code snippets for a richer answer.
+/// Shows the top findings grouped by rule with one example each.
+fn render_findings_with_snippets(findings: &[crate::api::rag::RAGFindingContext]) {
+    use std::collections::{HashMap, HashSet};
+
+    // Deduplicate findings by (rule_id, file_path, line)
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut deduped: Vec<&crate::api::rag::RAGFindingContext> = Vec::new();
+    
+    for f in findings {
+        let key = format!(
+            "{}:{}:{}",
+            f.rule_id.as_deref().unwrap_or(""),
+            f.file_path.as_deref().unwrap_or(""),
+            f.line.unwrap_or(0)
+        );
+        if seen.insert(key) {
+            deduped.push(f);
+        }
+    }
+
+    // Group findings by rule_id
+    let mut by_rule: HashMap<String, Vec<&crate::api::rag::RAGFindingContext>> = HashMap::new();
+    for f in deduped {
+        let rule = f.rule_id.clone().unwrap_or_else(|| "unknown".to_string());
+        by_rule.entry(rule).or_default().push(f);
+    }
+
+    // Sort rules by count (most common first)
+    let mut rules: Vec<_> = by_rule.into_iter().collect();
+    rules.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+    // Show up to 3 rules, with 1 example each
+    for (rule_id, rule_findings) in rules.iter().take(3) {
+        let rule_desc = describe_rule_id(rule_id);
+        let count = rule_findings.len();
+        
+        // Show one example with code snippet
+        if let Some(finding) = rule_findings.first() {
+            if let (Some(file_path), Some(line)) = (&finding.file_path, finding.line) {
+                let line_num = line as usize;
+                
+                // Print rule description and file:line reference
+                let count_str = if count > 1 {
+                    format!(" (+{} more)", count - 1)
+                } else {
+                    String::new()
+                };
+                
+                println!(
+                    "  {} {}:{} {}{}",
+                    "→".cyan(),
+                    file_path.cyan(),
+                    line.to_string().yellow(),
+                    rule_desc.dimmed(),
+                    count_str.dimmed()
+                );
+                
+                // Try to read the code snippet (just the target line)
+                if let Ok(snippet) = read_code_snippet(file_path, line_num, 0) {
+                    for (ln, code) in snippet {
+                        let line_prefix = format!("{:>4} │", ln).dimmed();
+                        // Trim leading whitespace and very long lines
+                        let code_trimmed = code.trim_start();
+                        let code_display = if code_trimmed.len() > 65 {
+                            format!("{}...", &code_trimmed[..62])
+                        } else {
+                            code_trimmed.to_string()
+                        };
+                        println!("       {} {}", line_prefix, code_display.dimmed());
+                    }
+                }
+            } else if let Some(file_path) = &finding.file_path {
+                let count_str = if count > 1 {
+                    format!(" (+{} more)", count - 1)
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  {} {} {}{}",
+                    "→".cyan(),
+                    file_path.cyan(),
+                    rule_desc.dimmed(),
+                    count_str.dimmed()
+                );
+            }
+        }
+    }
+    println!();
+}
+
+/// Read a code snippet around a specific line.
+/// Returns a vec of (line_number, line_content) tuples.
+fn read_code_snippet(file_path: &str, target_line: usize, context: usize) -> std::io::Result<Vec<(usize, String)>> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+
+    let start = target_line.saturating_sub(context);
+    let end = target_line + context;
+
+    let mut result = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_num = idx + 1;
+        if line_num >= start && line_num <= end {
+            if let Ok(content) = line {
+                result.push((line_num, content));
+            }
+        }
+        if line_num > end {
+            break;
+        }
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
