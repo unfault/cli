@@ -155,6 +155,7 @@ pub struct GraphStats {
     pub file_count: usize,
     pub function_count: usize,
     pub class_count: usize,
+    pub route_count: usize,
     pub import_edge_count: usize,
     pub calls_edge_count: usize,
 }
@@ -584,6 +585,9 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
 
     let graph_stats = graph.stats();
 
+    // Count routes before moving functions
+    let route_count = functions.iter().filter(|f| f.is_handler).count();
+
     SerializableGraph {
         node_count: graph.graph.node_count(),
         edge_count: graph.graph.edge_count(),
@@ -600,6 +604,7 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
             file_count: graph_stats.file_count,
             function_count: graph_stats.function_count,
             class_count: graph_stats.class_count,
+            route_count,
             import_edge_count: graph_stats.import_edge_count,
             calls_edge_count: graph_stats.calls_edge_count,
         },

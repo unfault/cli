@@ -652,9 +652,11 @@ fn format_flow_node(node: &RAGFlowPathNode, indent: usize) -> String {
             }
         }
         "function" => {
-            // Regular function node: show as "calls function_name()"
+            // Regular function node
+            // At root level (indent 0): show as "function function_name()"
+            // At deeper levels: show as "calls function_name()"
             if indent == 0 {
-                format!("{}calls {}()", indent_str, node.name.yellow())
+                format!("{}function {}()", indent_str, node.name.yellow())
             } else {
                 format!("{}{}calls {}()", indent_str, prefix, node.name.yellow())
             }
@@ -777,7 +779,7 @@ fn insert_path_into_tree(parent: &mut TreeNode, remaining_path: &[RAGFlowPathNod
 
 /// Render flow context showing call paths
 fn render_flow_context(flow_context: &RAGFlowContext, verbose: bool) {
-    println!("Analyzing code graph...");
+    println!("{}", "Traversing code graph...".dimmed());
     println!(
         "{} Found {} related modules",
         "→".cyan(),
@@ -2113,6 +2115,13 @@ fn output_formatted(
         }
     }
 
+    // Check if we have meaningful flow context
+    let has_flow_context = response
+        .flow_context
+        .as_ref()
+        .map(|fc| !fc.paths.is_empty() || !fc.root_nodes.is_empty())
+        .unwrap_or(false);
+
     // Default path: print a short colleague-style reply first.
     if llm_response.is_none() {
         let reply = build_colleague_reply(response);
@@ -2125,8 +2134,8 @@ fn output_formatted(
         }
 
         // Show findings with code snippets (non-verbose mode)
-        // Group by rule and show top findings with actual code
-        if !response.findings.is_empty() && !verbose {
+        // Skip findings if we have good flow context - they're usually unrelated noise
+        if !response.findings.is_empty() && !verbose && !has_flow_context {
             render_findings_with_snippets(&response.findings);
         }
     }

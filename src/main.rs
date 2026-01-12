@@ -95,9 +95,20 @@ enum Commands {
         command: ConfigCommands,
     },
     /// Query the code graph for impact analysis, dependencies, and critical files
+    ///
+    /// Without a subcommand, shows a summary of the code graph with entry points.
     Graph {
         #[command(subcommand)]
-        command: GraphCommands,
+        command: Option<GraphCommands>,
+        /// Workspace path to analyze (defaults to current directory)
+        #[arg(long, short = 'w', value_name = "PATH", global = true)]
+        workspace: Option<String>,
+        /// Output as JSON
+        #[arg(long, global = true)]
+        json: bool,
+        /// Enable verbose output
+        #[arg(long, short = 'v', global = true)]
+        verbose: bool,
     },
     /// Authenticate with Unfault using device flow
     Login,
@@ -237,7 +248,7 @@ enum GraphCommands {
         #[arg(long, short = 'n', value_name = "COUNT", default_value = "10")]
         limit: i32,
         /// Metric to sort by
-        #[arg(long, value_name = "METRIC", default_value = "in_degree")]
+        #[arg(long, value_name = "METRIC", default_value = "in-degree")]
         sort_by: SortMetric,
         /// Output as JSON
         #[arg(long)]
@@ -282,14 +293,19 @@ enum GraphCommands {
 #[derive(Clone, Debug, ValueEnum)]
 pub enum SortMetric {
     /// Sort by number of files that import this file (most critical dependencies)
+    #[value(alias = "in_degree")]
     InDegree,
     /// Sort by number of files this file imports
+    #[value(alias = "out_degree")]
     OutDegree,
     /// Sort by total connectivity (in + out)
+    #[value(alias = "total_degree")]
     TotalDegree,
     /// Sort by number of external libraries used
+    #[value(alias = "library_usage")]
     LibraryUsage,
     /// Sort by weighted importance score
+    #[value(alias = "importance_score")]
     ImportanceScore,
 }
 
@@ -424,7 +440,12 @@ async fn run_command(command: Commands) -> i32 {
             }
         }
         Commands::Config { command } => run_config_command(command),
-        Commands::Graph { command } => run_graph_command(command).await,
+        Commands::Graph {
+            command,
+            workspace,
+            json,
+            verbose,
+        } => run_graph_command(command, workspace, json, verbose).await,
         Commands::Login => match commands::login::execute().await {
             Ok(exit_code) => exit_code,
             Err(e) => {
@@ -560,8 +581,33 @@ fn run_llm_command(command: LlmCommands) -> i32 {
     }
 }
 
-async fn run_graph_command(command: GraphCommands) -> i32 {
+async fn run_graph_command(
+    command: Option<GraphCommands>,
+    workspace: Option<String>,
+    json: bool,
+    verbose: bool,
+) -> i32 {
     use unfault::exit_codes::*;
+
+    // Handle default case: no subcommand means show graph summary
+    let command = match command {
+        Some(cmd) => cmd,
+        None => {
+            init_logger(verbose);
+            let args = commands::graph::SummaryArgs {
+                workspace_path: workspace,
+                json,
+                verbose,
+            };
+            return match commands::graph::execute_summary(args).await {
+                Ok(exit_code) => exit_code,
+                Err(e) => {
+                    eprintln!("Graph error: {}", e);
+                    EXIT_ERROR
+                }
+            };
+        }
+    };
 
     match command {
         GraphCommands::Impact {
@@ -719,6 +765,64 @@ async fn run_graph_command(command: GraphCommands) -> i32 {
                     EXIT_ERROR
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn graph_critical_default_sort_by_is_in_degree() {
+        let cli = Cli::try_parse_from(["unfault", "graph", "critical"]).unwrap();
+
+        match cli.command {
+            Commands::Graph { command, .. } => match command {
+                Some(GraphCommands::Critical { sort_by, .. }) => {
+                    assert!(matches!(sort_by, SortMetric::InDegree));
+                }
+                _ => panic!("expected graph critical command"),
+            },
+            _ => panic!("expected graph command"),
+        }
+    }
+
+    #[test]
+    fn graph_critical_accepts_snake_case_sort_by() {
+        let cli = Cli::try_parse_from([
+            "unfault",
+            "graph",
+            "critical",
+            "--sort-by",
+            "in_degree",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Graph { command, .. } => match command {
+                Some(GraphCommands::Critical { sort_by, .. }) => {
+                    assert!(matches!(sort_by, SortMetric::InDegree));
+                }
+                _ => panic!("expected graph critical command"),
+            },
+            _ => panic!("expected graph command"),
+        }
+    }
+
+    #[test]
+    fn graph_default_shows_summary() {
+        // Test that `unfault graph` with no subcommand parses correctly
+        let cli = Cli::try_parse_from(["unfault", "graph"]).unwrap();
+
+        match cli.command {
+            Commands::Graph { command, json, verbose, .. } => {
+                assert!(command.is_none(), "expected no subcommand");
+                assert!(!json, "expected json to be false by default");
+                assert!(!verbose, "expected verbose to be false by default");
+            }
+            _ => panic!("expected graph command"),
         }
     }
 }

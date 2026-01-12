@@ -140,6 +140,17 @@ pub struct StatsArgs {
     pub verbose: bool,
 }
 
+/// Arguments for the default graph summary command
+#[derive(Debug)]
+pub struct SummaryArgs {
+    /// Workspace path to analyze (defaults to current directory)
+    pub workspace_path: Option<String>,
+    /// Output JSON instead of formatted text
+    pub json: bool,
+    /// Verbose output
+    pub verbose: bool,
+}
+
 // =============================================================================
 // Workspace ID Resolution
 // =============================================================================
@@ -645,6 +656,347 @@ pub async fn execute_stats(args: StatsArgs) -> Result<i32> {
     }
 
     Ok(EXIT_SUCCESS)
+}
+
+/// Execute the default graph command - shows summary with entry points
+///
+/// This provides a quick overview of the code graph including:
+/// - Node counts (functions, classes, routes)
+/// - Edge counts (calls, imports)
+/// - Entry points (HTTP routes with their handlers)
+///
+/// # Returns
+///
+/// * `Ok(EXIT_SUCCESS)` - Summary displayed successfully
+/// * `Ok(EXIT_CONFIG_ERROR)` - Not logged in or configuration error
+/// * `Ok(EXIT_AUTH_ERROR)` - API key is invalid
+/// * `Ok(EXIT_NETWORK_ERROR)` - Cannot reach the API
+pub async fn execute_summary(args: SummaryArgs) -> Result<i32> {
+    use crate::session::graph_builder::build_local_graph;
+
+    // Load configuration (require login)
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!(
+                "{} Not logged in. Run `unfault login` first.",
+                "Error:".red().bold()
+            );
+            if args.verbose {
+                eprintln!("  {}: {}", "Details".dimmed(), e);
+            }
+            return Ok(EXIT_CONFIG_ERROR);
+        }
+    };
+
+    // Resolve workspace path
+    let workspace_path = match &args.workspace_path {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::env::current_dir().map_err(|e| {
+            eprintln!(
+                "{} Failed to get current directory: {}",
+                "Error:".red().bold(),
+                e
+            );
+            anyhow::anyhow!("Failed to get current directory")
+        })?,
+    };
+
+    // Resolve workspace ID for API call
+    let identifier = match resolve_identifier(None, args.workspace_path.as_deref(), args.verbose) {
+        Ok(id) => id,
+        Err(exit_code) => return Ok(exit_code),
+    };
+
+    // Create API client
+    let api_client = ApiClient::new(config.base_url());
+
+    // Build local graph to get entry points (no progress message - it's fast enough)
+    let graph = match build_local_graph(&workspace_path, None, args.verbose) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("{} Failed to build code graph: {}", "Error:".red().bold(), e);
+            return Ok(EXIT_ERROR);
+        }
+    };
+
+    // Fetch stats from API (to verify connection and get persisted data)
+    let api_stats = match &identifier {
+        ResolvedIdentifier::SessionId(sid) => {
+            api_client.graph_stats(&config.api_key, sid).await
+        }
+        ResolvedIdentifier::WorkspaceId(wid) => {
+            api_client.graph_stats_by_workspace(&config.api_key, wid).await
+        }
+    };
+
+    // If API call fails, show local stats but warn
+    let has_api_data = api_stats.is_ok();
+    if !has_api_data && args.verbose {
+        eprintln!(
+            "  {} No graph data on server. Run 'unfault review' to persist the graph.",
+            "ℹ".blue()
+        );
+    }
+
+    // Fetch SLO data from server via RAG query
+    let workspace_id = match &identifier {
+        ResolvedIdentifier::SessionId(_) => None,
+        ResolvedIdentifier::WorkspaceId(wid) => Some(wid.clone()),
+    };
+
+    let slo_context = if has_api_data {
+        use crate::api::rag::RAGQueryRequest;
+
+        let slo_request = RAGQueryRequest {
+            query: "list slos".to_string(),
+            workspace_id,
+            max_sessions: Some(1),
+            max_findings: Some(1),
+            similarity_threshold: Some(0.0),
+            graph_data: None,
+        };
+
+        match api_client.query_rag(&config.api_key, &slo_request).await {
+            Ok(response) => response.slo_context,
+            Err(e) => {
+                if args.verbose {
+                    eprintln!("  {} Could not fetch SLO data: {}", "ℹ".dimmed(), e);
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Output results
+    if args.json {
+        output_summary_json(&graph, api_stats.ok().as_ref(), slo_context.as_ref())?;
+    } else {
+        output_summary_formatted(&graph, slo_context.as_ref(), args.verbose);
+    }
+
+    Ok(EXIT_SUCCESS)
+}
+
+fn output_summary_json(
+    graph: &crate::session::graph_builder::SerializableGraph,
+    _api_stats: Option<&GraphStatsResponse>,
+    slo_context: Option<&crate::api::rag::RAGSloContext>,
+) -> Result<()> {
+    // Collect entry points (HTTP routes)
+    let entry_points: Vec<serde_json::Value> = graph
+        .functions
+        .iter()
+        .filter(|f| f.is_handler && f.http_method.is_some())
+        .map(|f| {
+            serde_json::json!({
+                "method": f.http_method,
+                "path": f.http_path,
+                "handler": f.qualified_name,
+                "file": f.file_path
+            })
+        })
+        .collect();
+
+    let mut output = serde_json::json!({
+        "nodes": {
+            "functions": graph.stats.function_count,
+            "classes": graph.stats.class_count,
+            "routes": graph.stats.route_count
+        },
+        "edges": {
+            "calls": graph.stats.calls_edge_count,
+            "imports": graph.stats.import_edge_count
+        },
+        "entry_points": entry_points
+    });
+
+    // Add SLOs from API if present
+    if let Some(ctx) = slo_context {
+        if !ctx.slos.is_empty() {
+            let slos: Vec<serde_json::Value> = ctx
+                .slos
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "id": s.id,
+                        "name": s.name,
+                        "provider": s.provider,
+                        "target_percent": s.target_percent,
+                        "current_percent": s.current_percent,
+                        "error_budget_remaining": s.error_budget_remaining,
+                        "path_pattern": s.path_pattern,
+                        "dashboard_url": s.dashboard_url
+                    })
+                })
+                .collect();
+            output["slos"] = serde_json::json!(slos);
+
+            // Add monitoring summary
+            let monitored = ctx.monitored_routes.len();
+            let unmonitored = ctx.unmonitored_routes.len();
+            let total = monitored + unmonitored;
+            if total > 0 {
+                output["monitoring"] = serde_json::json!({
+                    "monitored_routes": monitored,
+                    "unmonitored_routes": unmonitored,
+                    "total_routes": total,
+                    "coverage_percent": (monitored as f64 / total as f64 * 100.0).round() as i32
+                });
+            }
+        }
+    }
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn output_summary_formatted(
+    graph: &crate::session::graph_builder::SerializableGraph,
+    slo_context: Option<&crate::api::rag::RAGSloContext>,
+    verbose: bool,
+) {
+    // Nodes summary line
+    println!(
+        "{} {} functions, {} classes, {} routes",
+        "Nodes:".bold(),
+        graph.stats.function_count.to_string().cyan(),
+        graph.stats.class_count.to_string().cyan(),
+        graph.stats.route_count.to_string().cyan()
+    );
+
+    // Edges summary line
+    println!(
+        "{} {} calls, {} imports",
+        "Edges:".bold(),
+        graph.stats.calls_edge_count.to_string().green(),
+        graph.stats.import_edge_count.to_string().green()
+    );
+    println!();
+
+    // Entry points (HTTP routes)
+    let routes: Vec<_> = graph
+        .functions
+        .iter()
+        .filter(|f| f.is_handler && f.http_method.is_some())
+        .collect();
+
+    if !routes.is_empty() {
+        println!("{}", "Entry points:".bold());
+        for route in routes.iter().take(3) {
+            let method = route.http_method.as_deref().unwrap_or("?");
+            let path = route.http_path.as_deref().unwrap_or("?");
+            let handler = &route.qualified_name;
+
+            // Color HTTP methods and align them
+            let method_colored = match method {
+                "GET" => format!("{:6}", method).green(),
+                "POST" => format!("{:6}", method).yellow(),
+                "PUT" => format!("{:6}", method).blue(),
+                "DELETE" => format!("{:6}", method).red(),
+                "PATCH" => format!("{:6}", method).cyan(),
+                _ => format!("{:6}", method).normal(),
+            };
+
+            println!(
+                "  {} {} {} {}",
+                method_colored,
+                path.bright_white(),
+                "→".dimmed(),
+                handler.dimmed()
+            );
+        }
+
+        // Show "and N more" if there are more routes
+        if routes.len() > 3 {
+            println!(
+                "   {} ... and {} more",
+                "".dimmed(),
+                (routes.len() - 3).to_string().cyan()
+            );
+        }
+        println!();
+    }
+
+    // SLOs section from API (if available)
+    if let Some(ctx) = slo_context {
+        if !ctx.slos.is_empty() {
+            // Show monitoring coverage summary
+            let monitored = ctx.monitored_routes.len();
+            let unmonitored = ctx.unmonitored_routes.len();
+            let total = monitored + unmonitored;
+
+            if total > 0 {
+                let coverage = (monitored as f64 / total as f64 * 100.0).round() as i32;
+                println!(
+                    "{} {} SLO(s) monitoring {}/{} routes ({}% coverage)",
+                    "SLOs:".bold(),
+                    ctx.slos.len().to_string().cyan(),
+                    monitored.to_string().green(),
+                    total,
+                    coverage
+                );
+            } else {
+                println!(
+                    "{} {} configured",
+                    "SLOs:".bold(),
+                    ctx.slos.len().to_string().cyan()
+                );
+            }
+
+            for slo in ctx.slos.iter().take(3) {
+                // Color-code based on error budget
+                let status = if let Some(budget) = slo.error_budget_remaining {
+                    if budget < 10.0 {
+                        format!("{:.1}% budget", budget).red().to_string()
+                    } else if budget < 30.0 {
+                        format!("{:.1}% budget", budget).yellow().to_string()
+                    } else {
+                        format!("{:.1}% budget", budget).green().to_string()
+                    }
+                } else {
+                    "no data".dimmed().to_string()
+                };
+
+                let target = slo
+                    .target_percent
+                    .map(|t| format!("{:.1}%", t))
+                    .unwrap_or_else(|| "?".to_string());
+
+                println!(
+                    "  {} {} {} {}",
+                    "•".cyan(),
+                    slo.name.bright_white(),
+                    format!("[target: {}]", target).dimmed(),
+                    status
+                );
+
+                // Show path pattern in verbose mode
+                if verbose {
+                    if let Some(ref pattern) = slo.path_pattern {
+                        println!("    {} pattern: {}", "".dimmed(), pattern.dimmed());
+                    }
+                }
+            }
+
+            if ctx.slos.len() > 3 {
+                println!(
+                    "   {} ... and {} more",
+                    "".dimmed(),
+                    (ctx.slos.len() - 3).to_string().cyan()
+                );
+            }
+            println!();
+        }
+    }
+
+    println!(
+        "{}",
+        "Graph ready. Run 'unfault ask' to explore.".dimmed()
+    );
+    println!();
 }
 
 // =============================================================================
