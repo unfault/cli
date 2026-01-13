@@ -2680,22 +2680,57 @@ impl LanguageServer for UnfaultLsp {
             }
         }
 
-        let findings: Vec<FunctionImpactFinding> = response
-            .findings
-            .into_iter()
-            .map(|f| FunctionImpactFinding {
-                severity: normalize_severity(&f.severity),
-                message: format!(
-                    "{}: {}",
-                    f.title,
-                    f.description.lines().next().unwrap_or("")
-                ),
-                learn_more: Some(format!(
-                    "https://docs.unfault.dev/rules/{}",
-                    f.rule_id.replace('.', "/")
-                )),
-            })
-            .collect();
+        // Use findings from local cache (fresh from latest analysis) instead of API database
+        // This ensures the sidebar reflects the current state of the code, not stale persisted data
+        let findings: Vec<FunctionImpactFinding> = if let Some(uri) = uri.as_ref() {
+            if let Some(cached) = self.findings_cache.get(uri) {
+                cached
+                    .iter()
+                    .filter(|cf| {
+                        // Filter to findings within the function's line range
+                        match (start_line, end_line) {
+                            (Some(start), Some(end)) => {
+                                let line = cf.finding.line;
+                                line >= start as u32 && line <= end as u32
+                            }
+                            _ => true, // Include if we can't determine range
+                        }
+                    })
+                    .map(|cf| FunctionImpactFinding {
+                        severity: normalize_severity(&cf.finding.severity),
+                        message: format!(
+                            "{}: {}",
+                            cf.finding.title,
+                            cf.finding.description.lines().next().unwrap_or("")
+                        ),
+                        learn_more: Some(format!(
+                            "https://docs.unfault.dev/rules/{}",
+                            cf.finding.rule_id.replace('.', "/")
+                        )),
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else {
+            // Fallback to API response if no URI
+            response
+                .findings
+                .iter()
+                .map(|f| FunctionImpactFinding {
+                    severity: normalize_severity(&f.severity),
+                    message: format!(
+                        "{}: {}",
+                        f.title,
+                        f.description.lines().next().unwrap_or("")
+                    ),
+                    learn_more: Some(format!(
+                        "https://docs.unfault.dev/rules/{}",
+                        f.rule_id.replace('.', "/")
+                    )),
+                })
+                .collect()
+        };
 
         // Path findings are findings from callers in the call path
         let path_findings: Vec<FunctionImpactFinding> = response
@@ -2887,22 +2922,57 @@ impl UnfaultLsp {
             }
         }
 
-        let findings: Vec<FunctionImpactFinding> = response
-            .findings
-            .into_iter()
-            .map(|f| FunctionImpactFinding {
-                severity: normalize_severity(&f.severity),
-                message: format!(
-                    "{}: {}",
-                    f.title,
-                    f.description.lines().next().unwrap_or("")
-                ),
-                learn_more: Some(format!(
-                    "https://docs.unfault.dev/rules/{}",
-                    f.rule_id.replace('.', "/")
-                )),
-            })
-            .collect();
+        // Use findings from local cache (fresh from latest analysis) instead of API database
+        // This ensures the sidebar reflects the current state of the code, not stale persisted data
+        let findings: Vec<FunctionImpactFinding> = if let Some(uri) = uri.as_ref() {
+            if let Some(cached) = self.findings_cache.get(uri) {
+                cached
+                    .iter()
+                    .filter(|cf| {
+                        // Filter to findings within the function's line range
+                        match (start_line, end_line) {
+                            (Some(start), Some(end)) => {
+                                let line = cf.finding.line;
+                                line >= start as u32 && line <= end as u32
+                            }
+                            _ => true, // Include if we can't determine range
+                        }
+                    })
+                    .map(|cf| FunctionImpactFinding {
+                        severity: normalize_severity(&cf.finding.severity),
+                        message: format!(
+                            "{}: {}",
+                            cf.finding.title,
+                            cf.finding.description.lines().next().unwrap_or("")
+                        ),
+                        learn_more: Some(format!(
+                            "https://docs.unfault.dev/rules/{}",
+                            cf.finding.rule_id.replace('.', "/")
+                        )),
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else {
+            // Fallback to API response if no URI
+            response
+                .findings
+                .iter()
+                .map(|f| FunctionImpactFinding {
+                    severity: normalize_severity(&f.severity),
+                    message: format!(
+                        "{}: {}",
+                        f.title,
+                        f.description.lines().next().unwrap_or("")
+                    ),
+                    learn_more: Some(format!(
+                        "https://docs.unfault.dev/rules/{}",
+                        f.rule_id.replace('.', "/")
+                    )),
+                })
+                .collect()
+        };
 
         // Path findings are findings from callers in the call path
         let path_findings: Vec<FunctionImpactFinding> = response
