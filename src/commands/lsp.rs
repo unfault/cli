@@ -2333,13 +2333,12 @@ impl LanguageServer for UnfaultLsp {
                 .insert_async(params.text_document.uri.clone(), change.text.clone())
                 .await;
 
-            self.analyze_document(
-                &params.text_document.uri,
-                &change.text,
-                params.text_document.version,
-                None, // No pre-built IR on change
-            )
-            .await;
+            // NOTE: We intentionally do NOT run full analysis on every change.
+            // Full analysis (IR build + API call) is expensive and would lag the editor.
+            // Analysis runs on:
+            // - did_open (file opened)
+            // - did_save (file saved)
+            // The document cache is kept up-to-date for code actions to work.
         }
     }
 
