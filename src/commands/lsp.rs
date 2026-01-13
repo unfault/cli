@@ -586,18 +586,25 @@ impl UnfaultLsp {
         };
 
         // Use pre-built IR if provided, otherwise build it (with caching)
+        // Pass content override for the current file to use buffer content instead of disk
         let (ir, should_send_dependencies) = match prebuilt_ir {
             Some(ir) => {
                 self.log_debug("Using pre-built IR (skipping rebuild)");
                 (ir, false) // Dependencies already sent by did_open
             }
-            None => match build_ir_cached(&project_root, None, self.verbose) {
-                Ok(result) => (result.ir, true), // Fresh IR, send dependencies
-                Err(e) => {
-                    let msg = format!("Failed to build IR: {}", e);
-                    self.log_debug(&msg);
-                    self.client.show_message(MessageType::WARNING, msg).await;
-                    return;
+            None => {
+                // Create content override map with the current file's buffer content
+                let mut content_overrides = std::collections::HashMap::new();
+                content_overrides.insert(file_path.clone(), text.to_string());
+                
+                match build_ir_cached(&project_root, None, self.verbose, Some(&content_overrides)) {
+                    Ok(result) => (result.ir, true), // Fresh IR, send dependencies
+                    Err(e) => {
+                        let msg = format!("Failed to build IR: {}", e);
+                        self.log_debug(&msg);
+                        self.client.show_message(MessageType::WARNING, msg).await;
+                        return;
+                    }
                 }
             },
         };
@@ -2240,7 +2247,7 @@ impl LanguageServer for UnfaultLsp {
         // Build IR locally first - this gives us the graph for dependency analysis
         // even before the API call completes (or if it fails)
         let local_ir = if let Some(ref proj_root) = project_root {
-            match build_ir_cached(proj_root, None, self.verbose) {
+            match build_ir_cached(proj_root, None, self.verbose, None) {
                 Ok(result) => Some(result.ir),
                 Err(e) => {
                     self.log_debug(&format!("Failed to build IR for local graph: {}", e));

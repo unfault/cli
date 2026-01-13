@@ -556,7 +556,7 @@ async fn execute_client_parse(
         )
     };
 
-    let build_result = match build_ir_cached(current_dir, file_paths.as_deref(), args.verbose) {
+    let build_result = match build_ir_cached(current_dir, file_paths.as_deref(), args.verbose, None) {
         Ok(result) => result,
         Err(e) => {
             pb.finish_and_clear();

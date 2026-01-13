@@ -281,7 +281,7 @@ pub fn build_ir(
 /// ```rust,ignore
 /// use unfault::session::ir_builder::build_ir_cached;
 ///
-/// let result = build_ir_cached(&workspace_path, None, false)?;
+/// let result = build_ir_cached(&workspace_path, None, false, None)?;
 /// println!("Cache hit rate: {:.1}%", result.cache_stats.hit_rate());
 /// let ir_json = serde_json::to_string(&result.ir)?;
 /// ```
@@ -289,6 +289,7 @@ pub fn build_ir_cached(
     workspace_path: &Path,
     file_paths: Option<&[PathBuf]>,
     verbose: bool,
+    content_overrides: Option<&std::collections::HashMap<PathBuf, String>>,
 ) -> Result<IrBuildResult> {
     let _total_start = Instant::now();
 
@@ -324,13 +325,30 @@ pub fn build_ir_cached(
         .map(|(index, file_path)| {
             let language = detect_language(file_path)?;
 
-            let content = match std::fs::read_to_string(file_path) {
-                Ok(c) => c,
-                Err(e) => {
-                    if verbose {
-                        eprintln!("Warning: Could not read {}: {}", file_path.display(), e);
+            // Use content override if available (for unsaved buffer content from LSP)
+            let content = if let Some(overrides) = content_overrides {
+                if let Some(override_content) = overrides.get(file_path) {
+                    override_content.clone()
+                } else {
+                    match std::fs::read_to_string(file_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            if verbose {
+                                eprintln!("Warning: Could not read {}: {}", file_path.display(), e);
+                            }
+                            return None;
+                        }
                     }
-                    return None;
+                }
+            } else {
+                match std::fs::read_to_string(file_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        if verbose {
+                            eprintln!("Warning: Could not read {}: {}", file_path.display(), e);
+                        }
+                        return None;
+                    }
                 }
             };
 
