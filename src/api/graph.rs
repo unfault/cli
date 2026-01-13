@@ -23,6 +23,15 @@ use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::Range;
 
 // =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Helper for serde skip_serializing_if - returns true if value is false
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+// =============================================================================
 // Request Types
 // =============================================================================
 
@@ -122,6 +131,7 @@ pub struct CentralityRequest {
 ///     session_id: "...".to_string(),
 ///     profiles: vec!["stability".to_string()],
 ///     semantics_json: serde_json::to_string(&ir.semantics)?,
+///     incremental: false,
 /// };
 /// let response = client.analyze_ir(&api_key, &request).await?;
 /// ```
@@ -133,6 +143,10 @@ pub struct IrAnalyzeRequest {
     pub profiles: Vec<String>,
     /// JSON-serialized semantics array from unfault-core IR
     pub semantics_json: String,
+    /// If true, delete existing findings for analyzed files before inserting new ones.
+    /// Use this for live sessions to keep findings fresh as code changes.
+    #[serde(skip_serializing_if = "is_false")]
+    pub incremental: bool,
 }
 
 /// A single finding from rule evaluation (API response format)
@@ -985,6 +999,7 @@ impl ApiClient {
         git_remote: Option<&str>,
         package_export: Option<&crate::session::PackageExport>,
         graph: unfault_core::graph::CodeGraph,
+        is_live: bool,
     ) -> Result<GraphIngestResponse, ApiError> {
         self.ingest_graph_with_progress(
             api_key,
@@ -993,6 +1008,7 @@ impl ApiClient {
             git_remote,
             package_export,
             graph,
+            is_live,
             |_| {},
         )
         .await
@@ -1013,6 +1029,7 @@ impl ApiClient {
     ///   file IDs will be globally unique across machines for the same repo.
     /// * `package_export` - Package export info for cross-workspace dependency tracking
     /// * `graph` - The code graph to ingest
+    /// * `is_live` - If true, reuse existing live session (for IDE real-time feedback)
     /// * `on_progress` - Progress callback
     #[allow(clippy::too_many_arguments)]
     pub async fn ingest_graph_with_progress<F>(
@@ -1023,6 +1040,7 @@ impl ApiClient {
         git_remote: Option<&str>,
         package_export: Option<&crate::session::PackageExport>,
         graph: unfault_core::graph::CodeGraph,
+        is_live: bool,
         mut on_progress: F,
     ) -> Result<GraphIngestResponse, ApiError>
     where
@@ -1056,6 +1074,11 @@ impl ApiClient {
             if let Some(remote) = git_remote {
                 start_url.push_str(&format!("&git_remote={}", urlencoding::encode(remote),));
             }
+        }
+
+        // Add is_live flag for IDE real-time sessions (reuses existing session)
+        if is_live {
+            start_url.push_str("&is_live=true");
         }
 
         let start_resp = self
@@ -1290,12 +1313,21 @@ impl ApiClient {
     /// Analyze code using client-side parsed semantics.
     ///
     /// The graph must have already been ingested via `ingest_graph`.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - API key for authentication
+    /// * `session_id` - Session ID from graph ingest
+    /// * `profiles` - List of profiles to use for rule resolution
+    /// * `semantics_json` - JSON-serialized semantics from unfault-core
+    /// * `incremental` - If true, delete old findings for analyzed files before inserting new ones
     pub async fn analyze_ir(
         &self,
         api_key: &str,
         session_id: &str,
         profiles: &[String],
         semantics_json: String,
+        incremental: bool,
     ) -> Result<IrAnalyzeResponse, ApiError> {
         let url = format!("{}/api/v1/graph/analyze", self.base_url);
 
@@ -1303,6 +1335,7 @@ impl ApiClient {
             session_id: session_id.to_string(),
             profiles: profiles.to_vec(),
             semantics_json,
+            incremental,
         };
 
         debug!("[API] Sending POST request...");

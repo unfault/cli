@@ -711,7 +711,7 @@ impl UnfaultLsp {
             .and_then(|n| n.to_str())
             .unwrap_or("project");
 
-        debug!("[LSP] Uploading graph for analysis...");
+        debug!("[LSP] Uploading graph for analysis (live session)...");
         let ingest = match self
             .api_client
             .ingest_graph(
@@ -721,6 +721,7 @@ impl UnfaultLsp {
                 git_remote.as_deref(),
                 None, // TODO: Pass package_export for cross-workspace tracking
                 graph,
+                true, // is_live: reuse existing session for IDE real-time feedback
             )
             .await
         {
@@ -763,11 +764,17 @@ impl UnfaultLsp {
             }
         };
 
-        debug!("[LSP] Calling analyze_ir API...");
+        debug!("[LSP] Calling analyze_ir API (incremental)...");
 
         let response = match self
             .api_client
-            .analyze_ir(&api_key, &ingest.session_id, &profiles, semantics_json)
+            .analyze_ir(
+                &api_key,
+                &ingest.session_id,
+                &profiles,
+                semantics_json,
+                true, // incremental: delete old findings for these files before inserting new
+            )
             .await
         {
             Ok(response) => response,
@@ -844,6 +851,7 @@ impl UnfaultLsp {
         }
 
         // Store cached findings
+        let finding_count = cached_findings.len() as i32;
         self.findings_cache.insert(uri.clone(), cached_findings);
 
         // Publish diagnostics (or clear them if disabled)
@@ -863,6 +871,14 @@ impl UnfaultLsp {
             "Diagnostics: enabled={} published={} for {}",
             settings.diagnostics.enabled, diagnostics_count, uri
         ));
+
+        // Notify client that analysis is complete so it can refresh UI
+        self.client
+            .send_notification::<AnalysisCompleteNotificationType>(AnalysisCompleteNotification {
+                uri: uri.to_string(),
+                finding_count,
+            })
+            .await;
     }
 
     /// Convert a finding to an LSP diagnostic
@@ -1774,6 +1790,7 @@ impl UnfaultLsp {
         ));
 
         // Call function impact API
+        // The API will resolve workspace_id to the live session if one exists
         let workspace_root = { self.workspace_root.read().await.clone() };
         let git_remote = workspace_root.as_ref().and_then(|p| get_git_remote(p));
         let file_id = Some(compute_file_id(
@@ -2780,6 +2797,23 @@ struct FileDependenciesNotificationType;
 impl tower_lsp::lsp_types::notification::Notification for FileDependenciesNotificationType {
     type Params = FileDependenciesNotification;
     const METHOD: &'static str = "unfault/fileDependencies";
+}
+
+/// Notification sent when analysis completes for a file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisCompleteNotification {
+    /// URI of the analyzed file
+    pub uri: String,
+    /// Number of findings for this file
+    pub finding_count: i32,
+}
+
+/// Custom notification type for analysis complete
+struct AnalysisCompleteNotificationType;
+
+impl tower_lsp::lsp_types::notification::Notification for AnalysisCompleteNotificationType {
+    type Params = AnalysisCompleteNotification;
+    const METHOD: &'static str = "unfault/analysisComplete";
 }
 
 impl UnfaultLsp {
