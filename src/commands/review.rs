@@ -756,19 +756,18 @@ async fn execute_client_parse(
                                                     if let Some(slos_to_link) =
                                                         grouped.get(&selected_service)
                                                     {
-                                                        let mut total_linked = 0;
+                                                        let route_count = graph.get_http_route_handlers().len();
                                                         for slo in slos_to_link {
-                                                            total_linked += enricher
-                                                                .link_service_slo_to_all_routes(
-                                                                    &mut graph, slo,
-                                                                );
+                                                            enricher.link_service_slo_to_all_routes(
+                                                                &mut graph, slo,
+                                                            );
                                                         }
 
                                                         eprintln!(
                                                             "\n{} Linked {} SLO(s) to {} route handler(s).",
                                                             "✓".green().bold(),
                                                             slos_to_link.len(),
-                                                            total_linked
+                                                            route_count
                                                         );
                                                     }
 
