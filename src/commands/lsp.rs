@@ -130,6 +130,9 @@ pub struct FunctionImpactCaller {
     pub name: String,
     pub file: String,
     pub depth: i32,
+    /// The function this caller calls (for call chain reconstruction)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calls: Option<String>,
 }
 
 /// Route information for function impact response
@@ -2589,6 +2592,7 @@ impl LanguageServer for UnfaultLsp {
         {
             callers.push(FunctionImpactCaller {
                 name: c.function.clone(),
+                calls: c.calls.clone(),
                 file: c.path.clone(),
                 depth: c.depth,
             });
@@ -2795,6 +2799,7 @@ impl UnfaultLsp {
         {
             callers.push(FunctionImpactCaller {
                 name: c.function.clone(),
+                calls: c.calls.clone(),
                 file: c.path.clone(),
                 depth: c.depth,
             });
@@ -3295,6 +3300,7 @@ mod tests {
                 name: "caller_func".to_string(),
                 file: "main.py".to_string(),
                 depth: 1,
+                calls: Some("my_func".to_string()),
             }],
             routes: vec![FunctionImpactRoute {
                 method: "POST".to_string(),

@@ -496,6 +496,9 @@ pub struct FunctionCaller {
     pub function: String,
     /// Distance from the target function
     pub depth: i32,
+    /// Name of the function this caller calls (for call chain reconstruction)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calls: Option<String>,
     /// Whether this caller is an HTTP route handler
     #[serde(default)]
     pub is_route_handler: bool,
