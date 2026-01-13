@@ -164,6 +164,127 @@ pub struct FunctionImpactFinding {
     pub learn_more: Option<String>,
 }
 
+/// Summarized insight for function impact response
+/// These are friendly, actionable summaries derived from raw findings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionImpactInsight {
+    pub severity: String,
+    pub message: String,
+}
+
+/// Summarize raw findings into friendly, actionable insights
+/// Groups findings by category and generates human-readable summaries
+fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactInsight> {
+    if findings.is_empty() {
+        return Vec::new();
+    }
+
+    #[derive(Default)]
+    struct Category {
+        count: usize,
+        severity: Option<String>,
+    }
+
+    let mut timeout = Category::default();
+    let mut retry = Category::default();
+    let mut logging = Category::default();
+    let mut error_handling = Category::default();
+    let mut security = Category::default();
+    let mut other_messages: Vec<(String, String)> = Vec::new(); // (message, severity)
+
+    for f in findings {
+        let msg_lower = f.message.to_lowercase();
+        
+        if msg_lower.contains("timeout") {
+            timeout.count += 1;
+            if timeout.severity.is_none() || f.severity == "error" {
+                timeout.severity = Some(f.severity.clone());
+            }
+        } else if msg_lower.contains("retry") || msg_lower.contains("retries") {
+            retry.count += 1;
+            if retry.severity.is_none() || f.severity == "error" {
+                retry.severity = Some(f.severity.clone());
+            }
+        } else if msg_lower.contains("log") {
+            logging.count += 1;
+            if logging.severity.is_none() || f.severity == "error" {
+                logging.severity = Some(f.severity.clone());
+            }
+        } else if msg_lower.contains("error") || msg_lower.contains("exception") || msg_lower.contains("handle") {
+            error_handling.count += 1;
+            if error_handling.severity.is_none() || f.severity == "error" {
+                error_handling.severity = Some(f.severity.clone());
+            }
+        } else if msg_lower.contains("security") || msg_lower.contains("auth") || msg_lower.contains("injection") || msg_lower.contains("secret") {
+            security.count += 1;
+            if security.severity.is_none() || f.severity == "error" {
+                security.severity = Some(f.severity.clone());
+            }
+        } else {
+            other_messages.push((f.message.clone(), f.severity.clone()));
+        }
+    }
+
+    let mut insights = Vec::new();
+
+    // Generate friendly summaries for each category
+    if timeout.count > 0 {
+        insights.push(FunctionImpactInsight {
+            severity: timeout.severity.unwrap_or_else(|| "warning".to_string()),
+            message: "Missing timeout on external call".to_string(),
+        });
+    }
+    if retry.count > 0 {
+        insights.push(FunctionImpactInsight {
+            severity: retry.severity.unwrap_or_else(|| "warning".to_string()),
+            message: "No retry logic for transient failures".to_string(),
+        });
+    }
+    if error_handling.count > 0 {
+        insights.push(FunctionImpactInsight {
+            severity: error_handling.severity.unwrap_or_else(|| "warning".to_string()),
+            message: "Error handling could be improved".to_string(),
+        });
+    }
+    if logging.count > 0 {
+        insights.push(FunctionImpactInsight {
+            severity: logging.severity.unwrap_or_else(|| "info".to_string()),
+            message: "Could use better logging".to_string(),
+        });
+    }
+    if security.count > 0 {
+        insights.push(FunctionImpactInsight {
+            severity: security.severity.unwrap_or_else(|| "error".to_string()),
+            message: "Security concern flagged".to_string(),
+        });
+    }
+
+    // Add first "other" message if we have room (max 3 insights)
+    if insights.len() < 3 {
+        if let Some((msg, sev)) = other_messages.into_iter().next() {
+            // Clean up the message - take last part after colon, truncate if needed
+            let cleaned = msg
+                .rsplit(':')
+                .next()
+                .unwrap_or(&msg)
+                .trim();
+            let truncated = if cleaned.len() > 50 {
+                format!("{}...", &cleaned[..47])
+            } else {
+                cleaned.to_string()
+            };
+            insights.push(FunctionImpactInsight {
+                severity: sev,
+                message: truncated,
+            });
+        }
+    }
+
+    // Return max 3 insights
+    insights.truncate(3);
+    insights
+}
+
 /// Request for unfault/getFunctionImpact
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetFunctionImpactRequest {
@@ -179,7 +300,13 @@ pub struct GetFunctionImpactResponse {
     pub name: String,
     pub callers: Vec<FunctionImpactCaller>,
     pub routes: Vec<FunctionImpactRoute>,
+    /// Raw findings from analysis (for this function's file)
     pub findings: Vec<FunctionImpactFinding>,
+    /// Friendly, summarized insights derived from findings (for this function)
+    pub insights: Vec<FunctionImpactInsight>,
+    /// Insights from callers in the call path (route handlers, etc.)
+    #[serde(rename = "pathInsights")]
+    pub path_insights: Vec<FunctionImpactInsight>,
 }
 
 fn normalize_severity(severity: &str) -> String {
@@ -2407,19 +2534,18 @@ impl LanguageServer for UnfaultLsp {
             Err(_) => return Ok(None),
         };
 
+        // Include ALL callers (including route handlers) in the callers list
         let mut callers = Vec::new();
         for c in response
             .direct_callers
             .iter()
             .chain(response.transitive_callers.iter())
         {
-            if !c.is_route_handler {
-                callers.push(FunctionImpactCaller {
-                    name: c.function.clone(),
-                    file: c.path.clone(),
-                    depth: c.depth,
-                });
-            }
+            callers.push(FunctionImpactCaller {
+                name: c.function.clone(),
+                file: c.path.clone(),
+                depth: c.depth,
+            });
         }
         let mut routes = Vec::new();
 
@@ -2491,12 +2617,35 @@ impl LanguageServer for UnfaultLsp {
             })
             .collect();
 
+        // Path findings are findings from callers in the call path
+        let path_findings: Vec<FunctionImpactFinding> = response
+            .path_findings
+            .into_iter()
+            .map(|f| FunctionImpactFinding {
+                severity: normalize_severity(&f.severity),
+                message: format!(
+                    "{}: {}",
+                    f.title,
+                    f.description.lines().next().unwrap_or("")
+                ),
+                learn_more: Some(format!(
+                    "https://docs.unfault.dev/rules/{}",
+                    f.rule_id.replace('.', "/")
+                )),
+            })
+            .collect();
+
+        let insights = summarize_findings(&findings);
+        let path_insights = summarize_findings(&path_findings);
+        
         Ok(Some(
             serde_json::to_value(GetFunctionImpactResponse {
                 name: response.function,
                 callers,
                 routes,
                 findings,
+                insights,
+                path_insights,
             })
             .unwrap(),
         ))
@@ -2571,19 +2720,18 @@ impl UnfaultLsp {
             Err(_) => return Ok(None),
         };
 
+        // Include ALL callers (including route handlers) in the callers list
         let mut callers = Vec::new();
         for c in response
             .direct_callers
             .iter()
             .chain(response.transitive_callers.iter())
         {
-            if !c.is_route_handler {
-                callers.push(FunctionImpactCaller {
-                    name: c.function.clone(),
-                    file: c.path.clone(),
-                    depth: c.depth,
-                });
-            }
+            callers.push(FunctionImpactCaller {
+                name: c.function.clone(),
+                file: c.path.clone(),
+                depth: c.depth,
+            });
         }
         let mut routes = Vec::new();
 
@@ -2655,11 +2803,34 @@ impl UnfaultLsp {
             })
             .collect();
 
+        // Path findings are findings from callers in the call path
+        let path_findings: Vec<FunctionImpactFinding> = response
+            .path_findings
+            .into_iter()
+            .map(|f| FunctionImpactFinding {
+                severity: normalize_severity(&f.severity),
+                message: format!(
+                    "{}: {}",
+                    f.title,
+                    f.description.lines().next().unwrap_or("")
+                ),
+                learn_more: Some(format!(
+                    "https://docs.unfault.dev/rules/{}",
+                    f.rule_id.replace('.', "/")
+                )),
+            })
+            .collect();
+
+        let insights = summarize_findings(&findings);
+        let path_insights = summarize_findings(&path_findings);
+
         Ok(Some(GetFunctionImpactResponse {
             name: response.function,
             callers,
             routes,
             findings,
+            insights,
+            path_insights,
         }))
     }
 }
@@ -3069,6 +3240,14 @@ mod tests {
                 message: "Test finding".to_string(),
                 learn_more: Some("https://example.com".to_string()),
             }],
+            insights: vec![FunctionImpactInsight {
+                severity: "warning".to_string(),
+                message: "Friendly insight".to_string(),
+            }],
+            path_insights: vec![FunctionImpactInsight {
+                severity: "error".to_string(),
+                message: "Path insight from caller".to_string(),
+            }],
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"name\":\"my_func\""));
@@ -3078,6 +3257,8 @@ mod tests {
         assert!(json.contains("\"POST\""));
         assert!(json.contains("\"findings\""));
         assert!(json.contains("\"learnMore\""));
+        assert!(json.contains("\"insights\""));
+        assert!(json.contains("\"pathInsights\""));
     }
 
     #[test]
@@ -3086,7 +3267,9 @@ mod tests {
             "name": "add",
             "callers": [{"name": "main", "file": "app.py", "depth": 1}],
             "routes": [{"method": "GET", "path": "/api"}],
-            "findings": [{"severity": "error", "message": "issue", "learnMore": "http://x"}]
+            "findings": [{"severity": "error", "message": "issue", "learnMore": "http://x"}],
+            "insights": [{"severity": "warning", "message": "Friendly insight"}],
+            "pathInsights": [{"severity": "error", "message": "Path insight"}]
         }"#;
         let resp: GetFunctionImpactResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.name, "add");
@@ -3096,6 +3279,51 @@ mod tests {
         assert_eq!(resp.routes[0].method, "GET");
         assert_eq!(resp.findings.len(), 1);
         assert_eq!(resp.findings[0].learn_more, Some("http://x".to_string()));
+        assert_eq!(resp.insights.len(), 1);
+        assert_eq!(resp.insights[0].message, "Friendly insight");
+        assert_eq!(resp.path_insights.len(), 1);
+        assert_eq!(resp.path_insights[0].message, "Path insight");
+    }
+    
+    #[test]
+    fn test_summarize_findings() {
+        // Test timeout detection
+        let findings = vec![FunctionImpactFinding {
+            severity: "warning".to_string(),
+            message: "Missing timeout on HTTP call".to_string(),
+            learn_more: None,
+        }];
+        let insights = summarize_findings(&findings);
+        assert_eq!(insights.len(), 1);
+        assert_eq!(insights[0].message, "Missing timeout on external call");
+        
+        // Test multiple categories
+        let findings = vec![
+            FunctionImpactFinding {
+                severity: "warning".to_string(),
+                message: "No timeout set".to_string(),
+                learn_more: None,
+            },
+            FunctionImpactFinding {
+                severity: "info".to_string(),
+                message: "Missing retry logic".to_string(),
+                learn_more: None,
+            },
+            FunctionImpactFinding {
+                severity: "error".to_string(),
+                message: "Security: SQL injection possible".to_string(),
+                learn_more: None,
+            },
+        ];
+        let insights = summarize_findings(&findings);
+        assert!(insights.len() <= 3);
+        assert!(insights.iter().any(|i| i.message.contains("timeout")));
+        assert!(insights.iter().any(|i| i.message.contains("retry")));
+        assert!(insights.iter().any(|i| i.message.contains("Security")));
+        
+        // Test empty findings
+        let insights = summarize_findings(&[]);
+        assert!(insights.is_empty());
     }
 
     #[test]

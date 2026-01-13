@@ -579,9 +579,12 @@ pub struct FunctionImpactResponse {
     pub framework_references: Vec<FrameworkReference>,
     /// Total number of affected functions
     pub total_affected: i32,
-    /// Findings related to this function
+    /// Findings related to this function's file
     #[serde(default)]
     pub findings: Vec<FunctionFinding>,
+    /// Findings from callers in the call path (route handlers, etc.)
+    #[serde(default)]
+    pub path_findings: Vec<FunctionFinding>,
     /// Summary of the function's impact context
     #[serde(default)]
     pub impact_summary: String,
