@@ -586,13 +586,13 @@ impl UnfaultLsp {
         };
 
         // Use pre-built IR if provided, otherwise build it (with caching)
-        let ir = match prebuilt_ir {
+        let (ir, should_send_dependencies) = match prebuilt_ir {
             Some(ir) => {
                 self.log_debug("Using pre-built IR (skipping rebuild)");
-                ir
+                (ir, false) // Dependencies already sent by did_open
             }
             None => match build_ir_cached(&project_root, None, self.verbose) {
-                Ok(result) => result.ir,
+                Ok(result) => (result.ir, true), // Fresh IR, send dependencies
                 Err(e) => {
                     let msg = format!("Failed to build IR: {}", e);
                     self.log_debug(&msg);
@@ -601,6 +601,29 @@ impl UnfaultLsp {
                 }
             },
         };
+
+        // Send dependencies notification when IR is rebuilt (on file change/save)
+        if should_send_dependencies {
+            let relative_path = file_path
+                .strip_prefix(&project_root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            if !relative_path.is_empty() {
+                if let Some(dependencies) = self.compute_local_dependencies(&ir, &relative_path) {
+                    self.log_debug(&format!(
+                        "Refreshing dependencies: {} direct, {} total for {}",
+                        dependencies.direct_dependents.len(),
+                        dependencies.total_count,
+                        relative_path
+                    ));
+                    let _ = self
+                        .client
+                        .send_notification::<FileDependenciesNotificationType>(dependencies)
+                        .await;
+                }
+            }
+        }
 
         // Check if IR is too large (warn at 5MB, fail at 10MB)
         let ir_size = ir.semantics.len();
