@@ -1725,13 +1725,19 @@ impl UnfaultLsp {
     /// - Routes that use this function
     /// - Safeguards present (or missing) in the call chain
     /// - Code review findings for the function
-    async fn get_function_impact(&self, file_path: &str, function_name: &str) -> Option<String> {
+    async fn get_function_impact(
+        &self,
+        file_path: &str,
+        function_name: &str,
+        start_line: Option<i32>,
+        end_line: Option<i32>,
+    ) -> Option<String> {
         let api_key = self.config.as_ref()?.api_key.clone();
         let workspace_id = self.workspace_id.read().await.clone()?;
 
         self.log_debug(&format!(
-            "Fetching impact for function: {} in {}",
-            function_name, file_path
+            "Fetching impact for function: {} in {} (lines {:?}-{:?})",
+            function_name, file_path, start_line, end_line
         ));
 
         // Call function impact API
@@ -1749,6 +1755,8 @@ impl UnfaultLsp {
             file_id,
             file_path: file_path.to_string(),
             function_name: function_name.to_string(),
+            start_line,
+            end_line,
             max_depth: 5,
         };
 
@@ -2408,9 +2416,27 @@ impl LanguageServer for UnfaultLsp {
             self.log_debug(&format!("Found function at position: {}", function_name));
             self.log_debug(&format!("Using relative path: {}", relative_path));
 
+            // Look up function's line range from cache for function-scoped findings
+            let (start_line, end_line) = self
+                .function_cache
+                .get(uri)
+                .and_then(|functions| {
+                    functions
+                        .iter()
+                        .find(|f| f.name == function_name)
+                        .map(|f| {
+                            // LSP lines are 0-based, API expects 1-based
+                            (
+                                Some((f.range.start.line + 1) as i32),
+                                Some((f.range.end.line + 1) as i32),
+                            )
+                        })
+                })
+                .unwrap_or((None, None));
+
             // Get function impact analysis
             if let Some(markdown) = self
-                .get_function_impact(&relative_path, &function_name)
+                .get_function_impact(&relative_path, &function_name, start_line, end_line)
                 .await
             {
                 return Ok(Some(Hover {
@@ -2517,12 +2543,32 @@ impl LanguageServer for UnfaultLsp {
             &relative_path,
         ));
 
+        // Look up function's line range from cache for function-scoped findings
+        let (start_line, end_line) = uri
+            .as_ref()
+            .and_then(|u| self.function_cache.get(u))
+            .and_then(|functions| {
+                functions
+                    .iter()
+                    .find(|f| f.name == req.function_name)
+                    .map(|f| {
+                        // LSP lines are 0-based, API expects 1-based
+                        (
+                            Some((f.range.start.line + 1) as i32),
+                            Some((f.range.end.line + 1) as i32),
+                        )
+                    })
+            })
+            .unwrap_or((None, None));
+
         let impact_request = crate::api::graph::FunctionImpactRequest {
             session_id: None,
             workspace_id: Some(workspace_id),
             file_id,
             file_path: relative_path,
             function_name: req.function_name.clone(),
+            start_line,
+            end_line,
             max_depth: 5,
         };
         let response = match self
@@ -2703,12 +2749,32 @@ impl UnfaultLsp {
             &relative_path,
         ));
 
+        // Look up function's line range from cache for function-scoped findings
+        let (start_line, end_line) = uri
+            .as_ref()
+            .and_then(|u| self.function_cache.get(u))
+            .and_then(|functions| {
+                functions
+                    .iter()
+                    .find(|f| f.name == req.function_name)
+                    .map(|f| {
+                        // LSP lines are 0-based, API expects 1-based
+                        (
+                            Some((f.range.start.line + 1) as i32),
+                            Some((f.range.end.line + 1) as i32),
+                        )
+                    })
+            })
+            .unwrap_or((None, None));
+
         let impact_request = crate::api::graph::FunctionImpactRequest {
             session_id: None,
             workspace_id: Some(workspace_id),
             file_id,
             file_path: relative_path,
             function_name: req.function_name.clone(),
+            start_line,
+            end_line,
             max_depth: 5,
         };
         let response = match self

@@ -478,6 +478,12 @@ pub struct FunctionImpactRequest {
     pub file_path: String,
     /// Name of the function (qualified if method)
     pub function_name: String,
+    /// Start line of the function (1-based). Used to filter findings to this function only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<i32>,
+    /// End line of the function (1-based). Used to filter findings to this function only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<i32>,
     /// Maximum call hops to traverse (1-10, default: 5)
     pub max_depth: i32,
 }
