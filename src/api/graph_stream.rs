@@ -63,6 +63,12 @@ struct NodeRecord<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     var_name: Option<&'a str>,
 
+    // Function line range (for scoped findings queries)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<u32>,
+
     // SLO-specific fields
     #[serde(skip_serializing_if = "Option::is_none")]
     slo_provider: Option<&'a str>,
@@ -279,6 +285,8 @@ pub fn encode_nodes_chunk(
                     http_path: None,
                     category: None,
                     var_name: None,
+                    start_line: None,
+                    end_line: None,
                     slo_provider: None,
                     slo_path_pattern: None,
                     slo_target_percent: None,
@@ -305,6 +313,8 @@ pub fn encode_nodes_chunk(
                     http_path: None,
                     category: Some(format!("{:?}", category)),
                     var_name: None,
+                    start_line: None,
+                    end_line: None,
                     slo_provider: None,
                     slo_path_pattern: None,
                     slo_target_percent: None,
@@ -322,6 +332,8 @@ pub fn encode_nodes_chunk(
                 is_handler,
                 http_method,
                 http_path,
+                start_line,
+                end_line,
             } => {
                 let file_path = ctx.get_path(file_id).cloned();
                 push_frame(
@@ -345,6 +357,8 @@ pub fn encode_nodes_chunk(
                         http_path: http_path.as_deref(),
                         category: None,
                         var_name: None,
+                        start_line: *start_line,
+                        end_line: *end_line,
                         slo_provider: None,
                         slo_path_pattern: None,
                         slo_target_percent: None,
@@ -374,6 +388,8 @@ pub fn encode_nodes_chunk(
                         http_path: None,
                         category: None,
                         var_name: None,
+                        start_line: None,
+                        end_line: None,
                         slo_provider: None,
                         slo_path_pattern: None,
                         slo_target_percent: None,
@@ -403,6 +419,8 @@ pub fn encode_nodes_chunk(
                         http_path: None,
                         category: None,
                         var_name: Some(var_name),
+                        start_line: None,
+                        end_line: None,
                         slo_provider: None,
                         slo_path_pattern: None,
                         slo_target_percent: None,
@@ -448,6 +466,8 @@ pub fn encode_nodes_chunk(
                         http_path: None,
                         category: None,
                         var_name: None,
+                        start_line: None,
+                        end_line: None,
                         slo_provider: Some(provider_str),
                         slo_path_pattern: Some(path_pattern),
                         slo_target_percent: Some(*target_percent),
@@ -542,6 +562,8 @@ pub fn encode_graph_stream(
                         http_path: None,
                         category: None,
                         var_name: None,
+                        start_line: None,
+                        end_line: None,
                         slo_provider: None,
                         slo_path_pattern: None,
                         slo_target_percent: None,
@@ -570,6 +592,8 @@ pub fn encode_graph_stream(
                         http_path: None,
                         category: Some(format!("{:?}", category)),
                         var_name: None,
+                        start_line: None,
+                        end_line: None,
                         slo_provider: None,
                         slo_path_pattern: None,
                         slo_target_percent: None,
@@ -588,6 +612,8 @@ pub fn encode_graph_stream(
                 is_handler,
                 http_method,
                 http_path,
+                start_line,
+                end_line,
             } => {
                 let file_path = ctx.get_path(file_id).cloned();
                 push_frame(
@@ -611,6 +637,8 @@ pub fn encode_graph_stream(
                         http_path: http_path.as_deref(),
                         category: None,
                         var_name: None,
+                        start_line: *start_line,
+                        end_line: *end_line,
                         slo_provider: None,
                         slo_path_pattern: None,
                         slo_target_percent: None,
@@ -640,6 +668,8 @@ pub fn encode_graph_stream(
                         http_path: None,
                         category: None,
                         var_name: None,
+                        start_line: None,
+                        end_line: None,
                         slo_provider: None,
                         slo_path_pattern: None,
                         slo_target_percent: None,
@@ -669,6 +699,8 @@ pub fn encode_graph_stream(
                         http_path: None,
                         category: None,
                         var_name: Some(var_name),
+                        start_line: None,
+                        end_line: None,
                         slo_provider: None,
                         slo_path_pattern: None,
                         slo_target_percent: None,
@@ -714,6 +746,8 @@ pub fn encode_graph_stream(
                         http_path: None,
                         category: None,
                         var_name: None,
+                        start_line: None,
+                        end_line: None,
                         slo_provider: Some(provider_str),
                         slo_path_pattern: Some(path_pattern),
                         slo_target_percent: Some(*target_percent),
@@ -934,6 +968,8 @@ mod tests {
             is_handler: false,
             http_method: None,
             http_path: None,
+            start_line: Some(10),
+            end_line: Some(25),
         });
 
         let mut ctx = IdContext::new(

@@ -67,6 +67,12 @@ pub struct FunctionNode {
     /// HTTP path if this is an HTTP route handler (e.g., "/users/{user_id}")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http_path: Option<String>,
+    /// Start line of the function definition (1-based)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    /// End line of the function definition (1-based)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -357,6 +363,8 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
                 file_id,
                 http_method,
                 http_path,
+                start_line,
+                end_line,
             } => {
                 // Find the file path for this function
                 let file_path = file_id_to_path.get(file_id).cloned().unwrap_or_default();
@@ -369,6 +377,8 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
                     is_handler: *is_handler,
                     http_method: http_method.clone(),
                     http_path: http_path.clone(),
+                    start_line: *start_line,
+                    end_line: *end_line,
                 });
             }
             GraphNode::Slo {

@@ -3809,6 +3809,11 @@ mod tests {
                 severity: "error".to_string(),
                 message: "Path insight from caller".to_string(),
             }],
+            upstream_insights: vec![],
+            downstream_insights: vec![FunctionImpactInsight {
+                severity: "warning".to_string(),
+                message: "Downstream callee has findings".to_string(),
+            }],
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"name\":\"my_func\""));
@@ -3830,7 +3835,9 @@ mod tests {
             "routes": [{"method": "GET", "path": "/api"}],
             "findings": [{"severity": "error", "message": "issue", "learnMore": "http://x"}],
             "insights": [{"severity": "warning", "message": "Friendly insight"}],
-            "pathInsights": [{"severity": "error", "message": "Path insight"}]
+            "pathInsights": [{"severity": "error", "message": "Path insight"}],
+            "upstreamInsights": [],
+            "downstreamInsights": [{"severity": "warning", "message": "Downstream issue"}]
         }"#;
         let resp: GetFunctionImpactResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.name, "add");
