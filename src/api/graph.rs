@@ -576,6 +576,12 @@ pub struct FunctionFinding {
     pub severity: String,
     /// Dimension/category
     pub dimension: String,
+    /// File path where finding occurs
+    #[serde(default, rename = "filePath")]
+    pub file_path: Option<String>,
+    /// Line number (1-based)
+    #[serde(default)]
+    pub line: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -212,6 +212,21 @@ pub struct FunctionImpactFinding {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "learnMore")]
     pub learn_more: Option<String>,
+    /// Rule ID for documentation lookup
+    #[serde(default, rename = "ruleId")]
+    pub rule_id: Option<String>,
+    /// Detailed title of the finding
+    #[serde(default)]
+    pub title: String,
+    /// Full description explaining the issue
+    #[serde(default)]
+    pub description: String,
+    /// File path where the issue occurs
+    #[serde(default, rename = "filePath")]
+    pub file_path: Option<String>,
+    /// Line number (1-based)
+    #[serde(default)]
+    pub line: u32,
 }
 
 /// Summarized insight for function impact response
@@ -220,19 +235,42 @@ pub struct FunctionImpactFinding {
 pub struct FunctionImpactInsight {
     pub severity: String,
     pub message: String,
+    /// Optional: detailed title of the underlying finding
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Optional: full description explaining the issue
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional: file path where the issue occurs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Optional: line number (1-based)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    /// Optional: rule ID for documentation lookup
+    #[serde(rename = "ruleId", skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
 }
 
 /// Summarize raw findings into friendly, actionable insights
 /// Groups findings by category based on rule_id and generates human-readable summaries
+/// Includes detail fields (title, description, file, line) for expandable UI
 fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactInsight> {
     if findings.is_empty() {
         return Vec::new();
     }
 
-    #[derive(Default)]
-    struct Category {
+    // Track first finding in each category for detail fields
+    struct Category<'a> {
         count: usize,
         severity: Option<String>,
+        first_finding: Option<&'a FunctionImpactFinding>,
+    }
+
+    impl<'a> Default for Category<'a> {
+        fn default() -> Self {
+            Category { count: 0, severity: None, first_finding: None }
+        }
     }
 
     let mut timeout = Category::default();
@@ -240,11 +278,10 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
     let mut logging = Category::default();
     let mut error_handling = Category::default();
     let mut security = Category::default();
-    let mut other_messages: Vec<(String, String)> = Vec::new(); // (message, severity)
+    let mut other_findings: Vec<&FunctionImpactFinding> = Vec::new();
 
     for f in findings {
         // Extract rule_id from learn_more URL (e.g., "https://docs.unfault.dev/rules/python/http/missing_retry")
-        // This is more reliable than fuzzy message matching which can have false positives
         let rule_path = f.learn_more.as_ref()
             .and_then(|url| url.strip_prefix("https://docs.unfault.dev/rules/"))
             .unwrap_or("");
@@ -252,31 +289,59 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
         // Categorize by rule_id patterns
         if rule_path.contains("timeout") {
             timeout.count += 1;
+            if timeout.first_finding.is_none() {
+                timeout.first_finding = Some(f);
+            }
             if timeout.severity.is_none() || f.severity == "error" {
                 timeout.severity = Some(f.severity.clone());
             }
         } else if rule_path.contains("retry") {
             retry.count += 1;
+            if retry.first_finding.is_none() {
+                retry.first_finding = Some(f);
+            }
             if retry.severity.is_none() || f.severity == "error" {
                 retry.severity = Some(f.severity.clone());
             }
         } else if rule_path.contains("logging") || rule_path.contains("log_") {
             logging.count += 1;
+            if logging.first_finding.is_none() {
+                logging.first_finding = Some(f);
+            }
             if logging.severity.is_none() || f.severity == "error" {
                 logging.severity = Some(f.severity.clone());
             }
         } else if rule_path.contains("exception") || rule_path.contains("error_handling") {
             error_handling.count += 1;
+            if error_handling.first_finding.is_none() {
+                error_handling.first_finding = Some(f);
+            }
             if error_handling.severity.is_none() || f.severity == "error" {
                 error_handling.severity = Some(f.severity.clone());
             }
         } else if rule_path.contains("security") || rule_path.contains("auth") || rule_path.contains("injection") || rule_path.contains("secret") || rule_path.contains("xss") || rule_path.contains("csrf") {
             security.count += 1;
+            if security.first_finding.is_none() {
+                security.first_finding = Some(f);
+            }
             if security.severity.is_none() || f.severity == "error" {
                 security.severity = Some(f.severity.clone());
             }
         } else {
-            other_messages.push((f.message.clone(), f.severity.clone()));
+            other_findings.push(f);
+        }
+    }
+
+    // Helper to build insight with details from first finding
+    fn make_insight(message: &str, severity: String, finding: Option<&FunctionImpactFinding>) -> FunctionImpactInsight {
+        FunctionImpactInsight {
+            severity,
+            message: message.to_string(),
+            title: finding.map(|f| f.title.clone()),
+            description: finding.map(|f| f.description.clone()),
+            file: finding.and_then(|f| f.file_path.clone()),
+            line: finding.and_then(|f| if f.line > 0 { Some(f.line) } else { None }),
+            rule_id: finding.and_then(|f| f.rule_id.clone()),
         }
     }
 
@@ -284,44 +349,49 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
 
     // Generate friendly summaries for each category
     if timeout.count > 0 {
-        insights.push(FunctionImpactInsight {
-            severity: timeout.severity.unwrap_or_else(|| "warning".to_string()),
-            message: "Missing timeout on external call".to_string(),
-        });
+        insights.push(make_insight(
+            "Missing timeout on external call",
+            timeout.severity.unwrap_or_else(|| "warning".to_string()),
+            timeout.first_finding,
+        ));
     }
     if retry.count > 0 {
-        insights.push(FunctionImpactInsight {
-            severity: retry.severity.unwrap_or_else(|| "warning".to_string()),
-            message: "No retry logic for transient failures".to_string(),
-        });
+        insights.push(make_insight(
+            "No retry logic for transient failures",
+            retry.severity.unwrap_or_else(|| "warning".to_string()),
+            retry.first_finding,
+        ));
     }
     if error_handling.count > 0 {
-        insights.push(FunctionImpactInsight {
-            severity: error_handling.severity.unwrap_or_else(|| "warning".to_string()),
-            message: "Error handling could be improved".to_string(),
-        });
+        insights.push(make_insight(
+            "Error handling could be improved",
+            error_handling.severity.unwrap_or_else(|| "warning".to_string()),
+            error_handling.first_finding,
+        ));
     }
     if logging.count > 0 {
-        insights.push(FunctionImpactInsight {
-            severity: logging.severity.unwrap_or_else(|| "info".to_string()),
-            message: "Could use better logging".to_string(),
-        });
+        insights.push(make_insight(
+            "Could use better logging",
+            logging.severity.unwrap_or_else(|| "info".to_string()),
+            logging.first_finding,
+        ));
     }
     if security.count > 0 {
-        insights.push(FunctionImpactInsight {
-            severity: security.severity.unwrap_or_else(|| "error".to_string()),
-            message: "Security concern flagged".to_string(),
-        });
+        insights.push(make_insight(
+            "Security concern flagged",
+            security.severity.unwrap_or_else(|| "error".to_string()),
+            security.first_finding,
+        ));
     }
 
-    // Add first "other" message if we have room (max 3 insights)
+    // Add first "other" finding if we have room (max 3 insights)
     if insights.len() < 3 {
-        if let Some((msg, sev)) = other_messages.into_iter().next() {
+        if let Some(f) = other_findings.into_iter().next() {
             // Clean up the message - take last part after colon, truncate if needed
-            let cleaned = msg
+            let cleaned = f.message
                 .rsplit(':')
                 .next()
-                .unwrap_or(&msg)
+                .unwrap_or(&f.message)
                 .trim();
             let truncated = if cleaned.len() > 50 {
                 format!("{}...", &cleaned[..47])
@@ -329,8 +399,13 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
                 cleaned.to_string()
             };
             insights.push(FunctionImpactInsight {
-                severity: sev,
+                severity: f.severity.clone(),
                 message: truncated,
+                title: Some(f.title.clone()),
+                description: Some(f.description.clone()),
+                file: f.file_path.clone(),
+                line: if f.line > 0 { Some(f.line) } else { None },
+                rule_id: f.rule_id.clone(),
             });
         }
     }
@@ -3120,6 +3195,11 @@ impl UnfaultLsp {
                     "https://docs.unfault.dev/rules/{}",
                     f.rule_id.replace('.', "/")
                 )),
+                rule_id: Some(f.rule_id.clone()),
+                title: f.title.clone(),
+                description: f.description.clone(),
+                file_path: f.file_path.clone(),
+                line: f.line.unwrap_or(0),
             })
             .collect();
 
@@ -3138,6 +3218,11 @@ impl UnfaultLsp {
                     "https://docs.unfault.dev/rules/{}",
                     f.rule_id.replace('.', "/")
                 )),
+                rule_id: Some(f.rule_id),
+                title: f.title,
+                description: f.description,
+                file_path: f.file_path,
+                line: f.line.unwrap_or(0),
             })
             .collect();
         
@@ -3156,6 +3241,11 @@ impl UnfaultLsp {
                     "https://docs.unfault.dev/rules/{}",
                     f.rule_id.replace('.', "/")
                 )),
+                rule_id: Some(f.rule_id),
+                title: f.title,
+                description: f.description,
+                file_path: f.file_path,
+                line: f.line.unwrap_or(0),
             })
             .collect();
         
@@ -3174,6 +3264,11 @@ impl UnfaultLsp {
                     "https://docs.unfault.dev/rules/{}",
                     f.rule_id.replace('.', "/")
                 )),
+                rule_id: Some(f.rule_id),
+                title: f.title,
+                description: f.description,
+                file_path: f.file_path,
+                line: f.line.unwrap_or(0),
             })
             .collect();
 
@@ -3800,19 +3895,39 @@ mod tests {
                 severity: "warning".to_string(),
                 message: "Test finding".to_string(),
                 learn_more: Some("https://example.com".to_string()),
+                title: String::new(),
+                description: String::new(),
+                file_path: None,
+                line: 0,
+                rule_id: None,
             }],
             insights: vec![FunctionImpactInsight {
                 severity: "warning".to_string(),
                 message: "Friendly insight".to_string(),
+                title: None,
+                description: None,
+                file: None,
+                line: None,
+                rule_id: None,
             }],
             path_insights: vec![FunctionImpactInsight {
                 severity: "error".to_string(),
                 message: "Path insight from caller".to_string(),
+                title: None,
+                description: None,
+                file: None,
+                line: None,
+                rule_id: None,
             }],
             upstream_insights: vec![],
             downstream_insights: vec![FunctionImpactInsight {
                 severity: "warning".to_string(),
                 message: "Downstream callee has findings".to_string(),
+                title: None,
+                description: None,
+                file: None,
+                line: None,
+                rule_id: None,
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -3860,6 +3975,11 @@ mod tests {
             severity: "warning".to_string(),
             message: "Database call without timeout".to_string(),
             learn_more: Some("https://docs.unfault.dev/rules/python/db/missing_timeout".to_string()),
+            title: String::new(),
+            description: String::new(),
+            file_path: None,
+            line: 0,
+            rule_id: None,
         }];
         let insights = summarize_findings(&findings);
         assert_eq!(insights.len(), 1);
@@ -3871,16 +3991,31 @@ mod tests {
                 severity: "warning".to_string(),
                 message: "HTTP call without timeout".to_string(),
                 learn_more: Some("https://docs.unfault.dev/rules/python/http/missing_timeout".to_string()),
+                title: String::new(),
+                description: String::new(),
+                file_path: None,
+                line: 0,
+                rule_id: None,
             },
             FunctionImpactFinding {
                 severity: "info".to_string(),
                 message: "HTTP call has no retry".to_string(),
                 learn_more: Some("https://docs.unfault.dev/rules/python/http/missing_retry".to_string()),
+                title: String::new(),
+                description: String::new(),
+                file_path: None,
+                line: 0,
+                rule_id: None,
             },
             FunctionImpactFinding {
                 severity: "error".to_string(),
                 message: "SQL injection possible".to_string(),
                 learn_more: Some("https://docs.unfault.dev/rules/python/security/sql_injection".to_string()),
+                title: String::new(),
+                description: String::new(),
+                file_path: None,
+                line: 0,
+                rule_id: None,
             },
         ];
         let insights = summarize_findings(&findings);
@@ -3895,6 +4030,11 @@ mod tests {
             severity: "warning".to_string(),
             message: "No retry policy: Transient failures (connection timeouts, 5xx errors) will propagate".to_string(),
             learn_more: Some("https://docs.unfault.dev/rules/python/http/missing_retry".to_string()),
+            title: String::new(),
+            description: String::new(),
+            file_path: None,
+            line: 0,
+            rule_id: None,
         }];
         let insights = summarize_findings(&findings);
         assert_eq!(insights.len(), 1);
@@ -3909,6 +4049,11 @@ mod tests {
             severity: "warning".to_string(),
             message: "Some unknown finding".to_string(),
             learn_more: None,
+            title: String::new(),
+            description: String::new(),
+            file_path: None,
+            line: 0,
+            rule_id: None,
         }];
         let insights = summarize_findings(&findings);
         assert_eq!(insights.len(), 1);
