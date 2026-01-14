@@ -124,6 +124,36 @@ pub struct FileDependenciesNotification {
     pub summary: String,
 }
 
+/// Request for unfault/getFileCentrality
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetFileCentralityRequest {
+    /// Document URI
+    pub uri: String,
+}
+
+/// Request for unfault/getFileDependencies
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetFileDependenciesRequest {
+    /// Document URI
+    pub uri: String,
+}
+
+/// Request for unfault/refreshFile - triggers re-analysis of a single file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshFileRequest {
+    /// Document URI
+    pub uri: String,
+}
+
+/// Response for unfault/refreshFile
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshFileResponse {
+    /// Whether the refresh was successful
+    pub success: bool,
+    /// Number of findings after refresh
+    pub finding_count: i32,
+}
+
 /// Caller information for function impact response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionImpactCaller {
@@ -409,6 +439,8 @@ struct UnfaultLsp {
     workspace_root: Arc<tokio::sync::RwLock<Option<PathBuf>>>,
     /// Workspace ID for API calls
     workspace_id: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Cached session ID for incremental analysis (set after first full analysis)
+    session_id: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Cached findings for code actions, keyed by document URI
     findings_cache: DashMap<Url, Vec<CachedFinding>>,
     /// Cached document content for code actions, keyed by document URI
@@ -449,6 +481,7 @@ impl UnfaultLsp {
             config,
             workspace_root: Arc::new(tokio::sync::RwLock::new(None)),
             workspace_id: Arc::new(tokio::sync::RwLock::new(None)),
+            session_id: Arc::new(tokio::sync::RwLock::new(None)),
             findings_cache: DashMap::new(),
             document_cache: scc::HashMap::new(),
             function_cache: DashMap::new(),
@@ -725,7 +758,14 @@ impl UnfaultLsp {
             )
             .await
         {
-            Ok(resp) => resp,
+            Ok(resp) => {
+                // Cache session_id for incremental single-file refreshes
+                {
+                    let mut session_cache = self.session_id.write().await;
+                    *session_cache = Some(resp.session_id.clone());
+                }
+                resp
+            }
             Err(e) => {
                 debug!("[LSP] Graph ingest error: {:?}", e);
                 let user_msg = match &e {
@@ -850,7 +890,7 @@ impl UnfaultLsp {
             }
         }
 
-        // Store cached findings
+        // Store cached findings (used for code actions/quick fixes)
         let finding_count = cached_findings.len() as i32;
         self.findings_cache.insert(uri.clone(), cached_findings);
 
@@ -2163,7 +2203,12 @@ impl LanguageServer for UnfaultLsp {
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec!["unfault/getFunctionImpact".to_string()],
+                    commands: vec![
+                        "unfault/getFunctionImpact".to_string(),
+                        "unfault/getFileCentrality".to_string(),
+                        "unfault/getFileDependencies".to_string(),
+                        "unfault/refreshFile".to_string(),
+                    ],
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2551,18 +2596,37 @@ impl LanguageServer for UnfaultLsp {
         &self,
         params: ExecuteCommandParams,
     ) -> RpcResult<Option<serde_json::Value>> {
-        if params.command != "unfault/getFunctionImpact" {
-            return Err(tower_lsp::jsonrpc::Error::method_not_found());
-        }
-        if params.arguments.is_empty() {
-            return Ok(None);
-        }
         let args_value = params
             .arguments
             .first()
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let req: GetFunctionImpactRequest = serde_json::from_value(args_value)
+
+        match params.command.as_str() {
+            "unfault/getFunctionImpact" => {
+                self.handle_get_function_impact(args_value).await
+            }
+            "unfault/getFileCentrality" => {
+                self.handle_get_file_centrality(args_value).await
+            }
+            "unfault/getFileDependencies" => {
+                self.handle_get_file_dependencies(args_value).await
+            }
+            "unfault/refreshFile" => {
+                self.handle_refresh_file(args_value).await
+            }
+            _ => Err(tower_lsp::jsonrpc::Error::method_not_found()),
+        }
+    }
+}
+
+// Command handlers for execute_command
+impl UnfaultLsp {
+    async fn handle_get_function_impact(
+        &self,
+        args: serde_json::Value,
+    ) -> RpcResult<Option<serde_json::Value>> {
+        let req: GetFunctionImpactRequest = serde_json::from_value(args)
             .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
         let uri = Url::parse(&req.uri).ok();
@@ -2696,57 +2760,25 @@ impl LanguageServer for UnfaultLsp {
             }
         }
 
-        // Use findings from local cache (fresh from latest analysis) instead of API database
-        // This ensures the sidebar reflects the current state of the code, not stale persisted data
-        let findings: Vec<FunctionImpactFinding> = if let Some(uri) = uri.as_ref() {
-            if let Some(cached) = self.findings_cache.get(uri) {
-                cached
-                    .iter()
-                    .filter(|cf| {
-                        // Filter to findings within the function's line range
-                        match (start_line, end_line) {
-                            (Some(start), Some(end)) => {
-                                let line = cf.finding.line;
-                                line >= start as u32 && line <= end as u32
-                            }
-                            _ => true, // Include if we can't determine range
-                        }
-                    })
-                    .map(|cf| FunctionImpactFinding {
-                        severity: normalize_severity(&cf.finding.severity),
-                        message: format!(
-                            "{}: {}",
-                            cf.finding.title,
-                            cf.finding.description.lines().next().unwrap_or("")
-                        ),
-                        learn_more: Some(format!(
-                            "https://docs.unfault.dev/rules/{}",
-                            cf.finding.rule_id.replace('.', "/")
-                        )),
-                    })
-                    .collect()
-            } else {
-                vec![]
-            }
-        } else {
-            // Fallback to API response if no URI
-            response
-                .findings
-                .iter()
-                .map(|f| FunctionImpactFinding {
-                    severity: normalize_severity(&f.severity),
-                    message: format!(
-                        "{}: {}",
-                        f.title,
-                        f.description.lines().next().unwrap_or("")
-                    ),
-                    learn_more: Some(format!(
-                        "https://docs.unfault.dev/rules/{}",
-                        f.rule_id.replace('.', "/")
-                    )),
-                })
-                .collect()
-        };
+        // Use findings directly from API response
+        // The API uses incremental sessions which delete old findings before inserting new ones,
+        // so the database always reflects the current state of the code
+        let findings: Vec<FunctionImpactFinding> = response
+            .findings
+            .iter()
+            .map(|f| FunctionImpactFinding {
+                severity: normalize_severity(&f.severity),
+                message: format!(
+                    "{}: {}",
+                    f.title,
+                    f.description.lines().next().unwrap_or("")
+                ),
+                learn_more: Some(format!(
+                    "https://docs.unfault.dev/rules/{}",
+                    f.rule_id.replace('.', "/")
+                )),
+            })
+            .collect();
 
         // Path findings are findings from callers in the call path
         let path_findings: Vec<FunctionImpactFinding> = response
@@ -2781,6 +2813,402 @@ impl LanguageServer for UnfaultLsp {
             .unwrap(),
         ))
     }
+
+    async fn handle_get_file_centrality(
+        &self,
+        args: serde_json::Value,
+    ) -> RpcResult<Option<serde_json::Value>> {
+        let req: GetFileCentralityRequest = serde_json::from_value(args)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+        let uri = Url::parse(&req.uri).ok();
+        let file_path = uri.as_ref().and_then(|u| u.to_file_path().ok());
+        let workspace_root = { self.workspace_root.read().await.clone() };
+        let relative_path = match (&file_path, &workspace_root) {
+            (Some(fp), Some(ws)) => fp
+                .strip_prefix(ws)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| fp.to_string_lossy().to_string()),
+            (Some(fp), None) => fp.to_string_lossy().to_string(),
+            _ => return Ok(None),
+        };
+
+        if relative_path.is_empty() {
+            return Ok(None);
+        }
+
+        match self.get_file_centrality(&relative_path).await {
+            Some(centrality) => Ok(Some(serde_json::to_value(centrality).unwrap())),
+            None => Ok(None),
+        }
+    }
+
+    async fn handle_get_file_dependencies(
+        &self,
+        args: serde_json::Value,
+    ) -> RpcResult<Option<serde_json::Value>> {
+        let req: GetFileDependenciesRequest = serde_json::from_value(args)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+        let uri = Url::parse(&req.uri)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+        let file_path = uri
+            .to_file_path()
+            .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("Invalid file URI"))?;
+
+        // Get workspace root
+        let workspace_root = { self.workspace_root.read().await.clone() };
+        let ide_workspace_root = workspace_root.as_ref();
+
+        // Find project root (same logic as did_open/did_save)
+        let project_root = find_project_root(&file_path, ide_workspace_root).unwrap_or_else(|| {
+            ide_workspace_root
+                .cloned()
+                .unwrap_or_else(|| file_path.parent().unwrap_or(&file_path).to_path_buf())
+        });
+
+        let relative_path = file_path
+            .strip_prefix(&project_root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if relative_path.is_empty() {
+            return Ok(None);
+        }
+
+        // Get document content from cache for accurate IR
+        let content_overrides = if let Some(content) = self.document_cache.get_async(&uri).await {
+            let mut map = std::collections::HashMap::new();
+            map.insert(file_path.clone(), content.get().clone());
+            Some(map)
+        } else {
+            None
+        };
+
+        // Build IR to compute dependencies
+        let ir = match build_ir_cached(
+            &project_root,
+            None,
+            self.verbose,
+            content_overrides.as_ref(),
+        ) {
+            Ok(result) => result.ir,
+            Err(e) => {
+                self.log_debug(&format!("Failed to build IR for dependencies: {}", e));
+                return Ok(None);
+            }
+        };
+
+        match self.compute_local_dependencies(&ir, &relative_path) {
+            Some(deps) => Ok(Some(serde_json::to_value(deps).unwrap())),
+            None => Ok(None),
+        }
+    }
+
+    /// Handle unfault/refreshFile - re-analyze a single file and return updated findings.
+    /// This is optimized to only parse and analyze the single file, not the entire workspace.
+    /// Requires a prior full analysis to have cached the session_id.
+    async fn handle_refresh_file(
+        &self,
+        args: serde_json::Value,
+    ) -> RpcResult<Option<serde_json::Value>> {
+        let req: RefreshFileRequest = serde_json::from_value(args)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+        let uri = Url::parse(&req.uri)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+        self.log_debug(&format!("Refreshing single file: {}", uri));
+
+        // Get cached session_id from prior full analysis
+        let session_id = match self.session_id.read().await.clone() {
+            Some(id) => id,
+            None => {
+                self.log_debug("No session_id cached - need full analysis first");
+                return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                    success: false,
+                    finding_count: 0,
+                }).unwrap()));
+            }
+        };
+
+        // Get document content from cache (includes unsaved changes)
+        let text = match self.document_cache.get_async(&uri).await {
+            Some(content) => content.get().clone(),
+            None => {
+                self.log_debug("Document not in cache, cannot refresh");
+                return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                    success: false,
+                    finding_count: 0,
+                }).unwrap()));
+            }
+        };
+
+        // Get file path from URI
+        let file_path = match uri.to_file_path() {
+            Ok(path) => path,
+            Err(_) => {
+                self.log_debug("Could not convert URI to file path");
+                return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                    success: false,
+                    finding_count: 0,
+                }).unwrap()));
+            }
+        };
+
+        // Get workspace root and compute relative path
+        let workspace_root = { self.workspace_root.read().await.clone() };
+        let ide_workspace_root = workspace_root.as_ref();
+        let project_root = find_project_root(&file_path, ide_workspace_root).unwrap_or_else(|| {
+            ide_workspace_root
+                .cloned()
+                .unwrap_or_else(|| file_path.parent().unwrap_or(&file_path).to_path_buf())
+        });
+
+        let relative_path = file_path
+            .strip_prefix(&project_root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if relative_path.is_empty() {
+            self.log_debug("Could not compute relative path");
+            return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                success: false,
+                finding_count: 0,
+            }).unwrap()));
+        }
+
+        // Get API key
+        let api_key = match &self.config {
+            Some(config) => config.api_key.clone(),
+            None => {
+                self.log_debug("No API key configured");
+                return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                    success: false,
+                    finding_count: 0,
+                }).unwrap()));
+            }
+        };
+
+        // Detect language from file extension
+        let language = match file_path.extension().and_then(|e| e.to_str()) {
+            Some("py") => unfault_core::types::context::Language::Python,
+            Some("go") => unfault_core::types::context::Language::Go,
+            Some("rs") => unfault_core::types::context::Language::Rust,
+            Some("ts" | "tsx" | "js" | "jsx") => unfault_core::types::context::Language::Typescript,
+            _ => {
+                self.log_debug("Unsupported language");
+                return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                    success: false,
+                    finding_count: 0,
+                }).unwrap()));
+            }
+        };
+
+        // Parse the single file using the same approach as ir_builder
+        let file_id = unfault_core::parse::ast::FileId(1);
+        let source_file = unfault_core::types::context::SourceFile {
+            path: relative_path.clone(),
+            language,
+            content: text.clone(),
+        };
+
+        let semantics = match language {
+            unfault_core::types::context::Language::Python => {
+                use unfault_core::parse::python::parse_python_file;
+                use unfault_core::semantics::python::model::PyFileSemantics;
+                
+                let parsed = match parse_python_file(file_id, &source_file) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.log_debug(&format!("Parse error: {}", e));
+                        return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                            success: false,
+                            finding_count: 0,
+                        }).unwrap()));
+                    }
+                };
+                let mut sem = PyFileSemantics::from_parsed(&parsed);
+                let _ = sem.analyze_frameworks(&parsed);
+                vec![unfault_core::SourceSemantics::Python(sem)]
+            }
+            unfault_core::types::context::Language::Go => {
+                use unfault_core::parse::go::parse_go_file;
+                use unfault_core::semantics::go::model::GoFileSemantics;
+                
+                let parsed = match parse_go_file(file_id, &source_file) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.log_debug(&format!("Parse error: {}", e));
+                        return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                            success: false,
+                            finding_count: 0,
+                        }).unwrap()));
+                    }
+                };
+                let mut sem = GoFileSemantics::from_parsed(&parsed);
+                let _ = sem.analyze_frameworks(&parsed);
+                vec![unfault_core::SourceSemantics::Go(sem)]
+            }
+            unfault_core::types::context::Language::Rust => {
+                use unfault_core::parse::rust::parse_rust_file;
+                use unfault_core::semantics::rust::model::RustFileSemantics;
+                
+                let parsed = match parse_rust_file(file_id, &source_file) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.log_debug(&format!("Parse error: {}", e));
+                        return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                            success: false,
+                            finding_count: 0,
+                        }).unwrap()));
+                    }
+                };
+                let sem = RustFileSemantics::from_parsed(&parsed);
+                vec![unfault_core::SourceSemantics::Rust(sem)]
+            }
+            unfault_core::types::context::Language::Typescript
+            | unfault_core::types::context::Language::Javascript => {
+                use unfault_core::parse::typescript::parse_typescript_file;
+                use unfault_core::semantics::typescript::model::TsFileSemantics;
+                
+                let parsed = match parse_typescript_file(file_id, &source_file) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.log_debug(&format!("Parse error: {}", e));
+                        return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                            success: false,
+                            finding_count: 0,
+                        }).unwrap()));
+                    }
+                };
+                let mut sem = TsFileSemantics::from_parsed(&parsed);
+                let _ = sem.analyze_frameworks(&parsed);
+                vec![unfault_core::SourceSemantics::Typescript(sem)]
+            }
+            unfault_core::types::context::Language::Java => {
+                // Java not yet supported for single-file refresh
+                self.log_debug("Java not supported for single-file refresh");
+                return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                    success: false,
+                    finding_count: 0,
+                }).unwrap()));
+            }
+        };
+
+        // Serialize semantics
+        let semantics_json = match serde_json::to_string(&semantics) {
+            Ok(json) => json,
+            Err(e) => {
+                self.log_debug(&format!("Serialization error: {}", e));
+                return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                    success: false,
+                    finding_count: 0,
+                }).unwrap()));
+            }
+        };
+
+        // Detect profiles
+        let mut scanner = WorkspaceScanner::new(&project_root);
+        let workspace_info = match scanner.scan() {
+            Ok(info) => info,
+            Err(_) => {
+                self.log_debug("Failed to scan workspace for profiles");
+                return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                    success: false,
+                    finding_count: 0,
+                }).unwrap()));
+            }
+        };
+        let profiles: Vec<String> = workspace_info
+            .to_workspace_descriptor()
+            .profiles
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
+
+        self.log_debug(&format!(
+            "Analyzing single file {} with cached session {}",
+            relative_path, session_id
+        ));
+
+        // Call API with incremental=true to update only this file's findings
+        let response = match self
+            .api_client
+            .analyze_ir(
+                &api_key,
+                &session_id,
+                &profiles,
+                semantics_json,
+                true, // incremental: delete old findings for this file before inserting new
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                self.log_debug(&format!("API error: {:?}", e));
+                return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                    success: false,
+                    finding_count: 0,
+                }).unwrap()));
+            }
+        };
+
+        self.log_debug(&format!(
+            "Single file analysis returned {} findings",
+            response.findings.len()
+        ));
+
+        // Filter findings for this file and update cache + diagnostics
+        let settings = { self.settings.read().await.clone() };
+        let mut diagnostics = Vec::new();
+        let mut cached_findings = Vec::new();
+
+        for finding in &response.findings {
+            if !finding.file_path.ends_with(&relative_path)
+                && !relative_path.ends_with(&finding.file_path)
+            {
+                continue;
+            }
+
+            cached_findings.push(CachedFinding {
+                finding: finding.clone(),
+                version: 0,
+            });
+
+            if settings.diagnostics.enabled {
+                let finding_severity =
+                    FindingSeverityThreshold::from_finding_severity(&finding.severity);
+                if finding_severity.rank() >= settings.diagnostics.min_severity.rank() {
+                    diagnostics.push(self.finding_to_diagnostic(finding, &text));
+                }
+            }
+        }
+
+        let finding_count = cached_findings.len() as i32;
+
+        // Update findings cache
+        self.findings_cache.insert(uri.clone(), cached_findings);
+
+        // Publish diagnostics
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .await;
+
+        // Send analysis complete notification
+        let _ = self
+            .client
+            .send_notification::<AnalysisCompleteNotificationType>(AnalysisCompleteNotification {
+                uri: uri.to_string(),
+                finding_count,
+            })
+            .await;
+
+        Ok(Some(serde_json::to_value(RefreshFileResponse {
+            success: true,
+            finding_count,
+        }).unwrap()))
+    }
 }
 
 /// Custom notification type for file centrality
@@ -2814,229 +3242,6 @@ struct AnalysisCompleteNotificationType;
 impl tower_lsp::lsp_types::notification::Notification for AnalysisCompleteNotificationType {
     type Params = AnalysisCompleteNotification;
     const METHOD: &'static str = "unfault/analysisComplete";
-}
-
-impl UnfaultLsp {
-    async fn handle_get_function_impact(
-        &self,
-        params: serde_json::Value,
-    ) -> RpcResult<Option<GetFunctionImpactResponse>> {
-        let req: GetFunctionImpactRequest = serde_json::from_value(params)
-            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
-
-        let uri = Url::parse(&req.uri).ok();
-        let file_path = uri.as_ref().and_then(|u| u.to_file_path().ok());
-        let workspace_root = { self.workspace_root.read().await.clone() };
-        let relative_path = match (&file_path, &workspace_root) {
-            (Some(fp), Some(ws)) => fp
-                .strip_prefix(ws)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| fp.to_string_lossy().to_string()),
-            (Some(fp), None) => fp.to_string_lossy().to_string(),
-            _ => return Ok(None),
-        };
-        let api_key = match &self.config {
-            Some(c) => c.api_key.clone(),
-            None => return Ok(None),
-        };
-        let workspace_id = match self.workspace_id.read().await.clone() {
-            Some(id) => id,
-            None => return Ok(None),
-        };
-
-        let git_remote = workspace_root.as_ref().and_then(|p| get_git_remote(p));
-        let file_id = Some(compute_file_id(
-            git_remote.as_deref(),
-            &workspace_id,
-            &relative_path,
-        ));
-
-        // Look up function's line range from cache for function-scoped findings
-        let (start_line, end_line) = uri
-            .as_ref()
-            .and_then(|u| self.function_cache.get(u))
-            .and_then(|functions| {
-                functions
-                    .iter()
-                    .find(|f| f.name == req.function_name)
-                    .map(|f| {
-                        // LSP lines are 0-based, API expects 1-based
-                        (
-                            Some((f.range.start.line + 1) as i32),
-                            Some((f.range.end.line + 1) as i32),
-                        )
-                    })
-            })
-            .unwrap_or((None, None));
-
-        let impact_request = crate::api::graph::FunctionImpactRequest {
-            session_id: None,
-            workspace_id: Some(workspace_id),
-            file_id,
-            file_path: relative_path,
-            function_name: req.function_name.clone(),
-            start_line,
-            end_line,
-            max_depth: 5,
-        };
-        let response = match self
-            .api_client
-            .graph_function_impact(&api_key, &impact_request)
-            .await
-        {
-            Ok(r) => r,
-            Err(_) => return Ok(None),
-        };
-
-        // Include ALL callers (including route handlers) in the callers list
-        let mut callers = Vec::new();
-        for c in response
-            .direct_callers
-            .iter()
-            .chain(response.transitive_callers.iter())
-        {
-            callers.push(FunctionImpactCaller {
-                name: c.function.clone(),
-                calls: c.calls.clone(),
-                file: c.path.clone(),
-                depth: c.depth,
-            });
-        }
-        let mut routes = Vec::new();
-
-        // If the target function itself is a route handler, include it first
-        if response.is_route_handler {
-            if let (Some(m), Some(p)) = (&response.route_method, &response.route_path) {
-                let slos = response.slos.as_ref().map(|slo_list| {
-                    slo_list
-                        .iter()
-                        .map(|s| FunctionImpactSlo {
-                            name: s.name.clone(),
-                            provider: s.provider.clone(),
-                            target_percent: s.target_percent,
-                            error_budget_remaining: s.error_budget_remaining,
-                            dashboard_url: s.dashboard_url.clone(),
-                        })
-                        .collect()
-                });
-                routes.push(FunctionImpactRoute {
-                    method: m.to_uppercase(),
-                    path: p.clone(),
-                    slos,
-                });
-            }
-        }
-
-        // Also include routes from callers (for nested functions)
-        for c in response
-            .direct_callers
-            .iter()
-            .chain(response.transitive_callers.iter())
-            .filter(|c| c.is_route_handler)
-        {
-            if let (Some(m), Some(p)) = (&c.route_method, &c.route_path) {
-                let slos = c.slos.as_ref().map(|slo_list| {
-                    slo_list
-                        .iter()
-                        .map(|s| FunctionImpactSlo {
-                            name: s.name.clone(),
-                            provider: s.provider.clone(),
-                            target_percent: s.target_percent,
-                            error_budget_remaining: s.error_budget_remaining,
-                            dashboard_url: s.dashboard_url.clone(),
-                        })
-                        .collect()
-                });
-                routes.push(FunctionImpactRoute {
-                    method: m.to_uppercase(),
-                    path: p.clone(),
-                    slos,
-                });
-            }
-        }
-
-        // Use findings from local cache (fresh from latest analysis) instead of API database
-        // This ensures the sidebar reflects the current state of the code, not stale persisted data
-        let findings: Vec<FunctionImpactFinding> = if let Some(uri) = uri.as_ref() {
-            if let Some(cached) = self.findings_cache.get(uri) {
-                cached
-                    .iter()
-                    .filter(|cf| {
-                        // Filter to findings within the function's line range
-                        match (start_line, end_line) {
-                            (Some(start), Some(end)) => {
-                                let line = cf.finding.line;
-                                line >= start as u32 && line <= end as u32
-                            }
-                            _ => true, // Include if we can't determine range
-                        }
-                    })
-                    .map(|cf| FunctionImpactFinding {
-                        severity: normalize_severity(&cf.finding.severity),
-                        message: format!(
-                            "{}: {}",
-                            cf.finding.title,
-                            cf.finding.description.lines().next().unwrap_or("")
-                        ),
-                        learn_more: Some(format!(
-                            "https://docs.unfault.dev/rules/{}",
-                            cf.finding.rule_id.replace('.', "/")
-                        )),
-                    })
-                    .collect()
-            } else {
-                vec![]
-            }
-        } else {
-            // Fallback to API response if no URI
-            response
-                .findings
-                .iter()
-                .map(|f| FunctionImpactFinding {
-                    severity: normalize_severity(&f.severity),
-                    message: format!(
-                        "{}: {}",
-                        f.title,
-                        f.description.lines().next().unwrap_or("")
-                    ),
-                    learn_more: Some(format!(
-                        "https://docs.unfault.dev/rules/{}",
-                        f.rule_id.replace('.', "/")
-                    )),
-                })
-                .collect()
-        };
-
-        // Path findings are findings from callers in the call path
-        let path_findings: Vec<FunctionImpactFinding> = response
-            .path_findings
-            .into_iter()
-            .map(|f| FunctionImpactFinding {
-                severity: normalize_severity(&f.severity),
-                message: format!(
-                    "{}: {}",
-                    f.title,
-                    f.description.lines().next().unwrap_or("")
-                ),
-                learn_more: Some(format!(
-                    "https://docs.unfault.dev/rules/{}",
-                    f.rule_id.replace('.', "/")
-                )),
-            })
-            .collect();
-
-        let insights = summarize_findings(&findings);
-        let path_insights = summarize_findings(&path_findings);
-
-        Ok(Some(GetFunctionImpactResponse {
-            name: response.function,
-            callers,
-            routes,
-            findings,
-            insights,
-            path_insights,
-        }))
-    }
 }
 
 /// Execute the LSP command
