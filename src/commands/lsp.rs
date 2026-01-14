@@ -350,35 +350,35 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
     // Generate friendly summaries for each category
     if timeout.count > 0 {
         insights.push(make_insight(
-            "Missing timeout on external call",
+            "This call could hang without a timeout",
             timeout.severity.unwrap_or_else(|| "warning".to_string()),
             timeout.first_finding,
         ));
     }
     if retry.count > 0 {
         insights.push(make_insight(
-            "No retry logic for transient failures",
+            "Transient failures might bubble up here",
             retry.severity.unwrap_or_else(|| "warning".to_string()),
             retry.first_finding,
         ));
     }
     if error_handling.count > 0 {
         insights.push(make_insight(
-            "Error handling could be improved",
+            "Some error paths could use attention",
             error_handling.severity.unwrap_or_else(|| "warning".to_string()),
             error_handling.first_finding,
         ));
     }
     if logging.count > 0 {
         insights.push(make_insight(
-            "Could use better logging",
+            "Might be hard to debug without more logging",
             logging.severity.unwrap_or_else(|| "info".to_string()),
             logging.first_finding,
         ));
     }
     if security.count > 0 {
         insights.push(make_insight(
-            "Security concern flagged",
+            "Worth double-checking this from a security angle",
             security.severity.unwrap_or_else(|| "error".to_string()),
             security.first_finding,
         ));
