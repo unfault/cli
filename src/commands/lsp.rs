@@ -349,23 +349,6 @@ pub struct GetFunctionImpactRequest {
     pub position: Position,
 }
 
-/// A category of risk with count and examples
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RiskCategory {
-    pub category: String,
-    pub count: i32,
-    pub severity: String,
-    pub example_locations: Vec<String>,
-}
-
-/// Aggregated risk summary for upstream or downstream
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RiskSummary {
-    pub total_findings: i32,
-    pub total_affected_functions: i32,
-    pub categories: Vec<RiskCategory>,
-}
-
 /// Response for unfault/getFunctionImpact
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetFunctionImpactResponse {
@@ -376,16 +359,17 @@ pub struct GetFunctionImpactResponse {
     pub findings: Vec<FunctionImpactFinding>,
     /// Friendly, summarized insights derived from findings (for this function)
     pub insights: Vec<FunctionImpactInsight>,
-    /// Insights from callers in the call path (route handlers, etc.)
-    /// @deprecated Use upstreamRisks and downstreamRisks instead
+    /// Insights from callers in the call path (legacy, for backwards compat)
     #[serde(rename = "pathInsights")]
     pub path_insights: Vec<FunctionImpactInsight>,
-    /// Aggregated risks from upstream callers
-    #[serde(rename = "upstreamRisks", skip_serializing_if = "Option::is_none")]
-    pub upstream_risks: Option<RiskSummary>,
-    /// Aggregated risks from downstream callees
-    #[serde(rename = "downstreamRisks", skip_serializing_if = "Option::is_none")]
-    pub downstream_risks: Option<RiskSummary>,
+    /// Human-friendly insights about upstream callers
+    /// e.g., "Missing timeout on external call", "No retry logic"
+    #[serde(rename = "upstreamInsights")]
+    pub upstream_insights: Vec<FunctionImpactInsight>,
+    /// Human-friendly insights about downstream callees
+    /// e.g., "Missing timeout on external call", "No retry logic"
+    #[serde(rename = "downstreamInsights")]
+    pub downstream_insights: Vec<FunctionImpactInsight>,
 }
 
 fn normalize_severity(severity: &str) -> String {
@@ -3139,9 +3123,45 @@ impl UnfaultLsp {
             })
             .collect();
 
-        // Path findings are findings from callers in the call path
+        // Path findings are findings from callers in the call path (legacy, for backwards compat)
         let path_findings: Vec<FunctionImpactFinding> = response
             .path_findings
+            .into_iter()
+            .map(|f| FunctionImpactFinding {
+                severity: normalize_severity(&f.severity),
+                message: format!(
+                    "{}: {}",
+                    f.title,
+                    f.description.lines().next().unwrap_or("")
+                ),
+                learn_more: Some(format!(
+                    "https://docs.unfault.dev/rules/{}",
+                    f.rule_id.replace('.', "/")
+                )),
+            })
+            .collect();
+        
+        // Convert upstream findings to FunctionImpactFinding format for summarization
+        let upstream_findings: Vec<FunctionImpactFinding> = response
+            .upstream_findings
+            .into_iter()
+            .map(|f| FunctionImpactFinding {
+                severity: normalize_severity(&f.severity),
+                message: format!(
+                    "{}: {}",
+                    f.title,
+                    f.description.lines().next().unwrap_or("")
+                ),
+                learn_more: Some(format!(
+                    "https://docs.unfault.dev/rules/{}",
+                    f.rule_id.replace('.', "/")
+                )),
+            })
+            .collect();
+        
+        // Convert downstream findings to FunctionImpactFinding format for summarization
+        let downstream_findings: Vec<FunctionImpactFinding> = response
+            .downstream_findings
             .into_iter()
             .map(|f| FunctionImpactFinding {
                 severity: normalize_severity(&f.severity),
@@ -3160,28 +3180,10 @@ impl UnfaultLsp {
         let insights = summarize_findings(&findings);
         let path_insights = summarize_findings(&path_findings);
         
-        // Convert API risk summaries to our response format
-        let upstream_risks = response.upstream_risks.map(|r| RiskSummary {
-            total_findings: r.total_findings,
-            total_affected_functions: r.total_affected_functions,
-            categories: r.categories.into_iter().map(|c| RiskCategory {
-                category: c.category,
-                count: c.count,
-                severity: c.severity,
-                example_locations: c.example_locations,
-            }).collect(),
-        });
-        
-        let downstream_risks = response.downstream_risks.map(|r| RiskSummary {
-            total_findings: r.total_findings,
-            total_affected_functions: r.total_affected_functions,
-            categories: r.categories.into_iter().map(|c| RiskCategory {
-                category: c.category,
-                count: c.count,
-                severity: c.severity,
-                example_locations: c.example_locations,
-            }).collect(),
-        });
+        // Summarize upstream/downstream findings into human-friendly insights
+        // These tell a story: "Your callers have X issues" rather than raw rule IDs
+        let upstream_insights = summarize_findings(&upstream_findings);
+        let downstream_insights = summarize_findings(&downstream_findings);
         
         Ok(Some(
             serde_json::to_value(GetFunctionImpactResponse {
@@ -3191,8 +3193,8 @@ impl UnfaultLsp {
                 findings,
                 insights,
                 path_insights,
-                upstream_risks,
-                downstream_risks,
+                upstream_insights,
+                downstream_insights,
             })
             .unwrap(),
         ))
