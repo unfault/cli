@@ -154,6 +154,23 @@ pub struct RefreshFileResponse {
     pub finding_count: i32,
 }
 
+/// Notification for SLO discovery status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SloDiscoveryNotification {
+    /// Whether discovery was attempted
+    pub attempted: bool,
+    /// Number of SLOs discovered
+    pub slo_count: i32,
+    /// Number of routes linked to SLOs
+    pub routes_linked: i32,
+    /// Provider names that were checked (e.g., ["Datadog", "GCP"])
+    pub providers: Vec<String>,
+    /// Whether any credentials were expired/invalid
+    pub credentials_expired: bool,
+    /// Human-readable summary message
+    pub summary: String,
+}
+
 /// Caller information for function impact response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionImpactCaller {
@@ -206,7 +223,7 @@ pub struct FunctionImpactInsight {
 }
 
 /// Summarize raw findings into friendly, actionable insights
-/// Groups findings by category and generates human-readable summaries
+/// Groups findings by category based on rule_id and generates human-readable summaries
 fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactInsight> {
     if findings.is_empty() {
         return Vec::new();
@@ -226,29 +243,34 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
     let mut other_messages: Vec<(String, String)> = Vec::new(); // (message, severity)
 
     for f in findings {
-        let msg_lower = f.message.to_lowercase();
+        // Extract rule_id from learn_more URL (e.g., "https://docs.unfault.dev/rules/python/http/missing_retry")
+        // This is more reliable than fuzzy message matching which can have false positives
+        let rule_path = f.learn_more.as_ref()
+            .and_then(|url| url.strip_prefix("https://docs.unfault.dev/rules/"))
+            .unwrap_or("");
         
-        if msg_lower.contains("timeout") {
+        // Categorize by rule_id patterns
+        if rule_path.contains("timeout") {
             timeout.count += 1;
             if timeout.severity.is_none() || f.severity == "error" {
                 timeout.severity = Some(f.severity.clone());
             }
-        } else if msg_lower.contains("retry") || msg_lower.contains("retries") {
+        } else if rule_path.contains("retry") {
             retry.count += 1;
             if retry.severity.is_none() || f.severity == "error" {
                 retry.severity = Some(f.severity.clone());
             }
-        } else if msg_lower.contains("log") {
+        } else if rule_path.contains("logging") || rule_path.contains("log_") {
             logging.count += 1;
             if logging.severity.is_none() || f.severity == "error" {
                 logging.severity = Some(f.severity.clone());
             }
-        } else if msg_lower.contains("error") || msg_lower.contains("exception") || msg_lower.contains("handle") {
+        } else if rule_path.contains("exception") || rule_path.contains("error_handling") {
             error_handling.count += 1;
             if error_handling.severity.is_none() || f.severity == "error" {
                 error_handling.severity = Some(f.severity.clone());
             }
-        } else if msg_lower.contains("security") || msg_lower.contains("auth") || msg_lower.contains("injection") || msg_lower.contains("secret") {
+        } else if rule_path.contains("security") || rule_path.contains("auth") || rule_path.contains("injection") || rule_path.contains("secret") || rule_path.contains("xss") || rule_path.contains("csrf") {
             security.count += 1;
             if security.severity.is_none() || f.severity == "error" {
                 security.severity = Some(f.severity.clone());
@@ -327,6 +349,23 @@ pub struct GetFunctionImpactRequest {
     pub position: Position,
 }
 
+/// A category of risk with count and examples
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskCategory {
+    pub category: String,
+    pub count: i32,
+    pub severity: String,
+    pub example_locations: Vec<String>,
+}
+
+/// Aggregated risk summary for upstream or downstream
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskSummary {
+    pub total_findings: i32,
+    pub total_affected_functions: i32,
+    pub categories: Vec<RiskCategory>,
+}
+
 /// Response for unfault/getFunctionImpact
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetFunctionImpactResponse {
@@ -338,8 +377,15 @@ pub struct GetFunctionImpactResponse {
     /// Friendly, summarized insights derived from findings (for this function)
     pub insights: Vec<FunctionImpactInsight>,
     /// Insights from callers in the call path (route handlers, etc.)
+    /// @deprecated Use upstreamRisks and downstreamRisks instead
     #[serde(rename = "pathInsights")]
     pub path_insights: Vec<FunctionImpactInsight>,
+    /// Aggregated risks from upstream callers
+    #[serde(rename = "upstreamRisks", skip_serializing_if = "Option::is_none")]
+    pub upstream_risks: Option<RiskSummary>,
+    /// Aggregated risks from downstream callees
+    #[serde(rename = "downstreamRisks", skip_serializing_if = "Option::is_none")]
+    pub downstream_risks: Option<RiskSummary>,
 }
 
 fn normalize_severity(severity: &str) -> String {
@@ -568,12 +614,15 @@ impl UnfaultLsp {
     /// * `prebuilt_ir` - Optional pre-built IR to avoid rebuilding. If provided, skips the
     ///   `build_ir_cached` call which is expensive. Used by `did_open` to reuse the IR
     ///   already built for local dependency computation.
+    /// * `use_patch` - If true, use PATCH endpoint for incremental update instead of full ingest.
+    ///   This should be true for file saves after the initial analysis.
     async fn analyze_document(
         &self,
         uri: &Url,
         text: &str,
         version: i32,
         prebuilt_ir: Option<IntermediateRepresentation>,
+        use_patch: bool,
     ) {
         self.log_debug(&format!("Analyzing document: {}", uri));
 
@@ -738,49 +787,100 @@ impl UnfaultLsp {
         // Split IR so we can free the in-memory graph early
         let unfault_core::IntermediateRepresentation { semantics, graph } = ir;
 
-        // Ingest full graph first
+        // Decide whether to use PATCH (incremental) or full ingest
+        // Use PATCH only if:
+        // 1. use_patch flag is true (file save, not first open)
+        // 2. We have a cached session_id from a previous analysis
+        let cached_session_id = { self.session_id.read().await.clone() };
+        let should_use_patch = use_patch && cached_session_id.is_some();
+
         let workspace_label_str = project_root
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("project");
 
-        debug!("[LSP] Uploading graph for analysis (live session)...");
-        let ingest = match self
-            .api_client
-            .ingest_graph(
-                &api_key,
-                &workspace_id,
-                Some(workspace_label_str),
-                git_remote.as_deref(),
-                None, // TODO: Pass package_export for cross-workspace tracking
-                graph,
-                true, // is_live: reuse existing session for IDE real-time feedback
-            )
-            .await
-        {
-            Ok(resp) => {
-                // Cache session_id for incremental single-file refreshes
-                {
-                    let mut session_cache = self.session_id.write().await;
-                    *session_cache = Some(resp.session_id.clone());
+        let session_id = if should_use_patch {
+            // Use PATCH endpoint for incremental update (only updates changed files)
+            debug!("[LSP] Using PATCH for incremental graph update...");
+            match self
+                .api_client
+                .patch_graph(
+                    &api_key,
+                    &workspace_id,
+                    git_remote.as_deref(),
+                    graph,
+                )
+                .await
+            {
+                Ok(resp) => {
+                    debug!(
+                        "[LSP] PATCH completed: {} files updated, {} nodes created",
+                        resp.files_updated, resp.nodes_created
+                    );
+                    resp.session_id
                 }
-                resp
+                Err(e) => {
+                    // If PATCH fails (e.g., no CURRENT session), fall back to full ingest
+                    debug!("[LSP] PATCH failed, falling back to full ingest: {:?}", e);
+                    // Clear cached session_id to force full ingest next time
+                    {
+                        let mut session = self.session_id.write().await;
+                        *session = None;
+                    }
+                    // Return early - we'll retry on next save with full ingest
+                    let user_msg = match &e {
+                        crate::api::ApiError::ClientError { status: 404, .. } => {
+                            "Session expired, will re-analyze on next save".to_string()
+                        }
+                        crate::api::ApiError::Unauthorized { .. } => {
+                            "Analysis failed: Invalid or expired API key. Run 'unfault login' to re-authenticate.".to_string()
+                        }
+                        _ => format!("Incremental update failed: {:?}", e),
+                    };
+                    self.log_debug(&user_msg);
+                    return;
+                }
             }
-            Err(e) => {
-                debug!("[LSP] Graph ingest error: {:?}", e);
-                let user_msg = match &e {
-                    crate::api::ApiError::Unauthorized { .. } => {
-                        "Analysis failed: Invalid or expired API key. Run 'unfault login' to re-authenticate.".to_string()
+        } else {
+            // Full graph ingest (creates new CURRENT session)
+            debug!("[LSP] Uploading graph for analysis (full ingest)...");
+            match self
+                .api_client
+                .ingest_graph(
+                    &api_key,
+                    &workspace_id,
+                    Some(workspace_label_str),
+                    git_remote.as_deref(),
+                    None, // TODO: Pass package_export for cross-workspace tracking
+                    graph,
+                )
+                .await
+            {
+                Ok(resp) => {
+                    // Cache the session_id for subsequent PATCH calls
+                    {
+                        let mut session = self.session_id.write().await;
+                        *session = Some(resp.session_id.clone());
                     }
-                    crate::api::ApiError::Server { status, .. } => {
-                        format!("Analysis failed: Server error ({}). Please try again later.", status)
-                    }
-                    _ => format!("Analysis failed during graph upload: {:?}", e),
-                };
-                self.client
-                    .show_message(MessageType::WARNING, user_msg)
-                    .await;
-                return;
+                    debug!("[LSP] Full ingest completed, session_id cached: {}", resp.session_id);
+                    resp.session_id
+                }
+                Err(e) => {
+                    debug!("[LSP] Graph ingest error: {:?}", e);
+                    let user_msg = match &e {
+                        crate::api::ApiError::Unauthorized { .. } => {
+                            "Analysis failed: Invalid or expired API key. Run 'unfault login' to re-authenticate.".to_string()
+                        }
+                        crate::api::ApiError::Server { status, .. } => {
+                            format!("Analysis failed: Server error ({}). Please try again later.", status)
+                        }
+                        _ => format!("Analysis failed during graph upload: {:?}", e),
+                    };
+                    self.client
+                        .show_message(MessageType::WARNING, user_msg)
+                        .await;
+                    return;
+                }
             }
         };
 
@@ -810,7 +910,7 @@ impl UnfaultLsp {
             .api_client
             .analyze_ir(
                 &api_key,
-                &ingest.session_id,
+                &session_id,
                 &profiles,
                 semantics_json,
                 true, // incremental: delete old findings for these files before inserting new
@@ -1830,7 +1930,7 @@ impl UnfaultLsp {
         ));
 
         // Call function impact API
-        // The API will resolve workspace_id to the live session (is_live=true)
+        // The API will resolve workspace_id to the CURRENT session (require_current=true)
         let workspace_root = { self.workspace_root.read().await.clone() };
         let git_remote = workspace_root.as_ref().and_then(|p| get_git_remote(p));
         let file_id = Some(compute_file_id(
@@ -1848,7 +1948,7 @@ impl UnfaultLsp {
             start_line,
             end_line,
             max_depth: 5,
-            is_live: true,
+            require_current: true,
         };
 
         let response = match self
@@ -1966,6 +2066,174 @@ impl UnfaultLsp {
         }
 
         Some(markdown)
+    }
+
+    /// Run SLO discovery asynchronously and update the graph.
+    ///
+    /// This is called after the initial project analysis to discover SLOs
+    /// from configured providers (Datadog, GCP, Dynatrace) and link them
+    /// to HTTP route handlers in the code graph.
+    ///
+    /// The discovery runs in the background and sends a notification when complete.
+    async fn discover_slos(&self, project_root: &Path, workspace_id: &str, git_remote: Option<&str>) {
+        use crate::slo::SloEnricher;
+
+        self.log_debug("Starting async SLO discovery...");
+
+        let enricher = SloEnricher::new(self.verbose);
+        
+        // Check if any providers are available
+        if !enricher.any_provider_available() {
+            self.log_debug("No SLO providers available, skipping discovery");
+            let _ = self
+                .client
+                .send_notification::<SloDiscoveryNotificationType>(SloDiscoveryNotification {
+                    attempted: false,
+                    slo_count: 0,
+                    routes_linked: 0,
+                    providers: vec![],
+                    credentials_expired: false,
+                    summary: "No SLO provider credentials found".to_string(),
+                })
+                .await;
+            return;
+        }
+
+        let providers = enricher.available_providers();
+        self.log_debug(&format!("SLO providers available: {:?}", providers));
+
+        // Get API key
+        let api_key = match &self.config {
+            Some(config) => config.api_key.clone(),
+            None => {
+                self.log_debug("No API key configured, skipping SLO discovery");
+                return;
+            }
+        };
+
+        // Fetch SLOs from all providers
+        let fetch_result = match enricher.fetch_all().await {
+            Ok(result) => result,
+            Err(e) => {
+                self.log_debug(&format!("Failed to fetch SLOs: {}", e));
+                let _ = self
+                    .client
+                    .send_notification::<SloDiscoveryNotificationType>(SloDiscoveryNotification {
+                        attempted: true,
+                        slo_count: 0,
+                        routes_linked: 0,
+                        providers: providers.iter().map(|s| s.to_string()).collect(),
+                        credentials_expired: false,
+                        summary: format!("Failed to fetch SLOs: {}", e),
+                    })
+                    .await;
+                return;
+            }
+        };
+
+        let slo_count = fetch_result.slos.len();
+        if slo_count == 0 {
+            self.log_debug("No SLOs found");
+            let _ = self
+                .client
+                .send_notification::<SloDiscoveryNotificationType>(SloDiscoveryNotification {
+                    attempted: true,
+                    slo_count: 0,
+                    routes_linked: 0,
+                    providers: providers.iter().map(|s| s.to_string()).collect(),
+                    credentials_expired: fetch_result.credentials_expired,
+                    summary: if fetch_result.credentials_expired {
+                        "No SLOs found (some credentials may be expired)".to_string()
+                    } else {
+                        "No SLOs found".to_string()
+                    },
+                })
+                .await;
+            return;
+        }
+
+        self.log_debug(&format!("Found {} SLOs, building graph for enrichment...", slo_count));
+
+        // Build a fresh IR to get the graph with route handlers
+        let ir = match build_ir_cached(project_root, None, self.verbose, None) {
+            Ok(result) => result.ir,
+            Err(e) => {
+                self.log_debug(&format!("Failed to build IR for SLO enrichment: {}", e));
+                return;
+            }
+        };
+
+        // Extract graph and enrich with SLOs
+        let mut graph = ir.graph;
+        let routes_before = graph.get_http_route_handlers().len();
+        
+        let linked_count = enricher.enrich_graph(&mut graph, &fetch_result.slos).unwrap_or(0);
+        
+        self.log_debug(&format!(
+            "Enriched graph: {} SLOs linked to routes (total routes: {})",
+            linked_count, routes_before
+        ));
+
+        if linked_count == 0 {
+            // No routes matched, but we still report the SLOs found
+            let _ = self
+                .client
+                .send_notification::<SloDiscoveryNotificationType>(SloDiscoveryNotification {
+                    attempted: true,
+                    slo_count: slo_count as i32,
+                    routes_linked: 0,
+                    providers: providers.iter().map(|s| s.to_string()).collect(),
+                    credentials_expired: fetch_result.credentials_expired,
+                    summary: format!(
+                        "Found {} SLO(s) but no matching routes in codebase",
+                        slo_count
+                    ),
+                })
+                .await;
+            return;
+        }
+
+        // Use PATCH to add SLO nodes to the existing session
+        match self
+            .api_client
+            .patch_graph(&api_key, workspace_id, git_remote, graph)
+            .await
+        {
+            Ok(resp) => {
+                self.log_debug(&format!(
+                    "SLO graph patch completed: {} nodes created",
+                    resp.nodes_created
+                ));
+                let _ = self
+                    .client
+                    .send_notification::<SloDiscoveryNotificationType>(SloDiscoveryNotification {
+                        attempted: true,
+                        slo_count: slo_count as i32,
+                        routes_linked: linked_count as i32,
+                        providers: providers.iter().map(|s| s.to_string()).collect(),
+                        credentials_expired: fetch_result.credentials_expired,
+                        summary: format!(
+                            "Linked {} SLO(s) to {} route(s)",
+                            linked_count, routes_before
+                        ),
+                    })
+                    .await;
+            }
+            Err(e) => {
+                self.log_debug(&format!("Failed to patch graph with SLOs: {:?}", e));
+                let _ = self
+                    .client
+                    .send_notification::<SloDiscoveryNotificationType>(SloDiscoveryNotification {
+                        attempted: true,
+                        slo_count: slo_count as i32,
+                        routes_linked: 0,
+                        providers: providers.iter().map(|s| s.to_string()).collect(),
+                        credentials_expired: fetch_result.credentials_expired,
+                        summary: format!("Found {} SLO(s) but failed to update graph", slo_count),
+                    })
+                    .await;
+            }
+        }
     }
 }
 
@@ -2365,11 +2633,13 @@ impl LanguageServer for UnfaultLsp {
 
         // Now run the full analysis (includes API call)
         // Pass the pre-built IR to avoid rebuilding it
+        // use_patch=false: First open should use full ingest to create CURRENT session
         self.analyze_document(
             &params.text_document.uri,
             &params.text_document.text,
             params.text_document.version,
             local_ir,
+            false, // use_patch: false for initial load, true for saves
         )
         .await;
 
@@ -2380,6 +2650,24 @@ impl LanguageServer for UnfaultLsp {
                     .client
                     .send_notification::<FileCentralityNotificationType>(centrality)
                     .await;
+            }
+        }
+
+        // Spawn async SLO discovery in background (only on first file open for this project)
+        // This discovers SLOs from Datadog/GCP/Dynatrace and links them to routes
+        if let Some(ref proj_root) = project_root {
+            // Only run SLO discovery if we have a session (analysis succeeded)
+            let has_session = { self.session_id.read().await.is_some() };
+            if has_session {
+                // Get workspace_id for the PATCH call
+                let workspace_id = { self.workspace_id.read().await.clone() };
+                if let Some(workspace_id) = workspace_id {
+                    let git_remote = get_git_remote(proj_root);
+                    let proj_root = proj_root.clone();
+                    
+                    // Run SLO discovery asynchronously
+                    self.discover_slos(&proj_root, &workspace_id, git_remote.as_deref()).await;
+                }
             }
         }
     }
@@ -2396,6 +2684,29 @@ impl LanguageServer for UnfaultLsp {
                 .insert_async(params.text_document.uri.clone(), change.text.clone())
                 .await;
 
+            // Invalidate cached findings immediately on document change.
+            // This prevents stale quick fixes from being shown while the document
+            // has changed (e.g., user deleted the problematic code).
+            // New findings will be populated on the next save/refresh.
+            self.findings_cache.remove(&params.text_document.uri);
+
+            // Clear diagnostics for this document since findings are now stale.
+            // This provides immediate visual feedback that analysis is outdated.
+            self.client
+                .publish_diagnostics(params.text_document.uri.clone(), vec![], None)
+                .await;
+
+            // Notify the extension that findings are invalidated so it can clear the sidebar.
+            // The extension will re-fetch on save or when the user explicitly refreshes.
+            self.client
+                .send_notification::<AnalysisCompleteNotificationType>(
+                    AnalysisCompleteNotification {
+                        uri: params.text_document.uri.to_string(),
+                        finding_count: 0, // 0 indicates cache invalidated
+                    },
+                )
+                .await;
+
             // NOTE: We intentionally do NOT run full analysis on every change.
             // Full analysis (IR build + API call) is expensive and would lag the editor.
             // Analysis runs on:
@@ -2408,11 +2719,57 @@ impl LanguageServer for UnfaultLsp {
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         self.log_debug(&format!("Document saved: {}", params.text_document.uri));
 
-        // Re-analyze on save with saved text if available
-        if let Some(text) = params.text {
-            self.analyze_document(&params.text_document.uri, &text, 0, None)
-                .await;
+        // On save, the disk is now the best source of truth.
+        // (VSCode usually does NOT include the file contents in didSave.)
+        let uri = &params.text_document.uri;
+
+        // Clear the ENTIRE findings cache, not just the saved file.
+        // This ensures consistency: when f1.py is saved, findings for f2.py
+        // that might reference f1 (via path_findings in function_impact) are
+        // also invalidated. The next cursor move or explicit refresh will
+        // re-fetch fresh data from the database.
+        self.findings_cache.clear();
+
+        let mut text: Option<String> = None;
+
+        // Prefer reading the saved file from disk.
+        if let Ok(path) = uri.to_file_path() {
+            match tokio::fs::read_to_string(&path).await {
+                Ok(contents) => {
+                    text = Some(contents);
+                }
+                Err(e) => {
+                    self.log_debug(&format!(
+                        "Failed to read saved file from disk ({:?}): {}",
+                        path, e
+                    ));
+                }
+            }
         }
+
+        // Fall back to (rare) didSave-provided text.
+        if text.is_none() {
+            text = params.text;
+        }
+
+        // Last resort: fall back to our cached buffer content.
+        // This is still needed in some edge cases, and for unsaved refreshes.
+        if text.is_none() {
+            text = self
+                .document_cache
+                .get_async(uri)
+                .await
+                .map(|entry| entry.get().clone());
+        }
+
+        let Some(text) = text else {
+            self.log_debug("No document text available on save; skipping analysis");
+            return;
+        };
+
+        // use_patch=true: File saves should use PATCH for incremental update
+        // This only updates the changed file's graph nodes/edges, preserving SLOs etc.
+        self.analyze_document(uri, &text, 0, None, true).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -2684,7 +3041,7 @@ impl UnfaultLsp {
             start_line,
             end_line,
             max_depth: 5,
-            is_live: true,
+            require_current: true,
         };
         let response = match self
             .api_client
@@ -2803,6 +3160,29 @@ impl UnfaultLsp {
         let insights = summarize_findings(&findings);
         let path_insights = summarize_findings(&path_findings);
         
+        // Convert API risk summaries to our response format
+        let upstream_risks = response.upstream_risks.map(|r| RiskSummary {
+            total_findings: r.total_findings,
+            total_affected_functions: r.total_affected_functions,
+            categories: r.categories.into_iter().map(|c| RiskCategory {
+                category: c.category,
+                count: c.count,
+                severity: c.severity,
+                example_locations: c.example_locations,
+            }).collect(),
+        });
+        
+        let downstream_risks = response.downstream_risks.map(|r| RiskSummary {
+            total_findings: r.total_findings,
+            total_affected_functions: r.total_affected_functions,
+            categories: r.categories.into_iter().map(|c| RiskCategory {
+                category: c.category,
+                count: c.count,
+                severity: c.severity,
+                example_locations: c.example_locations,
+            }).collect(),
+        });
+        
         Ok(Some(
             serde_json::to_value(GetFunctionImpactResponse {
                 name: response.function,
@@ -2811,6 +3191,8 @@ impl UnfaultLsp {
                 findings,
                 insights,
                 path_insights,
+                upstream_risks,
+                downstream_risks,
             })
             .unwrap(),
         ))
@@ -2907,9 +3289,9 @@ impl UnfaultLsp {
         }
     }
 
-    /// Handle unfault/refreshFile - re-analyze a single file and return updated findings.
-    /// This is optimized to only parse and analyze the single file, not the entire workspace.
-    /// Requires a prior full analysis to have cached the session_id.
+    /// Handle unfault/refreshFile - re-analyze a single file including graph update.
+    /// This reuses analyze_document with use_patch=true to ensure both the graph
+    /// and findings are updated correctly.
     async fn handle_refresh_file(
         &self,
         args: serde_json::Value,
@@ -2920,19 +3302,17 @@ impl UnfaultLsp {
         let uri = Url::parse(&req.uri)
             .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
 
-        self.log_debug(&format!("Refreshing single file: {}", uri));
+        self.log_debug(&format!("Refreshing file (full re-analysis): {}", uri));
 
         // Get cached session_id from prior full analysis
-        let session_id = match self.session_id.read().await.clone() {
-            Some(id) => id,
-            None => {
-                self.log_debug("No session_id cached - need full analysis first");
-                return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                    success: false,
-                    finding_count: 0,
-                }).unwrap()));
-            }
-        };
+        let has_session = self.session_id.read().await.is_some();
+        if !has_session {
+            self.log_debug("No cached session_id, cannot refresh file");
+            return Ok(Some(serde_json::to_value(RefreshFileResponse {
+                success: false,
+                finding_count: 0,
+            }).unwrap()));
+        }
 
         // Get document content from cache (includes unsaved changes)
         let text = match self.document_cache.get_async(&uri).await {
@@ -2946,265 +3326,24 @@ impl UnfaultLsp {
             }
         };
 
-        // Get file path from URI
-        let file_path = match uri.to_file_path() {
-            Ok(path) => path,
-            Err(_) => {
-                self.log_debug("Could not convert URI to file path");
-                return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                    success: false,
-                    finding_count: 0,
-                }).unwrap()));
-            }
-        };
+        // Reuse analyze_document with use_patch=true to:
+        // 1. Build IR (including graph) for the single file
+        // 2. PATCH the graph to update nodes/edges
+        // 3. Run analyze_ir to get new findings
+        // 4. Update cache and send notifications
+        self.analyze_document(
+            &uri,
+            &text,
+            0, // version doesn't matter for refresh
+            None, // no prebuilt IR
+            true, // use_patch=true for incremental update
+        ).await;
 
-        // Get workspace root and compute relative path
-        let workspace_root = { self.workspace_root.read().await.clone() };
-        let ide_workspace_root = workspace_root.as_ref();
-        let project_root = find_project_root(&file_path, ide_workspace_root).unwrap_or_else(|| {
-            ide_workspace_root
-                .cloned()
-                .unwrap_or_else(|| file_path.parent().unwrap_or(&file_path).to_path_buf())
-        });
-
-        let relative_path = file_path
-            .strip_prefix(&project_root)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        if relative_path.is_empty() {
-            self.log_debug("Could not compute relative path");
-            return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                success: false,
-                finding_count: 0,
-            }).unwrap()));
-        }
-
-        // Get API key
-        let api_key = match &self.config {
-            Some(config) => config.api_key.clone(),
-            None => {
-                self.log_debug("No API key configured");
-                return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                    success: false,
-                    finding_count: 0,
-                }).unwrap()));
-            }
-        };
-
-        // Detect language from file extension
-        let language = match file_path.extension().and_then(|e| e.to_str()) {
-            Some("py") => unfault_core::types::context::Language::Python,
-            Some("go") => unfault_core::types::context::Language::Go,
-            Some("rs") => unfault_core::types::context::Language::Rust,
-            Some("ts" | "tsx" | "js" | "jsx") => unfault_core::types::context::Language::Typescript,
-            _ => {
-                self.log_debug("Unsupported language");
-                return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                    success: false,
-                    finding_count: 0,
-                }).unwrap()));
-            }
-        };
-
-        // Parse the single file using the same approach as ir_builder
-        let file_id = unfault_core::parse::ast::FileId(1);
-        let source_file = unfault_core::types::context::SourceFile {
-            path: relative_path.clone(),
-            language,
-            content: text.clone(),
-        };
-
-        let semantics = match language {
-            unfault_core::types::context::Language::Python => {
-                use unfault_core::parse::python::parse_python_file;
-                use unfault_core::semantics::python::model::PyFileSemantics;
-                
-                let parsed = match parse_python_file(file_id, &source_file) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.log_debug(&format!("Parse error: {}", e));
-                        return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                            success: false,
-                            finding_count: 0,
-                        }).unwrap()));
-                    }
-                };
-                let mut sem = PyFileSemantics::from_parsed(&parsed);
-                let _ = sem.analyze_frameworks(&parsed);
-                vec![unfault_core::SourceSemantics::Python(sem)]
-            }
-            unfault_core::types::context::Language::Go => {
-                use unfault_core::parse::go::parse_go_file;
-                use unfault_core::semantics::go::model::GoFileSemantics;
-                
-                let parsed = match parse_go_file(file_id, &source_file) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.log_debug(&format!("Parse error: {}", e));
-                        return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                            success: false,
-                            finding_count: 0,
-                        }).unwrap()));
-                    }
-                };
-                let mut sem = GoFileSemantics::from_parsed(&parsed);
-                let _ = sem.analyze_frameworks(&parsed);
-                vec![unfault_core::SourceSemantics::Go(sem)]
-            }
-            unfault_core::types::context::Language::Rust => {
-                use unfault_core::parse::rust::parse_rust_file;
-                use unfault_core::semantics::rust::model::RustFileSemantics;
-                
-                let parsed = match parse_rust_file(file_id, &source_file) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.log_debug(&format!("Parse error: {}", e));
-                        return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                            success: false,
-                            finding_count: 0,
-                        }).unwrap()));
-                    }
-                };
-                let sem = RustFileSemantics::from_parsed(&parsed);
-                vec![unfault_core::SourceSemantics::Rust(sem)]
-            }
-            unfault_core::types::context::Language::Typescript
-            | unfault_core::types::context::Language::Javascript => {
-                use unfault_core::parse::typescript::parse_typescript_file;
-                use unfault_core::semantics::typescript::model::TsFileSemantics;
-                
-                let parsed = match parse_typescript_file(file_id, &source_file) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.log_debug(&format!("Parse error: {}", e));
-                        return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                            success: false,
-                            finding_count: 0,
-                        }).unwrap()));
-                    }
-                };
-                let mut sem = TsFileSemantics::from_parsed(&parsed);
-                let _ = sem.analyze_frameworks(&parsed);
-                vec![unfault_core::SourceSemantics::Typescript(sem)]
-            }
-            unfault_core::types::context::Language::Java => {
-                // Java not yet supported for single-file refresh
-                self.log_debug("Java not supported for single-file refresh");
-                return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                    success: false,
-                    finding_count: 0,
-                }).unwrap()));
-            }
-        };
-
-        // Serialize semantics
-        let semantics_json = match serde_json::to_string(&semantics) {
-            Ok(json) => json,
-            Err(e) => {
-                self.log_debug(&format!("Serialization error: {}", e));
-                return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                    success: false,
-                    finding_count: 0,
-                }).unwrap()));
-            }
-        };
-
-        // Detect profiles
-        let mut scanner = WorkspaceScanner::new(&project_root);
-        let workspace_info = match scanner.scan() {
-            Ok(info) => info,
-            Err(_) => {
-                self.log_debug("Failed to scan workspace for profiles");
-                return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                    success: false,
-                    finding_count: 0,
-                }).unwrap()));
-            }
-        };
-        let profiles: Vec<String> = workspace_info
-            .to_workspace_descriptor()
-            .profiles
-            .iter()
-            .map(|p| p.id.clone())
-            .collect();
-
-        self.log_debug(&format!(
-            "Analyzing single file {} with cached session {}",
-            relative_path, session_id
-        ));
-
-        // Call API with incremental=true to update only this file's findings
-        let response = match self
-            .api_client
-            .analyze_ir(
-                &api_key,
-                &session_id,
-                &profiles,
-                semantics_json,
-                true, // incremental: delete old findings for this file before inserting new
-            )
-            .await
-        {
-            Ok(response) => response,
-            Err(e) => {
-                self.log_debug(&format!("API error: {:?}", e));
-                return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                    success: false,
-                    finding_count: 0,
-                }).unwrap()));
-            }
-        };
-
-        self.log_debug(&format!(
-            "Single file analysis returned {} findings",
-            response.findings.len()
-        ));
-
-        // Filter findings for this file and update cache + diagnostics
-        let settings = { self.settings.read().await.clone() };
-        let mut diagnostics = Vec::new();
-        let mut cached_findings = Vec::new();
-
-        for finding in &response.findings {
-            if !finding.file_path.ends_with(&relative_path)
-                && !relative_path.ends_with(&finding.file_path)
-            {
-                continue;
-            }
-
-            cached_findings.push(CachedFinding {
-                finding: finding.clone(),
-                version: 0,
-            });
-
-            if settings.diagnostics.enabled {
-                let finding_severity =
-                    FindingSeverityThreshold::from_finding_severity(&finding.severity);
-                if finding_severity.rank() >= settings.diagnostics.min_severity.rank() {
-                    diagnostics.push(self.finding_to_diagnostic(finding, &text));
-                }
-            }
-        }
-
-        let finding_count = cached_findings.len() as i32;
-
-        // Update findings cache
-        self.findings_cache.insert(uri.clone(), cached_findings);
-
-        // Publish diagnostics
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, None)
-            .await;
-
-        // Send analysis complete notification
-        let _ = self
-            .client
-            .send_notification::<AnalysisCompleteNotificationType>(AnalysisCompleteNotification {
-                uri: uri.to_string(),
-                finding_count,
-            })
-            .await;
+        // Get the finding count from cache (analyze_document updates it)
+        let finding_count = self.findings_cache
+            .get(&uri)
+            .map(|f| f.len() as i32)
+            .unwrap_or(0);
 
         Ok(Some(serde_json::to_value(RefreshFileResponse {
             success: true,
@@ -3244,6 +3383,14 @@ struct AnalysisCompleteNotificationType;
 impl tower_lsp::lsp_types::notification::Notification for AnalysisCompleteNotificationType {
     type Params = AnalysisCompleteNotification;
     const METHOD: &'static str = "unfault/analysisComplete";
+}
+
+/// Custom notification type for SLO discovery
+struct SloDiscoveryNotificationType;
+
+impl tower_lsp::lsp_types::notification::Notification for SloDiscoveryNotificationType {
+    type Params = SloDiscoveryNotification;
+    const METHOD: &'static str = "unfault/sloDiscovery";
 }
 
 /// Execute the LSP command
@@ -3699,32 +3846,32 @@ mod tests {
     
     #[test]
     fn test_summarize_findings() {
-        // Test timeout detection
+        // Test timeout detection via rule_id in learn_more URL
         let findings = vec![FunctionImpactFinding {
             severity: "warning".to_string(),
-            message: "Missing timeout on HTTP call".to_string(),
-            learn_more: None,
+            message: "Database call without timeout".to_string(),
+            learn_more: Some("https://docs.unfault.dev/rules/python/db/missing_timeout".to_string()),
         }];
         let insights = summarize_findings(&findings);
         assert_eq!(insights.len(), 1);
         assert_eq!(insights[0].message, "Missing timeout on external call");
         
-        // Test multiple categories
+        // Test multiple categories using rule_id patterns
         let findings = vec![
             FunctionImpactFinding {
                 severity: "warning".to_string(),
-                message: "No timeout set".to_string(),
-                learn_more: None,
+                message: "HTTP call without timeout".to_string(),
+                learn_more: Some("https://docs.unfault.dev/rules/python/http/missing_timeout".to_string()),
             },
             FunctionImpactFinding {
                 severity: "info".to_string(),
-                message: "Missing retry logic".to_string(),
-                learn_more: None,
+                message: "HTTP call has no retry".to_string(),
+                learn_more: Some("https://docs.unfault.dev/rules/python/http/missing_retry".to_string()),
             },
             FunctionImpactFinding {
                 severity: "error".to_string(),
-                message: "Security: SQL injection possible".to_string(),
-                learn_more: None,
+                message: "SQL injection possible".to_string(),
+                learn_more: Some("https://docs.unfault.dev/rules/python/security/sql_injection".to_string()),
             },
         ];
         let insights = summarize_findings(&findings);
@@ -3733,9 +3880,30 @@ mod tests {
         assert!(insights.iter().any(|i| i.message.contains("retry")));
         assert!(insights.iter().any(|i| i.message.contains("Security")));
         
+        // Test that message content alone doesn't trigger false positives
+        // (e.g., "connection timeouts" in a retry rule description shouldn't trigger timeout category)
+        let findings = vec![FunctionImpactFinding {
+            severity: "warning".to_string(),
+            message: "No retry policy: Transient failures (connection timeouts, 5xx errors) will propagate".to_string(),
+            learn_more: Some("https://docs.unfault.dev/rules/python/http/missing_retry".to_string()),
+        }];
+        let insights = summarize_findings(&findings);
+        assert_eq!(insights.len(), 1);
+        assert_eq!(insights[0].message, "No retry logic for transient failures");
+        
         // Test empty findings
         let insights = summarize_findings(&[]);
         assert!(insights.is_empty());
+        
+        // Test findings without learn_more go to "other"
+        let findings = vec![FunctionImpactFinding {
+            severity: "warning".to_string(),
+            message: "Some unknown finding".to_string(),
+            learn_more: None,
+        }];
+        let insights = summarize_findings(&findings);
+        assert_eq!(insights.len(), 1);
+        assert!(insights[0].message.contains("unknown finding"));
     }
 
     #[test]

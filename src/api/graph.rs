@@ -223,6 +223,25 @@ pub struct GraphIngestResponse {
     pub elapsed_ms: i64,
 }
 
+/// Response from PATCH /api/v1/graph/ingest for incremental updates
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GraphPatchResponse {
+    /// CURRENT session ID that was updated
+    pub session_id: String,
+    /// Number of files updated in this patch
+    pub files_updated: i64,
+    /// Number of graph nodes deleted
+    pub nodes_deleted: i64,
+    /// Number of graph nodes inserted
+    pub nodes_created: i64,
+    /// Number of graph edges deleted
+    pub edges_deleted: i64,
+    /// Number of graph edges inserted
+    pub edges_created: i64,
+    /// Total patching time in milliseconds
+    pub elapsed_ms: i64,
+}
+
 /// Progress snapshot for graph ingestion.
 #[derive(Debug, Clone)]
 pub struct GraphIngestProgress {
@@ -500,9 +519,9 @@ pub struct FunctionImpactRequest {
     pub end_line: Option<i32>,
     /// Maximum call hops to traverse (1-10, default: 5)
     pub max_depth: i32,
-    /// If true, resolve workspace_id to the most recent live session (IDE/LSP only)
+    /// If true, require a CURRENT session for the workspace (IDE/LSP real-time feedback)
     #[serde(skip_serializing_if = "is_false")]
-    pub is_live: bool,
+    pub require_current: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -572,6 +591,32 @@ pub struct FrameworkReference {
     pub app_var: Option<String>,
 }
 
+/// A category of risk with count and examples
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RiskCategory {
+    /// Short category name
+    pub category: String,
+    /// Number of findings in this category
+    pub count: i32,
+    /// Highest severity in this category
+    pub severity: String,
+    /// Example locations (up to 3)
+    #[serde(default)]
+    pub example_locations: Vec<String>,
+}
+
+/// Aggregated risk summary for upstream or downstream
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RiskSummary {
+    /// Total number of findings
+    pub total_findings: i32,
+    /// Number of functions with at least one finding
+    pub total_affected_functions: i32,
+    /// Risk categories with counts and examples
+    #[serde(default)]
+    pub categories: Vec<RiskCategory>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FunctionImpactResponse {
     /// The function being analyzed (file:function)
@@ -608,9 +653,21 @@ pub struct FunctionImpactResponse {
     /// Findings related to this function's file
     #[serde(default)]
     pub findings: Vec<FunctionFinding>,
-    /// Findings from callers in the call path (route handlers, etc.)
+    /// Findings from callers in the call path (deprecated, use upstream/downstream_findings)
     #[serde(default)]
     pub path_findings: Vec<FunctionFinding>,
+    /// Findings from upstream callers
+    #[serde(default)]
+    pub upstream_findings: Vec<FunctionFinding>,
+    /// Findings from downstream callees
+    #[serde(default)]
+    pub downstream_findings: Vec<FunctionFinding>,
+    /// Aggregated risks from upstream callers
+    #[serde(default)]
+    pub upstream_risks: Option<RiskSummary>,
+    /// Aggregated risks from downstream callees
+    #[serde(default)]
+    pub downstream_risks: Option<RiskSummary>,
     /// Summary of the function's impact context
     #[serde(default)]
     pub impact_summary: String,
@@ -1002,7 +1059,6 @@ impl ApiClient {
         git_remote: Option<&str>,
         package_export: Option<&crate::session::PackageExport>,
         graph: unfault_core::graph::CodeGraph,
-        is_live: bool,
     ) -> Result<GraphIngestResponse, ApiError> {
         self.ingest_graph_with_progress(
             api_key,
@@ -1011,7 +1067,6 @@ impl ApiClient {
             git_remote,
             package_export,
             graph,
-            is_live,
             |_| {},
         )
         .await
@@ -1032,7 +1087,6 @@ impl ApiClient {
     ///   file IDs will be globally unique across machines for the same repo.
     /// * `package_export` - Package export info for cross-workspace dependency tracking
     /// * `graph` - The code graph to ingest
-    /// * `is_live` - If true, reuse existing live session (for IDE real-time feedback)
     /// * `on_progress` - Progress callback
     #[allow(clippy::too_many_arguments)]
     pub async fn ingest_graph_with_progress<F>(
@@ -1043,7 +1097,6 @@ impl ApiClient {
         git_remote: Option<&str>,
         package_export: Option<&crate::session::PackageExport>,
         graph: unfault_core::graph::CodeGraph,
-        is_live: bool,
         mut on_progress: F,
     ) -> Result<GraphIngestResponse, ApiError>
     where
@@ -1077,11 +1130,6 @@ impl ApiClient {
             if let Some(remote) = git_remote {
                 start_url.push_str(&format!("&git_remote={}", urlencoding::encode(remote),));
             }
-        }
-
-        // Add is_live flag for IDE real-time sessions (reuses existing session)
-        if is_live {
-            start_url.push_str("&is_live=true");
         }
 
         let start_resp = self
@@ -1602,6 +1650,97 @@ impl ApiClient {
             message: format!("Failed to parse analyze finalize response: {}", e),
         })
     }
+
+    // =========================================================================
+    // Incremental Graph Patch Methods
+    // =========================================================================
+
+    /// Incrementally patch the graph for specific files.
+    ///
+    /// This uses the PATCH /api/v1/graph/ingest endpoint to update only the
+    /// changed files in the CURRENT session, rather than replacing the entire
+    /// graph. This is much faster for IDE real-time feedback.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - API authentication key
+    /// * `workspace_id` - Workspace identifier (used to find CURRENT session)
+    /// * `git_remote` - Git remote URL for computing stable file IDs
+    /// * `graph` - The partial code graph to patch (only contains changed files)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(GraphPatchResponse)` - Contains session_id and counts
+    /// * `Err(ApiError)` - Returns 404 if no CURRENT session exists
+    pub async fn patch_graph(
+        &self,
+        api_key: &str,
+        workspace_id: &str,
+        git_remote: Option<&str>,
+        graph: unfault_core::graph::CodeGraph,
+    ) -> Result<GraphPatchResponse, ApiError> {
+        use crate::api::graph_stream::{encode_graph_stream, IdContext};
+
+        let t0 = std::time::Instant::now();
+
+        // Create ID context for computing stable node identifiers
+        let id_ctx = IdContext::new(
+            &graph,
+            git_remote.map(|s| s.to_string()),
+            workspace_id.to_string(),
+        );
+
+        // Encode the graph into a single stream (nodes + edges)
+        let stream_bytes = encode_graph_stream(&graph, id_ctx).map_err(|e| ApiError::Network {
+            message: format!("Failed to encode graph stream: {}", e),
+        })?;
+
+        let url = format!(
+            "{}/api/v1/graph/ingest?workspace_id={}",
+            self.base_url,
+            urlencoding::encode(workspace_id),
+        );
+
+        debug!(
+            "[API] Sending PATCH request for {} nodes, {} edges",
+            graph.graph.node_count(),
+            graph.graph.edge_count()
+        );
+
+        let response = self
+            .client
+            .patch(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/x-msgpack")
+            .header("Content-Encoding", "zstd")
+            .body(stream_bytes)
+            .send()
+            .await
+            .map_err(to_network_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(to_http_error(status, error_text));
+        }
+
+        let mut patch_response: GraphPatchResponse =
+            response.json().await.map_err(|e| ApiError::ParseError {
+                message: format!("Failed to parse graph patch response: {}", e),
+            })?;
+
+        // Update elapsed_ms with actual client-side time
+        patch_response.elapsed_ms = t0.elapsed().as_millis() as i64;
+
+        debug!(
+            "[API] Graph patch completed: {} files updated, {} nodes created, {} edges created",
+            patch_response.files_updated,
+            patch_response.nodes_created,
+            patch_response.edges_created
+        );
+
+        Ok(patch_response)
+    }
 }
 
 #[cfg(test)]
@@ -1638,7 +1777,7 @@ mod tests {
     }
 
     #[test]
-    fn test_function_impact_request_serialization_is_live_default_false() {
+    fn test_function_impact_request_serialization_require_current_default_false() {
         let request = FunctionImpactRequest {
             session_id: None,
             workspace_id: Some("wks_abc123".to_string()),
@@ -1648,16 +1787,16 @@ mod tests {
             start_line: None,
             end_line: None,
             max_depth: 5,
-            is_live: false,
+            require_current: false,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("wks_abc123"));
         assert!(json.contains("handler"));
-        assert!(!json.contains("is_live"));
+        assert!(!json.contains("require_current"));
     }
 
     #[test]
-    fn test_function_impact_request_serialization_is_live_true() {
+    fn test_function_impact_request_serialization_require_current_true() {
         let request = FunctionImpactRequest {
             session_id: None,
             workspace_id: Some("wks_abc123".to_string()),
@@ -1667,10 +1806,10 @@ mod tests {
             start_line: None,
             end_line: None,
             max_depth: 5,
-            is_live: true,
+            require_current: true,
         };
         let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("\"is_live\":true"));
+        assert!(json.contains("\"require_current\":true"));
     }
 
     #[test]

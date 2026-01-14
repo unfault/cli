@@ -482,6 +482,312 @@ pub fn encode_nodes_chunk(
     Ok(zstd::stream::encode_all(std::io::Cursor::new(raw), 3)?)
 }
 
+/// Control record for nodes_done/edges_done events (no sequence/checksum)
+#[derive(Serialize)]
+struct ControlRecord {
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    event: &'static str,
+}
+
+/// Encode the full graph into a single stream for PATCH endpoint.
+///
+/// This produces the same wire format as the chunked ingest, but as a single
+/// payload suitable for the PATCH /api/v1/graph/ingest endpoint.
+///
+/// Format:
+/// - All node records
+/// - nodes_done control record
+/// - All edge records
+/// - edges_done control record
+///
+/// # Arguments
+///
+/// * `graph` - The code graph to encode (typically just changed files)
+/// * `ctx` - ID context for computing stable node identifiers
+///
+/// # Returns
+///
+/// Zstd-compressed bytes containing the framed msgpack records.
+pub fn encode_graph_stream(
+    graph: &CodeGraph,
+    mut ctx: IdContext,
+) -> anyhow::Result<Vec<u8>> {
+    let mut raw = Vec::with_capacity(512 * 1024);
+
+    // Encode all nodes
+    for node_idx in graph.graph.node_indices() {
+        let node = &graph.graph[node_idx];
+        let node_id = node_id_for_node(node, &mut ctx);
+        if node_id.is_empty() {
+            continue;
+        }
+
+        match node {
+            GraphNode::File { path, language, .. } => {
+                push_frame(
+                    &mut raw,
+                    &NodeRecord {
+                        record_type: "node",
+                        node_id,
+                        node_type: "file",
+                        path: Some(path),
+                        language: Some(format!("{:?}", language)),
+                        name: None,
+                        qualified_name: None,
+                        file_path: None,
+                        is_async: None,
+                        is_handler: None,
+                        http_method: None,
+                        http_path: None,
+                        category: None,
+                        var_name: None,
+                        slo_provider: None,
+                        slo_path_pattern: None,
+                        slo_target_percent: None,
+                        slo_current_percent: None,
+                        slo_error_budget_remaining: None,
+                        slo_timeframe: None,
+                        slo_dashboard_url: None,
+                    },
+                )?;
+            }
+            GraphNode::ExternalModule { name, category } => {
+                push_frame(
+                    &mut raw,
+                    &NodeRecord {
+                        record_type: "node",
+                        node_id,
+                        node_type: "external_module",
+                        path: None,
+                        language: None,
+                        name: Some(name),
+                        qualified_name: None,
+                        file_path: None,
+                        is_async: None,
+                        is_handler: None,
+                        http_method: None,
+                        http_path: None,
+                        category: Some(format!("{:?}", category)),
+                        var_name: None,
+                        slo_provider: None,
+                        slo_path_pattern: None,
+                        slo_target_percent: None,
+                        slo_current_percent: None,
+                        slo_error_budget_remaining: None,
+                        slo_timeframe: None,
+                        slo_dashboard_url: None,
+                    },
+                )?;
+            }
+            GraphNode::Function {
+                file_id,
+                name,
+                qualified_name,
+                is_async,
+                is_handler,
+                http_method,
+                http_path,
+            } => {
+                let file_path = ctx.get_path(file_id).cloned();
+                push_frame(
+                    &mut raw,
+                    &NodeRecord {
+                        record_type: "node",
+                        node_id,
+                        node_type: "function",
+                        path: None,
+                        language: None,
+                        name: Some(name),
+                        qualified_name: if qualified_name.is_empty() {
+                            None
+                        } else {
+                            Some(qualified_name.as_str())
+                        },
+                        file_path,
+                        is_async: Some(*is_async),
+                        is_handler: Some(*is_handler),
+                        http_method: http_method.as_deref(),
+                        http_path: http_path.as_deref(),
+                        category: None,
+                        var_name: None,
+                        slo_provider: None,
+                        slo_path_pattern: None,
+                        slo_target_percent: None,
+                        slo_current_percent: None,
+                        slo_error_budget_remaining: None,
+                        slo_timeframe: None,
+                        slo_dashboard_url: None,
+                    },
+                )?;
+            }
+            GraphNode::Class { file_id, name } => {
+                let file_path = ctx.get_path(file_id).cloned();
+                push_frame(
+                    &mut raw,
+                    &NodeRecord {
+                        record_type: "node",
+                        node_id,
+                        node_type: "class",
+                        path: None,
+                        language: None,
+                        name: Some(name),
+                        qualified_name: None,
+                        file_path,
+                        is_async: None,
+                        is_handler: None,
+                        http_method: None,
+                        http_path: None,
+                        category: None,
+                        var_name: None,
+                        slo_provider: None,
+                        slo_path_pattern: None,
+                        slo_target_percent: None,
+                        slo_current_percent: None,
+                        slo_error_budget_remaining: None,
+                        slo_timeframe: None,
+                        slo_dashboard_url: None,
+                    },
+                )?;
+            }
+            GraphNode::FastApiApp { file_id, var_name } => {
+                let file_path = ctx.get_path(file_id).cloned();
+                push_frame(
+                    &mut raw,
+                    &NodeRecord {
+                        record_type: "node",
+                        node_id,
+                        node_type: "fastapi_app",
+                        path: None,
+                        language: None,
+                        name: None,
+                        qualified_name: None,
+                        file_path,
+                        is_async: None,
+                        is_handler: None,
+                        http_method: None,
+                        http_path: None,
+                        category: None,
+                        var_name: Some(var_name),
+                        slo_provider: None,
+                        slo_path_pattern: None,
+                        slo_target_percent: None,
+                        slo_current_percent: None,
+                        slo_error_budget_remaining: None,
+                        slo_timeframe: None,
+                        slo_dashboard_url: None,
+                    },
+                )?;
+            }
+            GraphNode::FastApiRoute { .. } | GraphNode::FastApiMiddleware { .. } => continue,
+            GraphNode::Slo {
+                name,
+                provider,
+                path_pattern,
+                http_method,
+                target_percent,
+                current_percent,
+                error_budget_remaining,
+                timeframe,
+                dashboard_url,
+                ..
+            } => {
+                let provider_str = match provider {
+                    unfault_core::graph::SloProvider::Gcp => "gcp",
+                    unfault_core::graph::SloProvider::Datadog => "datadog",
+                    unfault_core::graph::SloProvider::Dynatrace => "dynatrace",
+                };
+                push_frame(
+                    &mut raw,
+                    &NodeRecord {
+                        record_type: "node",
+                        node_id,
+                        node_type: "slo",
+                        path: None,
+                        language: None,
+                        name: Some(name),
+                        qualified_name: None,
+                        file_path: None,
+                        is_async: None,
+                        is_handler: None,
+                        http_method: http_method.as_deref(),
+                        http_path: None,
+                        category: None,
+                        var_name: None,
+                        slo_provider: Some(provider_str),
+                        slo_path_pattern: Some(path_pattern),
+                        slo_target_percent: Some(*target_percent),
+                        slo_current_percent: *current_percent,
+                        slo_error_budget_remaining: *error_budget_remaining,
+                        slo_timeframe: Some(timeframe),
+                        slo_dashboard_url: dashboard_url.as_deref(),
+                    },
+                )?;
+            }
+        }
+    }
+
+    // nodes_done control record
+    push_frame(
+        &mut raw,
+        &ControlRecord {
+            record_type: "control",
+            event: "nodes_done",
+        },
+    )?;
+
+    // Encode all edges
+    for edge_idx in graph.graph.edge_indices() {
+        let Some((source, target)) = graph.graph.edge_endpoints(edge_idx) else {
+            continue;
+        };
+
+        let source_node = &graph.graph[source];
+        let target_node = &graph.graph[target];
+        let source_node_id = node_id_for_node(source_node, &mut ctx);
+        let target_node_id = node_id_for_node(target_node, &mut ctx);
+        if source_node_id.is_empty() || target_node_id.is_empty() {
+            continue;
+        }
+
+        let (edge_type, items) = match &graph.graph[edge_idx] {
+            GraphEdgeKind::Contains => ("contains", None),
+            GraphEdgeKind::Imports => ("imports", None),
+            GraphEdgeKind::ImportsFrom { items } => ("imports_from", Some(items.clone())),
+            GraphEdgeKind::Calls => ("calls", None),
+            GraphEdgeKind::Inherits => ("inherits", None),
+            GraphEdgeKind::UsesLibrary => ("uses_library", None),
+            GraphEdgeKind::FastApiAppOwnsRoute => ("fastapi_app_owns_route", None),
+            GraphEdgeKind::FastApiAppHasMiddleware => ("fastapi_app_has_middleware", None),
+            GraphEdgeKind::DependencyInjection => ("dependency_injection", None),
+            GraphEdgeKind::FastApiAppLifespan => ("fastapi_app_lifespan", None),
+            GraphEdgeKind::MonitoredBy => ("monitored_by", None),
+        };
+
+        push_frame(
+            &mut raw,
+            &EdgeRecord {
+                record_type: "edge",
+                source_node_id,
+                target_node_id,
+                edge_type,
+                items,
+            },
+        )?;
+    }
+
+    // edges_done control record
+    push_frame(
+        &mut raw,
+        &ControlRecord {
+            record_type: "control",
+            event: "edges_done",
+        },
+    )?;
+
+    Ok(zstd::stream::encode_all(std::io::Cursor::new(raw), 3)?)
+}
+
 /// Encode a chunk of graph edges into the wire format.
 ///
 /// # Arguments

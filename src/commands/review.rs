@@ -909,7 +909,6 @@ async fn execute_client_parse(
             git_remote.as_deref(),
             package_export.as_ref(),
             graph,
-            false, // is_live: false for CLI review (creates new session)
             move |progress| {
                 pb_upload.set_message(format!("Uploading code graph... {}%", progress.percent));
             },
