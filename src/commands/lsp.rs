@@ -1830,7 +1830,7 @@ impl UnfaultLsp {
         ));
 
         // Call function impact API
-        // The API will resolve workspace_id to the live session if one exists
+        // The API will resolve workspace_id to the live session (is_live=true)
         let workspace_root = { self.workspace_root.read().await.clone() };
         let git_remote = workspace_root.as_ref().and_then(|p| get_git_remote(p));
         let file_id = Some(compute_file_id(
@@ -1848,6 +1848,7 @@ impl UnfaultLsp {
             start_line,
             end_line,
             max_depth: 5,
+            is_live: true,
         };
 
         let response = match self
@@ -2683,6 +2684,7 @@ impl UnfaultLsp {
             start_line,
             end_line,
             max_depth: 5,
+            is_live: true,
         };
         let response = match self
             .api_client

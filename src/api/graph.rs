@@ -500,6 +500,9 @@ pub struct FunctionImpactRequest {
     pub end_line: Option<i32>,
     /// Maximum call hops to traverse (1-10, default: 5)
     pub max_depth: i32,
+    /// If true, resolve workspace_id to the most recent live session (IDE/LSP only)
+    #[serde(skip_serializing_if = "is_false")]
+    pub is_live: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1635,6 +1638,42 @@ mod tests {
     }
 
     #[test]
+    fn test_function_impact_request_serialization_is_live_default_false() {
+        let request = FunctionImpactRequest {
+            session_id: None,
+            workspace_id: Some("wks_abc123".to_string()),
+            file_id: None,
+            file_path: "auth/middleware.py".to_string(),
+            function_name: "handler".to_string(),
+            start_line: None,
+            end_line: None,
+            max_depth: 5,
+            is_live: false,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("wks_abc123"));
+        assert!(json.contains("handler"));
+        assert!(!json.contains("is_live"));
+    }
+
+    #[test]
+    fn test_function_impact_request_serialization_is_live_true() {
+        let request = FunctionImpactRequest {
+            session_id: None,
+            workspace_id: Some("wks_abc123".to_string()),
+            file_id: None,
+            file_path: "auth/middleware.py".to_string(),
+            function_name: "handler".to_string(),
+            start_line: None,
+            end_line: None,
+            max_depth: 5,
+            is_live: true,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"is_live\":true"));
+    }
+
+    #[test]
     fn test_dependency_request_files_using_library() {
         let request = DependencyQueryRequest {
             session_id: None,
@@ -1812,6 +1851,7 @@ mod tests {
             session_id: "00000000-0000-0000-0000-000000000000".to_string(),
             profiles: vec!["stability".to_string(), "security".to_string()],
             semantics_json: "[]".to_string(),
+            incremental: false,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("00000000-0000-0000-0000-000000000000"));
@@ -1826,6 +1866,7 @@ mod tests {
             session_id: "00000000-0000-0000-0000-000000000001".to_string(),
             profiles: vec!["stability".to_string()],
             semantics_json: "[]".to_string(),
+            incremental: false,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("00000000-0000-0000-0000-000000000001"));

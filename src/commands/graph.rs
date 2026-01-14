@@ -1717,6 +1717,7 @@ pub async fn execute_function_impact(args: FunctionImpactArgs) -> Result<i32> {
         start_line: None, // CLI command doesn't have line range context
         end_line: None,
         max_depth: args.max_depth,
+        is_live: false,
     };
 
     if args.verbose {
