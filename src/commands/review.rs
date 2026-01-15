@@ -43,6 +43,75 @@ use crate::session::{
     extract_package_export, get_git_remote, get_or_compute_workspace_id,
 };
 
+/// Get uncommitted files from git (staged, unstaged, and untracked).
+///
+/// Returns a list of relative paths for files that have uncommitted changes.
+/// Returns None if the directory is not a git repository.
+fn get_uncommitted_files(dir: &std::path::Path) -> Option<Vec<String>> {
+    use std::process::Command;
+
+    // Check if this is a git repo
+    let is_git = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .is_some_and(|o| o.status.success());
+
+    if !is_git {
+        return None;
+    }
+
+    let mut files = std::collections::HashSet::new();
+
+    // Unstaged modified files
+    if let Ok(output) = Command::new("git")
+        .args(["diff", "--name-only"])
+        .current_dir(dir)
+        .output()
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if !line.is_empty() {
+                    files.insert(line.to_string());
+                }
+            }
+        }
+    }
+
+    // Staged files
+    if let Ok(output) = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(dir)
+        .output()
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if !line.is_empty() {
+                    files.insert(line.to_string());
+                }
+            }
+        }
+    }
+
+    // Untracked files (new files not yet added)
+    if let Ok(output) = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(dir)
+        .output()
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if !line.is_empty() {
+                    files.insert(line.to_string());
+                }
+            }
+        }
+    }
+
+    Some(files.into_iter().collect())
+}
+
 /// Handle an API error and return the appropriate exit code.
 fn handle_api_error(error: ApiError) -> i32 {
     match error {
@@ -101,6 +170,8 @@ pub struct ReviewArgs {
     pub top: Option<usize>,
     /// Restrict analysis to specific files
     pub files: Option<Vec<String>>,
+    /// Review only uncommitted files (staged, unstaged, and untracked)
+    pub uncommitted: bool,
 }
 
 /// Stats from SLO discovery for display in review summary.
@@ -393,6 +464,38 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
     // Get current directory
     let current_dir = std::env::current_dir().context("Failed to get current directory")?;
 
+    // Resolve file filter from --file and/or --uncommitted flags
+    let filter_paths: Option<Vec<String>> = if args.uncommitted {
+        match get_uncommitted_files(&current_dir) {
+            Some(files) if files.is_empty() => {
+                eprintln!(
+                    "{} No uncommitted files found. Working tree is clean.",
+                    "✓".green().bold()
+                );
+                return Ok(EXIT_SUCCESS);
+            }
+            Some(files) => {
+                // Merge with explicit --file args if any
+                let mut all_files: std::collections::HashSet<String> = files.into_iter().collect();
+                if let Some(ref explicit) = args.files {
+                    for f in explicit {
+                        all_files.insert(f.clone());
+                    }
+                }
+                Some(all_files.into_iter().collect())
+            }
+            None => {
+                eprintln!(
+                    "{} Not a git repository. --uncommitted requires git.",
+                    "✗".red().bold()
+                );
+                return Ok(EXIT_CONFIG_ERROR);
+            }
+        }
+    } else {
+        args.files.clone()
+    };
+
     // Start timing the session
     let session_start = Instant::now();
 
@@ -473,6 +576,7 @@ pub async fn execute(args: ReviewArgs) -> Result<i32> {
         &dimensions,
         &workspace_info,
         session_start,
+        filter_paths.as_ref(),
     )
     .await
 }
@@ -526,6 +630,7 @@ async fn execute_client_parse(
     dimensions: &[String],
     workspace_info: &crate::session::WorkspaceInfo,
     session_start: Instant,
+    filter_paths: Option<&Vec<String>>,
 ) -> Result<i32> {
     use crate::api::SemanticsChunker;
 
@@ -543,45 +648,29 @@ async fn execute_client_parse(
 
     let parse_start = Instant::now();
 
-    // Build set of allowed files if --file was specified
-    let file_filter: Option<Vec<PathBuf>> = args.files.as_ref().map(|files| {
+    // Build set of paths to filter findings (from --file or --uncommitted)
+    // These are relative paths that will be matched against finding file_path
+    let finding_filter: Option<std::collections::HashSet<String>> = filter_paths.map(|files| {
         files
             .iter()
             .map(|f| {
+                // Normalize to relative path from workspace root
                 let p = PathBuf::from(f);
                 if p.is_absolute() {
-                    p
+                    p.strip_prefix(current_dir)
+                        .map(|rel| rel.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| f.clone())
                 } else {
-                    current_dir.join(p)
+                    f.clone()
                 }
             })
-            .filter(|p| p.starts_with(current_dir))
             .collect()
     });
 
-    // Exclude tests before parsing by default (unless --include-tests).
-    // If --file is specified, only include those files.
-    let file_paths: Option<Vec<std::path::PathBuf>> = if let Some(ref allowed) = file_filter {
-        // Use explicit file list
-        Some(
-            workspace_info
-                .source_files
-                .iter()
-                .filter_map(|(p, _)| {
-                    if allowed.iter().any(|a| a == p) {
-                        let rel = p.strip_prefix(current_dir).unwrap_or(p).to_string_lossy();
-                        if !args.include_tests && is_test_path(&rel) {
-                            None
-                        } else {
-                            Some(p.clone())
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        )
-    } else if args.include_tests {
+    // Exclude test files from parsing (unless --include-tests).
+    // We always parse ALL non-test files to maintain full workspace context.
+    // Findings are filtered later by finding_filter.
+    let file_paths: Option<Vec<std::path::PathBuf>> = if args.include_tests {
         None
     } else {
         Some(
@@ -1105,7 +1194,8 @@ async fn execute_client_parse(
         || args.raw_findings
         || args.output_format == "json"
         || args.output_format == "sarif"
-        || args.output_format == "llm";
+        || args.output_format == "llm"
+        || finding_filter.is_some(); // Need full findings to filter by path
 
     if needs_full_findings {
         let findings_resp = match api_client
@@ -1169,6 +1259,16 @@ async fn execute_client_parse(
             })
             .collect();
 
+        // Filter findings by --file/--uncommitted if specified
+        let findings: Vec<IrFinding> = if let Some(ref filter) = finding_filter {
+            findings
+                .into_iter()
+                .filter(|f| filter.contains(&f.file_path))
+                .collect()
+        } else {
+            findings
+        };
+
         // Calculate elapsed time
         let elapsed = session_start.elapsed();
         let elapsed_ms = elapsed.as_millis() as u64;
@@ -1184,12 +1284,21 @@ async fn execute_client_parse(
         let finding_count = findings.len();
 
         if args.verbose {
-            eprintln!(
-                "\n{} Analysis response: {} findings from {} files",
-                "DEBUG".yellow(),
-                finding_count,
-                file_count
-            );
+            if finding_filter.is_some() {
+                eprintln!(
+                    "\n{} Analysis response: {} findings (filtered) from {} files",
+                    "DEBUG".yellow(),
+                    finding_count,
+                    file_count
+                );
+            } else {
+                eprintln!(
+                    "\n{} Analysis response: {} findings from {} files",
+                    "DEBUG".yellow(),
+                    finding_count,
+                    file_count
+                );
+            }
         }
 
         // Handle fix/dry-run mode
@@ -3335,6 +3444,7 @@ mod tests {
             discover_observability: false,
             top: None,
             files: None,
+            uncommitted: false,
         };
         let context = ReviewOutputContext {
             workspace_label: "test-workspace".to_string(),
@@ -3400,6 +3510,7 @@ mod tests {
             discover_observability: false,
             top: None,
             files: None,
+            uncommitted: false,
         };
         let context = ReviewOutputContext {
             workspace_label: "test-workspace".to_string(),
@@ -3509,6 +3620,7 @@ mod tests {
             discover_observability: false,
             top: Some(2), // Limit to 2
             files: None,
+            uncommitted: false,
         };
         let context = ReviewOutputContext {
             workspace_label: "test".to_string(),
@@ -3607,5 +3719,121 @@ mod tests {
         assert_eq!(truncate_str("short", 10), "short");
         assert_eq!(truncate_str("this is a long string", 10), "this is a…");
         assert_eq!(truncate_str("exact", 5), "exact");
+    }
+
+    #[test]
+    fn test_get_uncommitted_files_non_git_dir() {
+        // Create a temp dir that's not a git repo
+        let temp_dir = tempfile::tempdir().unwrap();
+        let result = get_uncommitted_files(temp_dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_uncommitted_files_clean_repo() {
+        use std::process::Command;
+
+        // Create a temp git repo
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+
+        // Initialize git repo
+        Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        // Configure git user for the repo
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        // Create and commit a file
+        std::fs::write(path.join("file.txt"), "content").unwrap();
+        Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        // Should return empty list for clean repo
+        let result = get_uncommitted_files(path);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_get_uncommitted_files_with_changes() {
+        use std::process::Command;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+
+        // Initialize git repo
+        Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        // Configure git user
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        // Create and commit initial file
+        std::fs::write(path.join("committed.txt"), "content").unwrap();
+        Command::new("git")
+            .args(["add", "committed.txt"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+
+        // Create uncommitted changes:
+        // 1. Modified file (unstaged)
+        std::fs::write(path.join("committed.txt"), "modified").unwrap();
+        // 2. Staged file
+        std::fs::write(path.join("staged.txt"), "staged").unwrap();
+        Command::new("git")
+            .args(["add", "staged.txt"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        // 3. Untracked file
+        std::fs::write(path.join("untracked.txt"), "new").unwrap();
+
+        let result = get_uncommitted_files(path);
+        assert!(result.is_some());
+        let files = result.unwrap();
+
+        // Should contain all three types
+        assert!(files.contains(&"committed.txt".to_string())); // modified
+        assert!(files.contains(&"staged.txt".to_string())); // staged
+        assert!(files.contains(&"untracked.txt".to_string())); // untracked
     }
 }

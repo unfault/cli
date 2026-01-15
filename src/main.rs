@@ -137,6 +137,9 @@ enum Commands {
         /// Restrict analysis to specific files (can be repeated)
         #[arg(long = "file", value_name = "PATH")]
         files: Vec<String>,
+        /// Review only uncommitted files (staged, unstaged, and untracked)
+        #[arg(long)]
+        uncommitted: bool,
         /// Enable verbose output (dumps raw API responses)
         #[arg(long, short = 'v')]
         verbose: bool,
@@ -481,6 +484,7 @@ async fn run_command(command: Commands) -> i32 {
             llm,
             top,
             files,
+            uncommitted,
             verbose,
             profile,
             dimension,
@@ -532,6 +536,7 @@ async fn run_command(command: Commands) -> i32 {
                 discover_observability,
                 top,
                 files: if files.is_empty() { None } else { Some(files) },
+                uncommitted,
             };
             match commands::review::execute(args).await {
                 Ok(exit_code) => exit_code,
