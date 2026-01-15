@@ -45,6 +45,8 @@ pub enum OutputFormat {
     Json,
     /// SARIF output format for GitHub Code Scanning / IDE integration
     Sarif,
+    /// JSON output optimized for LLM coding agents
+    Llm,
 }
 
 /// Main CLI structure
@@ -126,6 +128,15 @@ enum Commands {
         /// Output format (basic: header + summary, concise: brief findings, full: detailed analysis)
         #[arg(long, value_name = "OUTPUT", default_value = "basic")]
         output: OutputFormat,
+        /// Shortcut for --output llm (JSON optimized for LLM coding agents)
+        #[arg(long)]
+        llm: bool,
+        /// Limit findings returned in LLM output (default: 50, max: 200)
+        #[arg(long, value_name = "N")]
+        top: Option<usize>,
+        /// Restrict analysis to specific files (can be repeated)
+        #[arg(long = "file", value_name = "PATH")]
+        files: Vec<String>,
         /// Enable verbose output (dumps raw API responses)
         #[arg(long, short = 'v')]
         verbose: bool,
@@ -466,7 +477,10 @@ async fn run_command(command: Commands) -> i32 {
             }
         }
         Commands::Review {
-            output,
+            mut output,
+            llm,
+            top,
+            files,
             verbose,
             profile,
             dimension,
@@ -476,10 +490,17 @@ async fn run_command(command: Commands) -> i32 {
             discover_observability,
         } => {
             init_logger(verbose);
+
+            // --llm flag overrides --output
+            if llm {
+                output = OutputFormat::Llm;
+            }
+
             // Convert OutputFormat to string for backward compatibility
             let output_format = match output {
                 OutputFormat::Json => "json".to_string(),
                 OutputFormat::Sarif => "sarif".to_string(),
+                OutputFormat::Llm => "llm".to_string(),
                 OutputFormat::Basic => "text".to_string(),
                 OutputFormat::Concise => "text".to_string(),
                 OutputFormat::Full => "text".to_string(),
@@ -490,8 +511,9 @@ async fn run_command(command: Commands) -> i32 {
                 OutputFormat::Basic => "basic".to_string(),
                 OutputFormat::Concise => "concise".to_string(),
                 OutputFormat::Full => "full".to_string(),
-                OutputFormat::Json => "full".to_string(), // JSON is always full
-                OutputFormat::Sarif => "full".to_string(), // SARIF is always full
+                OutputFormat::Json => "full".to_string(),
+                OutputFormat::Sarif => "full".to_string(),
+                OutputFormat::Llm => "full".to_string(),
             };
 
             let args = commands::review::ReviewArgs {
@@ -508,6 +530,8 @@ async fn run_command(command: Commands) -> i32 {
                 raw_findings,
                 include_tests,
                 discover_observability,
+                top,
+                files: if files.is_empty() { None } else { Some(files) },
             };
             match commands::review::execute(args).await {
                 Ok(exit_code) => exit_code,

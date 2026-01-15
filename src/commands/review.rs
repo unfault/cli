@@ -24,7 +24,9 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashMap;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -77,7 +79,7 @@ fn handle_api_error(error: ApiError) -> i32 {
 
 /// Arguments for the review command
 pub struct ReviewArgs {
-    /// Output format (text, json, or sarif)
+    /// Output format (text, json, sarif, or llm)
     pub output_format: String,
     /// Output mode (concise or full)
     pub output_mode: String,
@@ -95,6 +97,10 @@ pub struct ReviewArgs {
     pub include_tests: bool,
     /// Discover SLOs from observability platforms (GCP, Datadog, Dynatrace)
     pub discover_observability: bool,
+    /// Limit number of findings in LLM output (default 50, max 200)
+    pub top: Option<usize>,
+    /// Restrict analysis to specific files
+    pub files: Option<Vec<String>>,
 }
 
 /// Stats from SLO discovery for display in review summary.
@@ -536,8 +542,46 @@ async fn execute_client_parse(
     pb.set_message("Parsing source files locally...");
 
     let parse_start = Instant::now();
-    // Exclude tests before parsing by default.
-    let file_paths: Option<Vec<std::path::PathBuf>> = if args.include_tests {
+
+    // Build set of allowed files if --file was specified
+    let file_filter: Option<Vec<PathBuf>> = args.files.as_ref().map(|files| {
+        files
+            .iter()
+            .map(|f| {
+                let p = PathBuf::from(f);
+                if p.is_absolute() {
+                    p
+                } else {
+                    current_dir.join(p)
+                }
+            })
+            .filter(|p| p.starts_with(current_dir))
+            .collect()
+    });
+
+    // Exclude tests before parsing by default (unless --include-tests).
+    // If --file is specified, only include those files.
+    let file_paths: Option<Vec<std::path::PathBuf>> = if let Some(ref allowed) = file_filter {
+        // Use explicit file list
+        Some(
+            workspace_info
+                .source_files
+                .iter()
+                .filter_map(|(p, _)| {
+                    if allowed.iter().any(|a| a == p) {
+                        let rel = p.strip_prefix(current_dir).unwrap_or(p).to_string_lossy();
+                        if !args.include_tests && is_test_path(&rel) {
+                            None
+                        } else {
+                            Some(p.clone())
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        )
+    } else if args.include_tests {
         None
     } else {
         Some(
@@ -1060,7 +1104,8 @@ async fn execute_client_parse(
         || args.output_mode == "full"
         || args.raw_findings
         || args.output_format == "json"
-        || args.output_format == "sarif";
+        || args.output_format == "sarif"
+        || args.output_format == "llm";
 
     if needs_full_findings {
         let findings_resp = match api_client
@@ -1565,6 +1610,12 @@ fn display_ir_findings(
     context: &ReviewOutputContext,
 ) {
     let total_findings = findings.len();
+
+    if args.output_format == "llm" {
+        let output = generate_llm_output(args, findings, context);
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        return;
+    }
 
     if args.output_format == "json" {
         let output = serde_json::json!({
@@ -2678,9 +2729,183 @@ fn display_ir_hotspots_summary(findings: &[IrFinding]) {
     );
 }
 
+/// Target location for LLM output
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmTarget {
+    path: String,
+    start_line: u32,
+    start_col: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_col: Option<u32>,
+}
+
+/// Candidate fix for LLM output (advisory, not authoritative)
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmCandidateFix {
+    fix_preview: String,
+}
+
+/// A single merged finding for LLM output
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmFinding {
+    id: String,
+    rule_id: String,
+    severity: String,
+    dimension: String,
+    title: String,
+    why: String,
+    blast_radius: String,
+    files_allowed_to_change: Vec<String>,
+    targets: Vec<LlmTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_fix: Option<LlmCandidateFix>,
+    merged_count: usize,
+}
+
+/// Top-level LLM review output
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmReviewOutput {
+    schema_version: String,
+    stop_conditions: Vec<String>,
+    summary: serde_json::Value,
+    apply_order: Vec<String>,
+    findings: Vec<LlmFinding>,
+}
+
+/// Severity ranking for sorting (lower = more severe)
+fn severity_rank(sev: &str) -> u8 {
+    match sev.to_lowercase().as_str() {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        "info" => 4,
+        _ => 5,
+    }
+}
+
+/// Merge key: rule + file (treat as one task per file per rule)
+fn llm_merge_key(f: &IrFinding) -> String {
+    format!("{}::{}", f.rule_id, f.file_path)
+}
+
+/// Truncate string to max length with ellipsis
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max_len.saturating_sub(1)])
+    }
+}
+
+/// Generate LLM-optimized JSON output for one-shot coding agent workflows.
+fn generate_llm_output(
+    args: &ReviewArgs,
+    findings: &[IrFinding],
+    context: &ReviewOutputContext,
+) -> LlmReviewOutput {
+    // Group findings by merge key (rule + file)
+    let mut grouped: HashMap<String, Vec<&IrFinding>> = HashMap::new();
+    for f in findings {
+        grouped.entry(llm_merge_key(f)).or_default().push(f);
+    }
+
+    // Sort groups by severity (most severe first)
+    let mut merged: Vec<(&String, &Vec<&IrFinding>)> = grouped.iter().collect();
+    merged.sort_by(|a, b| {
+        let a_sev = severity_rank(&a.1[0].severity);
+        let b_sev = severity_rank(&b.1[0].severity);
+        a_sev.cmp(&b_sev)
+    });
+
+    // Apply top-N limit (default 50, max 200)
+    let top_n = args.top.unwrap_or(50).clamp(1, 200);
+    merged.truncate(top_n);
+
+    // Build output
+    let stop_conditions = vec![
+        "Do not refactor unrelated code.".to_string(),
+        "Do not rename public APIs unless required by a fix.".to_string(),
+        "Do not broaden scope beyond files_allowed_to_change.".to_string(),
+        "Keep edits minimal and local.".to_string(),
+    ];
+
+    let summary = serde_json::json!({
+        "workspace": context.workspace_label,
+        "file_count": context.file_count,
+        "elapsed_ms": context.elapsed_ms,
+        "findings_total": findings.len(),
+        "findings_returned": merged.len(),
+        "top": top_n,
+    });
+
+    let mut apply_order = Vec::new();
+    let mut out_findings = Vec::new();
+
+    for (idx, (_key, fs)) in merged.into_iter().enumerate() {
+        let id = format!("F-{:04}", idx + 1);
+        apply_order.push(id.clone());
+
+        let rep = fs[0]; // Representative finding
+
+        // Collect all targets from merged findings
+        let targets: Vec<LlmTarget> = fs
+            .iter()
+            .map(|f| LlmTarget {
+                path: f.file_path.clone(),
+                start_line: f.line,
+                start_col: f.column,
+                end_line: f.end_line,
+                end_col: f.end_column,
+            })
+            .collect();
+
+        // Build "why" from description or message
+        let why = if !rep.description.is_empty() {
+            truncate_str(&rep.description, 300)
+        } else if !rep.message.is_empty() {
+            truncate_str(&rep.message, 300)
+        } else {
+            "Issue detected by rule.".to_string()
+        };
+
+        // Include candidate fix if available (advisory only)
+        let candidate_fix = rep.fix_preview.as_ref().map(|p| LlmCandidateFix {
+            fix_preview: truncate_str(p, 500),
+        });
+
+        out_findings.push(LlmFinding {
+            id,
+            rule_id: rep.rule_id.clone(),
+            severity: rep.severity.clone(),
+            dimension: rep.dimension.clone(),
+            title: if rep.title.is_empty() {
+                rep.rule_id.clone()
+            } else {
+                rep.title.clone()
+            },
+            why,
+            blast_radius: "local".to_string(),
+            files_allowed_to_change: vec![rep.file_path.clone()],
+            targets,
+            candidate_fix,
+            merged_count: fs.len(),
+        });
+    }
+
+    LlmReviewOutput {
+        schema_version: "unfault.llm_review.v1".to_string(),
+        stop_conditions,
+        summary,
+        apply_order,
+        findings: out_findings,
+    }
+}
+
 /// Generate SARIF 2.1.0 output for GitHub Code Scanning and IDE integration.
 fn generate_ir_sarif_output(findings: &[IrFinding], workspace_label: &str) -> serde_json::Value {
-    use std::collections::HashMap;
 
     let mut rules_map: HashMap<String, &IrFinding> = HashMap::new();
     for finding in findings {
@@ -3094,5 +3319,293 @@ mod tests {
     fn test_display_ir_findings_grouped_empty() {
         let findings: Vec<IrFinding> = vec![];
         display_ir_findings_grouped(&findings);
+    }
+
+    #[test]
+    fn test_generate_llm_output_schema_version() {
+        let args = ReviewArgs {
+            output_format: "llm".to_string(),
+            output_mode: "full".to_string(),
+            verbose: false,
+            profile: None,
+            dimensions: None,
+            dry_run: false,
+            raw_findings: false,
+            include_tests: false,
+            discover_observability: false,
+            top: None,
+            files: None,
+        };
+        let context = ReviewOutputContext {
+            workspace_label: "test-workspace".to_string(),
+            languages: vec!["python".to_string()],
+            frameworks: vec!["fastapi".to_string()],
+            dimensions: vec!["stability".to_string()],
+            file_count: 10,
+            elapsed_ms: 100,
+            parse_ms: 50,
+            engine_ms: 50,
+            cache_hit_rate: Some(0.5),
+            trace_id: "test-trace".to_string(),
+            profile: Some("fastapi".to_string()),
+        };
+
+        let findings = vec![IrFinding {
+            rule_id: "missing.timeout".to_string(),
+            title: "Missing timeout".to_string(),
+            description: "HTTP request without timeout".to_string(),
+            severity: "High".to_string(),
+            dimension: "Stability".to_string(),
+            file_path: "src/main.py".to_string(),
+            line: 10,
+            column: 5,
+            end_line: Some(10),
+            end_column: Some(30),
+            message: "Add timeout".to_string(),
+            patch_json: None,
+            fix_preview: Some("requests.get(url, timeout=30)".to_string()),
+            patch: None,
+            byte_start: None,
+            byte_end: None,
+        }];
+
+        let output = generate_llm_output(&args, &findings, &context);
+
+        assert_eq!(output.schema_version, "unfault.llm_review.v1");
+        assert_eq!(output.stop_conditions.len(), 4);
+        assert_eq!(output.findings.len(), 1);
+        assert_eq!(output.apply_order, vec!["F-0001"]);
+
+        let finding = &output.findings[0];
+        assert_eq!(finding.id, "F-0001");
+        assert_eq!(finding.rule_id, "missing.timeout");
+        assert_eq!(finding.severity, "High");
+        assert_eq!(finding.blast_radius, "local");
+        assert_eq!(finding.files_allowed_to_change, vec!["src/main.py"]);
+        assert_eq!(finding.merged_count, 1);
+        assert!(finding.candidate_fix.is_some());
+    }
+
+    #[test]
+    fn test_generate_llm_output_merging() {
+        let args = ReviewArgs {
+            output_format: "llm".to_string(),
+            output_mode: "full".to_string(),
+            verbose: false,
+            profile: None,
+            dimensions: None,
+            dry_run: false,
+            raw_findings: false,
+            include_tests: false,
+            discover_observability: false,
+            top: None,
+            files: None,
+        };
+        let context = ReviewOutputContext {
+            workspace_label: "test-workspace".to_string(),
+            languages: vec![],
+            frameworks: vec![],
+            dimensions: vec![],
+            file_count: 5,
+            elapsed_ms: 50,
+            parse_ms: 25,
+            engine_ms: 25,
+            cache_hit_rate: None,
+            trace_id: "test".to_string(),
+            profile: None,
+        };
+
+        // Two findings with same rule+file should merge
+        let findings = vec![
+            IrFinding {
+                rule_id: "missing.timeout".to_string(),
+                title: "Missing timeout".to_string(),
+                description: "Desc".to_string(),
+                severity: "High".to_string(),
+                dimension: "Stability".to_string(),
+                file_path: "src/main.py".to_string(),
+                line: 10,
+                column: 1,
+                end_line: None,
+                end_column: None,
+                message: "".to_string(),
+                patch_json: None,
+                fix_preview: None,
+                patch: None,
+                byte_start: None,
+                byte_end: None,
+            },
+            IrFinding {
+                rule_id: "missing.timeout".to_string(),
+                title: "Missing timeout".to_string(),
+                description: "Desc".to_string(),
+                severity: "High".to_string(),
+                dimension: "Stability".to_string(),
+                file_path: "src/main.py".to_string(),
+                line: 20,
+                column: 1,
+                end_line: None,
+                end_column: None,
+                message: "".to_string(),
+                patch_json: None,
+                fix_preview: None,
+                patch: None,
+                byte_start: None,
+                byte_end: None,
+            },
+            // Different file, same rule - should NOT merge
+            IrFinding {
+                rule_id: "missing.timeout".to_string(),
+                title: "Missing timeout".to_string(),
+                description: "Desc".to_string(),
+                severity: "High".to_string(),
+                dimension: "Stability".to_string(),
+                file_path: "src/other.py".to_string(),
+                line: 5,
+                column: 1,
+                end_line: None,
+                end_column: None,
+                message: "".to_string(),
+                patch_json: None,
+                fix_preview: None,
+                patch: None,
+                byte_start: None,
+                byte_end: None,
+            },
+        ];
+
+        let output = generate_llm_output(&args, &findings, &context);
+
+        // Should have 2 findings (merged by rule+file)
+        assert_eq!(output.findings.len(), 2);
+
+        // First finding (same file) should have merged_count=2 with 2 targets
+        let merged_finding = output
+            .findings
+            .iter()
+            .find(|f| f.merged_count == 2)
+            .expect("Should have a merged finding");
+        assert_eq!(merged_finding.targets.len(), 2);
+
+        // Check summary reflects original count
+        let findings_total = output.summary["findings_total"].as_u64().unwrap();
+        assert_eq!(findings_total, 3);
+
+        let findings_returned = output.summary["findings_returned"].as_u64().unwrap();
+        assert_eq!(findings_returned, 2);
+    }
+
+    #[test]
+    fn test_generate_llm_output_top_limit() {
+        let args = ReviewArgs {
+            output_format: "llm".to_string(),
+            output_mode: "full".to_string(),
+            verbose: false,
+            profile: None,
+            dimensions: None,
+            dry_run: false,
+            raw_findings: false,
+            include_tests: false,
+            discover_observability: false,
+            top: Some(2), // Limit to 2
+            files: None,
+        };
+        let context = ReviewOutputContext {
+            workspace_label: "test".to_string(),
+            languages: vec![],
+            frameworks: vec![],
+            dimensions: vec![],
+            file_count: 1,
+            elapsed_ms: 10,
+            parse_ms: 5,
+            engine_ms: 5,
+            cache_hit_rate: None,
+            trace_id: "test".to_string(),
+            profile: None,
+        };
+
+        // Create 5 findings, each in different file (so they don't merge)
+        let findings: Vec<IrFinding> = (1..=5)
+            .map(|i| IrFinding {
+                rule_id: format!("rule.{}", i),
+                title: format!("Rule {}", i),
+                description: "Desc".to_string(),
+                severity: if i == 1 {
+                    "Critical".to_string()
+                } else if i == 2 {
+                    "High".to_string()
+                } else {
+                    "Medium".to_string()
+                },
+                dimension: "Stability".to_string(),
+                file_path: format!("file{}.py", i),
+                line: 1,
+                column: 1,
+                end_line: None,
+                end_column: None,
+                message: "".to_string(),
+                patch_json: None,
+                fix_preview: None,
+                patch: None,
+                byte_start: None,
+                byte_end: None,
+            })
+            .collect();
+
+        let output = generate_llm_output(&args, &findings, &context);
+
+        // Should be limited to 2 findings
+        assert_eq!(output.findings.len(), 2);
+        assert_eq!(output.apply_order.len(), 2);
+
+        // Should be sorted by severity (Critical first, then High)
+        assert_eq!(output.findings[0].severity, "Critical");
+        assert_eq!(output.findings[1].severity, "High");
+
+        // Summary should reflect the limit
+        assert_eq!(output.summary["top"].as_u64().unwrap(), 2);
+        assert_eq!(output.summary["findings_total"].as_u64().unwrap(), 5);
+        assert_eq!(output.summary["findings_returned"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_severity_rank() {
+        assert_eq!(severity_rank("Critical"), 0);
+        assert_eq!(severity_rank("critical"), 0);
+        assert_eq!(severity_rank("High"), 1);
+        assert_eq!(severity_rank("Medium"), 2);
+        assert_eq!(severity_rank("Low"), 3);
+        assert_eq!(severity_rank("Info"), 4);
+        assert_eq!(severity_rank("unknown"), 5);
+    }
+
+    #[test]
+    fn test_llm_merge_key() {
+        let finding = IrFinding {
+            rule_id: "rule.test".to_string(),
+            title: "".to_string(),
+            description: "".to_string(),
+            severity: "High".to_string(),
+            dimension: "".to_string(),
+            file_path: "src/main.py".to_string(),
+            line: 1,
+            column: 1,
+            end_line: None,
+            end_column: None,
+            message: "".to_string(),
+            patch_json: None,
+            fix_preview: None,
+            patch: None,
+            byte_start: None,
+            byte_end: None,
+        };
+        assert_eq!(llm_merge_key(&finding), "rule.test::src/main.py");
+    }
+
+    #[test]
+    fn test_truncate_str() {
+        assert_eq!(truncate_str("short", 10), "short");
+        assert_eq!(truncate_str("this is a long string", 10), "this is a…");
+        assert_eq!(truncate_str("exact", 5), "exact");
     }
 }
