@@ -34,6 +34,85 @@ unfault login
 unfault review
 ```
 
+## Copy/Paste Oneliners
+
+Real scenarios, ready to run. Just paste and go.
+
+### Before You Commit
+
+```bash
+# Review only what you changed — fast, focused feedback
+unfault review --uncommitted
+
+# Same thing, JSON for your editor/script
+unfault review --uncommitted --output json
+```
+
+### For Coding Agents (Cursor, Copilot, Claude)
+
+```bash
+# LLM-optimized output — paste this into your agent's context
+unfault review --llm
+
+# Focus on your changes, formatted for agents
+unfault review --uncommitted --llm
+
+# Review specific files with full workspace context
+unfault review --llm --file src/api/routes.py --file src/api/handlers.py
+```
+
+### CI/CD Integration
+
+```bash
+# SARIF for GitHub Code Scanning
+unfault review --output sarif > results.sarif
+
+# Fail the build if issues found (exit code 5)
+unfault review --output json && echo "Clean!" || echo "Issues found"
+
+# Skip test files in CI
+unfault review --output sarif  # (tests excluded by default)
+```
+
+### Deep Dives
+
+```bash
+# Full detailed output with fix suggestions
+unfault review --output full
+
+# Focus on stability issues only
+unfault review --dimension stability --output full
+
+# Include test files in analysis
+unfault review --include-tests --output full
+
+# See what would be fixed (dry run)
+unfault review --dry-run
+```
+
+### Impact Analysis
+
+```bash
+# What breaks if I change this file?
+unfault graph impact src/core/auth.py
+
+# Find the most critical files in your codebase
+unfault graph critical --limit 10
+
+# What depends on this library?
+unfault graph library requests
+```
+
+### Ask Your Codebase
+
+```bash
+# Quick semantic search
+unfault ask "functions without error handling"
+
+# With LLM-powered explanations
+unfault ask "what happens if the database is down?" --llm
+```
+
 ## Installation
 
 ### From Releases (Recommended)
@@ -81,6 +160,18 @@ unfault review --output json
 
 # Focus on specific dimensions
 unfault review --dimension stability --dimension performance
+
+# Review only uncommitted changes (git required)
+unfault review --uncommitted
+
+# Review specific files (with full workspace context)
+unfault review --file src/api.py --file src/utils.py
+
+# LLM-optimized JSON for coding agents
+unfault review --llm
+
+# Combine: uncommitted files, formatted for agents
+unfault review --uncommitted --llm --top 20
 ```
 
 **Output Modes:**
@@ -92,6 +183,16 @@ unfault review --dimension stability --dimension performance
 | `full` | Detailed insights with suggestions |
 | `json` | Machine-readable output |
 | `sarif` | SARIF 2.1.0 for IDE integration |
+| `llm` | Compact JSON optimized for LLM coding agents |
+
+**Filtering Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--uncommitted` | Only show findings for uncommitted files (staged, unstaged, untracked) |
+| `--file PATH` | Only show findings for specific files (repeatable) |
+| `--top N` | Limit findings in LLM output (default: 50, max: 200) |
+| `--include-tests` | Include test files in analysis (excluded by default) |
 
 ### `unfault ask`
 
