@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-01-15
+
+### Added
+
+- New `--llm` flag for LLM-optimized JSON output designed for coding agents (Cursor, Copilot, Claude)
+  - Compact schema with `stop_conditions` to prevent over-refactoring
+  - `files_allowed_to_change` per finding for agent guardrails
+  - Findings merged by rule+file and sorted by severity
+- New `--uncommitted` flag to review only uncommitted files (staged, unstaged, untracked)
+- New `--top N` flag to limit findings in LLM output (default 50, max 200)
+
+### Changed
+
+- `--file` flag now filters findings instead of limiting parsing, preserving full workspace context
+- File filtering now works with `--output json`, `--output sarif`, and `--llm`
+
 ## [0.6.4] - 2026-01-15
 
 ### Changed
