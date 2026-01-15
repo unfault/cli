@@ -2486,7 +2486,11 @@ mod tests {
 
         let take = build_no_llm_quick_take(&response).unwrap();
         let lower = take.to_lowercase();
-        assert!(lower.contains("hardcoded secrets"), "expected 'hardcoded secrets' in: {}", lower);
+        assert!(
+            lower.contains("hardcoded secrets"),
+            "expected 'hardcoded secrets' in: {}",
+            lower
+        );
         assert!(lower.contains("src/main.go"));
 
         let reply = build_colleague_reply(&response);

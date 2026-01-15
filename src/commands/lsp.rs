@@ -4047,7 +4047,10 @@ mod tests {
         }];
         let insights = summarize_findings(&findings);
         assert_eq!(insights.len(), 1);
-        assert_eq!(insights[0].message, "This call could hang without a timeout");
+        assert_eq!(
+            insights[0].message,
+            "This call could hang without a timeout"
+        );
 
         // Test multiple categories using rule_id patterns
         let findings = vec![
@@ -4108,7 +4111,10 @@ mod tests {
         }];
         let insights = summarize_findings(&findings);
         assert_eq!(insights.len(), 1);
-        assert_eq!(insights[0].message, "Transient failures might bubble up here");
+        assert_eq!(
+            insights[0].message,
+            "Transient failures might bubble up here"
+        );
 
         // Test empty findings
         let insights = summarize_findings(&[]);
