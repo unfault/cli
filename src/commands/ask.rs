@@ -478,12 +478,11 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
     // Run LLM only when explicitly requested.
     let llm_response = if args.llm {
         if !config.llm_ready() {
-            if args.verbose {
-                eprintln!(
-                    "{} LLM not configured; falling back to templates",
-                    "⚠".yellow()
-                );
-            }
+            eprintln!(
+                "{} LLM not configured. Run `unfault llm setup` to enable AI-powered answers.",
+                "⚠".yellow()
+            );
+            eprintln!();
             None
         } else {
             let llm_config = config.llm.as_ref().unwrap();
