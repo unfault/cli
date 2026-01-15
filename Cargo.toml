@@ -48,14 +48,15 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Local parsing and graph building
 #
-# CI/builds should use the published crate. For local development against a
-# sibling checkout, you can uncomment the `[patch.crates-io]` section below.
+# CI/builds use the published crate from crates.io.
+# For local development against a sibling checkout of unfault/core,
+# uncomment the [patch.crates-io] section below.
 unfault-core = "0.1.7"
 
-# For local development against a sibling checkout, you can uncomment:
+# For local development against a sibling checkout, uncomment:
 #
-[patch.crates-io]
-unfault-core = { path = "../core" }
+# [patch.crates-io]
+# unfault-core = { path = "../core" }
 
 [dev-dependencies]
 tempfile = "3.8"
