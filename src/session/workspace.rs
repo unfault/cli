@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::workspace_id::{
-    MetaFileInfo as WorkspaceIdMetaFile, WorkspaceIdSource, compute_workspace_id, get_git_remote,
+    MetaFileInfo as WorkspaceIdMetaFile, WorkspaceIdSource, get_git_remote, get_or_compute_workspace_id,
 };
 use super::workspace_settings::{LoadedSettings, WorkspaceSettings, load_settings};
 use crate::api::{AdvertisedProfile, MetaFile, ProjectLayout, WorkspaceDescriptor};
@@ -632,8 +632,9 @@ impl WorkspaceScanner {
             })
             .collect();
 
-        // Compute workspace_id
-        let (workspace_id, workspace_id_source) = if let Some(result) = compute_workspace_id(
+        // Compute workspace_id (with persistent mapping)
+        let (workspace_id, workspace_id_source) = if let Some(result) = get_or_compute_workspace_id(
+            &self.root,
             git_remote.as_deref(),
             Some(&workspace_id_meta),
             Some(&label),

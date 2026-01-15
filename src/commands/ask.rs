@@ -30,7 +30,7 @@ use crate::api::rag::{
 use crate::config::Config;
 use crate::exit_codes::*;
 use crate::session::{
-    MetaFileInfo, SerializableGraph, build_local_graph, compute_workspace_id, get_git_remote,
+    MetaFileInfo, SerializableGraph, build_local_graph, get_git_remote, get_or_compute_workspace_id,
 };
 
 /// Convert SerializableGraph to ClientGraphData for API consumption.
@@ -292,8 +292,9 @@ fn detect_workspace_id(workspace_path: &Path, verbose: bool) -> Option<String> {
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
 
-    // Compute workspace ID
-    let result = compute_workspace_id(
+    // Compute workspace ID (with persistent mapping)
+    let result = get_or_compute_workspace_id(
+        workspace_path,
         git_remote.as_deref(),
         if meta_files.is_empty() {
             None

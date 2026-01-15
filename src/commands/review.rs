@@ -38,7 +38,7 @@ use crate::errors::{
 use crate::exit_codes::*;
 use crate::session::{
     MetaFileInfo, PatchApplier, ScanProgress, WorkspaceScanner, build_ir_cached,
-    compute_workspace_id, extract_package_export, get_git_remote,
+    extract_package_export, get_git_remote, get_or_compute_workspace_id,
 };
 
 /// Handle an API error and return the appropriate exit code.
@@ -606,11 +606,12 @@ async fn execute_client_parse(
         .collect();
     let package_export = extract_package_export(&meta_files);
 
-    // Step 2: Compute workspace ID
+    // Step 2: Compute workspace ID (with persistent mapping)
     // Use git remote first, then manifest files (pyproject.toml, etc.), then fallback to label
     // This must match the workspace ID computation in `ask` command for consistency
     let git_remote = get_git_remote(current_dir);
-    let workspace_id_result = compute_workspace_id(
+    let workspace_id_result = get_or_compute_workspace_id(
+        current_dir,
         git_remote.as_deref(),
         if meta_files.is_empty() {
             None
