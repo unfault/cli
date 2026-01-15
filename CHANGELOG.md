@@ -5,7 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.2] - 2026-01-09
+## [0.6.3] - 2026-01-15
+
+### Added
+- Added `start_line`/`end_line` to graph node serialization for function-scoped queries.
+- Added `is_live` flag for function impact (LSP only).
+- Added live session support and analysis complete notification.
+- Added single-file refresh for instant findings update after quick fixes.
+- Added friendly insights and path insights for sidebar.
+- Added 'calls' field to FunctionImpactCaller for call chain tree visualization.
+- Added function line range for scoped findings.
+- Added `unfault graph refresh` command for on-demand graph building.
+- Added default summary command with entry points and SLOs.
+- Added affected routes and SLOs display in impact analysis.
+- Added function centrality support in ask command.
+- Added `workspace_mappings` to config for persistent workspace ID storage.
+
+### Changed
+- Softened insight messages to conversational tone.
+- Use human-friendly insights instead of raw risk categories.
+- LSP now runs analysis on save only, not on every keystroke.
+
+### Fixed
+- LSP now uses buffer content for analysis instead of reading from disk.
+- LSP uses cached findings for function impact instead of API database.
+- Fixed refresh dependencies notification on file change/save.
+- Fixed route count reporting when linking SLOs.
+- Improved impact analysis display formatting.
+- Improved ask response quality with deduplication and code snippets.
+- Fixed similarity percentage display capped at 99%.
+- Embeddings are now generated after finalize for RAG search.
+- Improved fallback messages when no context found.
+- Improved ask command centrality query output phrasing.
+- Fixed LSP workspace ID computation to read manifest files (matching CLI behavior).
+- Fixed workspace ID stability when git remote is added to a project.
 
 ### Added
 - Richer SLO context in `unfault ask`, including interactive mapping for service-level SLOs.
@@ -89,6 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
+[0.6.3]: https://github.com/unfault/cli/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/unfault/cli/releases/tag/v0.6.2
 [0.6.0]: https://github.com/unfault/cli/releases/tag/v0.6.0
 [0.5.1]: https://github.com/unfault/cli/releases/tag/v0.5.1
