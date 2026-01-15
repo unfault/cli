@@ -57,7 +57,7 @@ pub use workspace::{
 pub use workspace_id::{
     MetaFileInfo, PackageExport, WorkspaceIdResult, WorkspaceIdSource, compute_file_id,
     compute_symbol_id, compute_workspace_id, extract_package_export, get_git_remote,
-    normalize_git_remote, normalize_rel_path,
+    get_or_compute_workspace_id, normalize_git_remote, normalize_rel_path,
 };
 pub use workspace_settings::{
     LoadedSettings, RuleSettings, SettingsSource, WorkspaceSettings, load_settings,

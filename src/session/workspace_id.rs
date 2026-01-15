@@ -456,6 +456,61 @@ pub fn compute_workspace_id(
     None
 }
 
+/// Get or compute workspace ID with persistent mapping.
+///
+/// This function ensures workspace ID stability across git remote changes:
+/// 1. First checks if there's an existing mapping in config for this directory
+/// 2. If not found, computes the workspace ID using the standard logic
+/// 3. Stores the mapping in config for future use
+///
+/// This prevents workspace ID changes when:
+/// - A git remote is added to a previously local-only project
+/// - The git remote URL changes
+///
+/// # Arguments
+///
+/// * `workspace_path` - The directory path of the workspace
+/// * `git_remote` - Optional git remote URL
+/// * `meta_files` - Optional manifest files for ID computation
+/// * `workspace_label` - Optional fallback label (usually directory name)
+///
+/// # Returns
+///
+/// The workspace ID result, either from existing mapping or freshly computed.
+/// Returns `None` if no workspace ID could be determined.
+pub fn get_or_compute_workspace_id(
+    workspace_path: &Path,
+    git_remote: Option<&str>,
+    meta_files: Option<&[MetaFileInfo]>,
+    workspace_label: Option<&str>,
+) -> Option<WorkspaceIdResult> {
+    use crate::config::Config;
+
+    // Try to load config and check for existing mapping
+    if let Ok(config) = Config::load() {
+        if let Some(existing_id) = config.get_workspace_mapping(workspace_path) {
+            // Found existing mapping - use it regardless of current git remote/manifest
+            return Some(WorkspaceIdResult {
+                id: existing_id.clone(),
+                source: WorkspaceIdSource::Manifest, // Mark as stable source
+            });
+        }
+    }
+
+    // No existing mapping - compute workspace ID
+    let result = compute_workspace_id(git_remote, meta_files, workspace_label)?;
+
+    // Store the mapping for future use
+    if let Ok(mut config) = Config::load() {
+        if config.set_workspace_mapping(workspace_path, result.id.clone()).is_ok() {
+            // Ignore save errors - not critical
+            let _ = config.save();
+        }
+    }
+
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

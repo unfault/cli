@@ -68,7 +68,8 @@ use crate::api::graph::{
 use crate::config::Config;
 use crate::exit_codes::*;
 use crate::session::{
-    MetaFileInfo, WorkspaceScanner, build_ir_cached, compute_file_id, compute_workspace_id, get_git_remote,
+    MetaFileInfo, WorkspaceScanner, build_ir_cached, compute_file_id, get_git_remote,
+    get_or_compute_workspace_id,
 };
 
 // Import patch types from unfault-core for parsing patch_json
@@ -808,7 +809,7 @@ impl UnfaultLsp {
         debug!("[LSP] Project root: {:?}", project_root);
         debug!("[LSP] File being analyzed: {:?}", file_path);
 
-        // Compute workspace ID for this project
+        // Compute workspace ID for this project (with persistent mapping)
         let git_remote = get_git_remote(&project_root);
         let workspace_label = project_root
             .file_name()
@@ -831,7 +832,9 @@ impl UnfaultLsp {
             }
         }
 
-        let workspace_id = compute_workspace_id(
+        // Use get_or_compute_workspace_id to ensure stable ID even after git remote changes
+        let workspace_id = get_or_compute_workspace_id(
+            &project_root,
             git_remote.as_deref(),
             if meta_files.is_empty() { None } else { Some(&meta_files) },
             workspace_label.as_deref(),
@@ -2525,7 +2528,9 @@ impl LanguageServer for UnfaultLsp {
                     }
                 }
 
-                let workspace_id_result = compute_workspace_id(
+                // Use get_or_compute_workspace_id to ensure stable ID even after git remote changes
+                let workspace_id_result = get_or_compute_workspace_id(
+                    &path,
                     git_remote.as_deref(),
                     if meta_files.is_empty() { None } else { Some(&meta_files) },
                     workspace_label.as_deref(),
@@ -2539,7 +2544,7 @@ impl LanguageServer for UnfaultLsp {
 
                 {
                     let mut root = self.workspace_root.write().await;
-                    *root = Some(path);
+                    *root = Some(path.clone());
                 }
                 {
                     let mut id = self.workspace_id.write().await;

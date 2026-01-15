@@ -174,6 +174,12 @@ pub struct Config {
     /// Value: GCP service name (e.g., "projects/xxx/services/api-service")
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub workspace_services: std::collections::HashMap<String, String>,
+    /// Directory path to workspace ID mappings
+    /// Ensures consistent workspace ID even when git remote changes
+    /// Key: canonical directory path (e.g., "/home/user/project")
+    /// Value: workspace_id (e.g., "wks_abc123")
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub workspace_mappings: std::collections::HashMap<String, String>,
 }
 
 /// Default base URL for storage (without env var override)
@@ -204,6 +210,7 @@ impl Config {
             stored_base_url: DEFAULT_BASE_URL.to_string(),
             llm: None,
             workspace_services: std::collections::HashMap::new(),
+            workspace_mappings: std::collections::HashMap::new(),
         }
     }
 
@@ -219,6 +226,7 @@ impl Config {
             stored_base_url: base_url,
             llm: None,
             workspace_services: std::collections::HashMap::new(),
+            workspace_mappings: std::collections::HashMap::new(),
         }
     }
 
@@ -256,6 +264,36 @@ impl Config {
     /// Remove the GCP service mapping for a workspace
     pub fn remove_workspace_service(&mut self, workspace_id: &str) -> Option<String> {
         self.workspace_services.remove(workspace_id)
+    }
+
+    /// Get the workspace ID for a directory path
+    /// Returns the mapped workspace ID if one exists
+    pub fn get_workspace_mapping(&self, path: &std::path::Path) -> Option<&String> {
+        // Canonicalize the path to ensure consistent lookups
+        let canonical = path.canonicalize().ok()?;
+        let key = canonical.to_string_lossy();
+        self.workspace_mappings.get(key.as_ref())
+    }
+
+    /// Set the workspace ID mapping for a directory path
+    /// This locks in the workspace ID for a directory, preventing changes
+    /// when git remote is added/changed
+    pub fn set_workspace_mapping(&mut self, path: &std::path::Path, workspace_id: String) -> anyhow::Result<()> {
+        let canonical = path.canonicalize()
+            .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
+        let key = canonical.to_string_lossy().to_string();
+        self.workspace_mappings.insert(key, workspace_id);
+        Ok(())
+    }
+
+    /// Remove the workspace mapping for a directory path
+    pub fn remove_workspace_mapping(&mut self, path: &std::path::Path) -> Option<String> {
+        if let Ok(canonical) = path.canonicalize() {
+            let key = canonical.to_string_lossy().to_string();
+            self.workspace_mappings.remove(&key)
+        } else {
+            None
+        }
     }
 
     /// Load configuration from the default config file

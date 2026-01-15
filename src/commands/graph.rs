@@ -45,7 +45,7 @@ use crate::api::graph::{
 };
 use crate::config::Config;
 use crate::exit_codes::*;
-use crate::session::{MetaFileInfo, compute_file_id, compute_workspace_id, get_git_remote};
+use crate::session::{MetaFileInfo, compute_file_id, get_git_remote, get_or_compute_workspace_id};
 
 /// Arguments for the graph impact command
 #[derive(Debug)]
@@ -220,8 +220,9 @@ fn detect_workspace_id(workspace_path: &Path, verbose: bool) -> Option<String> {
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
 
-    // Compute workspace ID
-    let result = compute_workspace_id(
+    // Compute workspace ID (with persistent mapping to ensure stability)
+    let result = get_or_compute_workspace_id(
+        workspace_path,
         git_remote.as_deref(),
         if meta_files.is_empty() {
             None
