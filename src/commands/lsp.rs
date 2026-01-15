@@ -68,7 +68,7 @@ use crate::api::graph::{
 use crate::config::Config;
 use crate::exit_codes::*;
 use crate::session::{
-    WorkspaceScanner, build_ir_cached, compute_file_id, compute_workspace_id, get_git_remote,
+    MetaFileInfo, WorkspaceScanner, build_ir_cached, compute_file_id, compute_workspace_id, get_git_remote,
 };
 
 // Import patch types from unfault-core for parsing patch_json
@@ -815,10 +815,29 @@ impl UnfaultLsp {
             .and_then(|n| n.to_str())
             .map(|s| s.to_string());
 
-        let workspace_id =
-            compute_workspace_id(git_remote.as_deref(), None, workspace_label.as_deref())
-                .map(|r| r.id)
-                .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
+        // Read manifest files to compute consistent workspace ID (same as CLI)
+        let mut meta_files = Vec::new();
+        for (filename, kind) in [
+            ("pyproject.toml", "pyproject"),
+            ("package.json", "package_json"),
+            ("Cargo.toml", "cargo_toml"),
+            ("go.mod", "go_mod"),
+        ] {
+            let path = project_root.join(filename);
+            if path.exists() {
+                if let Ok(contents) = std::fs::read_to_string(&path) {
+                    meta_files.push(MetaFileInfo { kind, contents });
+                }
+            }
+        }
+
+        let workspace_id = compute_workspace_id(
+            git_remote.as_deref(),
+            if meta_files.is_empty() { None } else { Some(&meta_files) },
+            workspace_label.as_deref(),
+        )
+        .map(|r| r.id)
+        .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
 
         debug!("[LSP] Workspace ID: {}", workspace_id);
 
@@ -2484,15 +2503,33 @@ impl LanguageServer for UnfaultLsp {
             if let Ok(path) = root_uri.to_file_path() {
                 self.log_debug(&format!("Workspace root: {:?}", path));
 
-                // Compute workspace ID
+                // Compute workspace ID (read manifest files for consistent ID with CLI)
                 let git_remote = get_git_remote(&path);
                 let workspace_label = path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .map(|s| s.to_string());
 
-                let workspace_id_result =
-                    compute_workspace_id(git_remote.as_deref(), None, workspace_label.as_deref());
+                let mut meta_files = Vec::new();
+                for (filename, kind) in [
+                    ("pyproject.toml", "pyproject"),
+                    ("package.json", "package_json"),
+                    ("Cargo.toml", "cargo_toml"),
+                    ("go.mod", "go_mod"),
+                ] {
+                    let meta_path = path.join(filename);
+                    if meta_path.exists() {
+                        if let Ok(contents) = std::fs::read_to_string(&meta_path) {
+                            meta_files.push(MetaFileInfo { kind, contents });
+                        }
+                    }
+                }
+
+                let workspace_id_result = compute_workspace_id(
+                    git_remote.as_deref(),
+                    if meta_files.is_empty() { None } else { Some(&meta_files) },
+                    workspace_label.as_deref(),
+                );
 
                 let workspace_id = workspace_id_result
                     .map(|r| r.id)
