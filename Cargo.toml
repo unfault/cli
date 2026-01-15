@@ -50,7 +50,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 #
 # CI/builds should use the published crate. For local development against a
 # sibling checkout, you can uncomment the `[patch.crates-io]` section below.
-unfault-core = "0.1.5"
+unfault-core = "0.1.7"
 
 # For local development against a sibling checkout, you can uncomment:
 #
