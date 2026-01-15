@@ -502,7 +502,10 @@ pub fn get_or_compute_workspace_id(
 
     // Store the mapping for future use
     if let Ok(mut config) = Config::load() {
-        if config.set_workspace_mapping(workspace_path, result.id.clone()).is_ok() {
+        if config
+            .set_workspace_mapping(workspace_path, result.id.clone())
+            .is_ok()
+        {
             // Ignore save errors - not critical
             let _ = config.save();
         }

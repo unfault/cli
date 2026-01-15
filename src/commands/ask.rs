@@ -1196,11 +1196,7 @@ fn render_enumerate_context(enumerate_context: &RAGEnumerateContext, verbose: bo
     use colored::Colorize;
 
     // Header with count
-    println!(
-        "{} {}",
-        "📋".cyan(),
-        enumerate_context.summary.bold()
-    );
+    println!("{} {}", "📋".cyan(), enumerate_context.summary.bold());
 
     if enumerate_context.items.is_empty() {
         return;
@@ -1786,41 +1782,41 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
     if !response.sessions.is_empty() {
         // We have session context - summarize what we know
         let total_findings: i32 = response.sessions.iter().map(|s| s.total_findings).sum();
-        
+
         if total_findings == 0 {
             return "Your codebase looks clean — no findings from the last review. That's a good sign!".to_string();
         }
-        
+
         // Aggregate dimension counts across sessions
-        let mut dim_totals: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+        let mut dim_totals: std::collections::HashMap<String, i32> =
+            std::collections::HashMap::new();
         for session in &response.sessions {
             for (dim, count) in &session.dimension_counts {
                 *dim_totals.entry(dim.clone()).or_insert(0) += count;
             }
         }
-        
+
         if dim_totals.is_empty() {
             return format!(
                 "I found {} finding(s) from your last review. Use `--verbose` to see details, or ask about a specific file or function.",
                 total_findings
             );
         }
-        
+
         // Format dimension summary
         let mut dims: Vec<(&String, &i32)> = dim_totals.iter().collect();
         dims.sort_by(|a, b| b.1.cmp(a.1)); // Sort by count descending
-        
+
         let dim_summary: String = dims
             .iter()
             .take(3)
             .map(|(dim, count)| format!("{} ({})", dim, count))
             .collect::<Vec<_>>()
             .join(", ");
-        
+
         return format!(
             "From your last review: {} finding(s) across {}. Ask about a specific area or use `--verbose` for details.",
-            total_findings,
-            dim_summary
+            total_findings, dim_summary
         );
     }
 
@@ -1961,11 +1957,11 @@ fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
 
     if !response.findings.is_empty() {
         use std::collections::HashSet;
-        
+
         // Deduplicate findings by (rule_id, file_path, line)
         let mut seen: HashSet<String> = HashSet::new();
         let mut deduped: Vec<&crate::api::rag::RAGFindingContext> = Vec::new();
-        
+
         for f in &response.findings {
             let key = format!(
                 "{}:{}:{}",
@@ -1979,7 +1975,8 @@ fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
         }
 
         // Group findings by rule_id to give a more specific answer
-        let mut rule_counts: HashMap<String, Vec<&crate::api::rag::RAGFindingContext>> = HashMap::new();
+        let mut rule_counts: HashMap<String, Vec<&crate::api::rag::RAGFindingContext>> =
+            HashMap::new();
         for f in deduped {
             if let Some(rule_id) = &f.rule_id {
                 rule_counts.entry(rule_id.clone()).or_default().push(f);
@@ -1988,7 +1985,7 @@ fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
 
         // If we have specific rules, report on them directly
         if !rule_counts.is_empty() {
-            let mut rules: Vec<(&String, &Vec<&crate::api::rag::RAGFindingContext>)> = 
+            let mut rules: Vec<(&String, &Vec<&crate::api::rag::RAGFindingContext>)> =
                 rule_counts.iter().collect();
             rules.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
@@ -2047,7 +2044,7 @@ fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
             .findings
             .iter()
             .max_by(|a, b| a.similarity.partial_cmp(&b.similarity).unwrap());
-        
+
         let mut take = format!("Found {} related finding(s)", count);
         if let Some(best) = best {
             if let Some(file) = &best.file_path {
@@ -2289,7 +2286,7 @@ fn render_findings_with_snippets(findings: &[crate::api::rag::RAGFindingContext]
     // Deduplicate findings by (rule_id, file_path, line)
     let mut seen: HashSet<String> = HashSet::new();
     let mut deduped: Vec<&crate::api::rag::RAGFindingContext> = Vec::new();
-    
+
     for f in findings {
         let key = format!(
             "{}:{}:{}",
@@ -2317,19 +2314,19 @@ fn render_findings_with_snippets(findings: &[crate::api::rag::RAGFindingContext]
     for (rule_id, rule_findings) in rules.iter().take(3) {
         let rule_desc = describe_rule_id(rule_id);
         let count = rule_findings.len();
-        
+
         // Show one example with code snippet
         if let Some(finding) = rule_findings.first() {
             if let (Some(file_path), Some(line)) = (&finding.file_path, finding.line) {
                 let line_num = line as usize;
-                
+
                 // Print rule description and file:line reference
                 let count_str = if count > 1 {
                     format!(" (+{} more)", count - 1)
                 } else {
                     String::new()
                 };
-                
+
                 println!(
                     "  {} {}:{} {}{}",
                     "→".cyan(),
@@ -2338,7 +2335,7 @@ fn render_findings_with_snippets(findings: &[crate::api::rag::RAGFindingContext]
                     rule_desc.dimmed(),
                     count_str.dimmed()
                 );
-                
+
                 // Try to read the code snippet (just the target line)
                 if let Ok(snippet) = read_code_snippet(file_path, line_num, 0) {
                     for (ln, code) in snippet {
@@ -2374,7 +2371,11 @@ fn render_findings_with_snippets(findings: &[crate::api::rag::RAGFindingContext]
 
 /// Read a code snippet around a specific line.
 /// Returns a vec of (line_number, line_content) tuples.
-fn read_code_snippet(file_path: &str, target_line: usize, context: usize) -> std::io::Result<Vec<(usize, String)>> {
+fn read_code_snippet(
+    file_path: &str,
+    target_line: usize,
+    context: usize,
+) -> std::io::Result<Vec<(usize, String)>> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 

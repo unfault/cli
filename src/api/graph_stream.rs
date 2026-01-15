@@ -529,10 +529,7 @@ struct ControlRecord {
 /// # Returns
 ///
 /// Zstd-compressed bytes containing the framed msgpack records.
-pub fn encode_graph_stream(
-    graph: &CodeGraph,
-    mut ctx: IdContext,
-) -> anyhow::Result<Vec<u8>> {
+pub fn encode_graph_stream(graph: &CodeGraph, mut ctx: IdContext) -> anyhow::Result<Vec<u8>> {
     let mut raw = Vec::with_capacity(512 * 1024);
 
     // Encode all nodes

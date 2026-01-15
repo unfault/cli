@@ -716,18 +716,22 @@ pub async fn execute_summary(args: SummaryArgs) -> Result<i32> {
     let graph = match build_local_graph(&workspace_path, None, args.verbose) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("{} Failed to build code graph: {}", "Error:".red().bold(), e);
+            eprintln!(
+                "{} Failed to build code graph: {}",
+                "Error:".red().bold(),
+                e
+            );
             return Ok(EXIT_ERROR);
         }
     };
 
     // Fetch stats from API (to verify connection and get persisted data)
     let api_stats = match &identifier {
-        ResolvedIdentifier::SessionId(sid) => {
-            api_client.graph_stats(&config.api_key, sid).await
-        }
+        ResolvedIdentifier::SessionId(sid) => api_client.graph_stats(&config.api_key, sid).await,
         ResolvedIdentifier::WorkspaceId(wid) => {
-            api_client.graph_stats_by_workspace(&config.api_key, wid).await
+            api_client
+                .graph_stats_by_workspace(&config.api_key, wid)
+                .await
         }
     };
 
@@ -993,10 +997,7 @@ fn output_summary_formatted(
         }
     }
 
-    println!(
-        "{}",
-        "Graph ready. Run 'unfault ask' to explore.".dimmed()
-    );
+    println!("{}", "Graph ready. Run 'unfault ask' to explore.".dimmed());
     println!();
 }
 
@@ -1193,32 +1194,35 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
     // Affected SLOs section - group by SLO name to avoid duplicates
     if !response.affected_slos.is_empty() {
         use std::collections::HashMap;
-        
+
         // Group SLOs by name, keeping track of routes each monitors
         let mut slo_groups: HashMap<String, Vec<&crate::api::graph::AffectedSlo>> = HashMap::new();
         for slo in &response.affected_slos {
-            slo_groups.entry(slo.slo_name.clone()).or_default().push(slo);
+            slo_groups
+                .entry(slo.slo_name.clone())
+                .or_default()
+                .push(slo);
         }
-        
+
         // Count unique SLOs
         let unique_slo_count = slo_groups.len();
-        
+
         println!("{}", "Affected SLOs".bold().underline());
         println!(
             "{}",
             format!("{} SLO(s) monitoring the affected routes", unique_slo_count).dimmed()
         );
         println!("{}", "─".repeat(60).dimmed());
-        
+
         // Sort SLO names for consistent output
         let mut slo_names: Vec<_> = slo_groups.keys().collect();
         slo_names.sort();
-        
+
         for slo_name in slo_names {
             let slos = &slo_groups[slo_name];
             let first_slo = slos[0];
             let route_count = slos.len();
-            
+
             let budget_status = if let Some(budget) = first_slo.error_budget_remaining {
                 if budget < 10.0 {
                     format!("({:.1}% budget left)", budget).red().bold()
@@ -1230,14 +1234,14 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
             } else {
                 "".normal()
             };
-            
+
             // Show route count if SLO covers multiple affected routes
             let route_info = if route_count > 1 {
                 format!(" [{} routes]", route_count).dimmed()
             } else {
                 "".normal()
             };
-            
+
             println!(
                 "  {} {}{} {}",
                 "⚠".yellow(),
@@ -1245,9 +1249,11 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
                 route_info,
                 budget_status
             );
-            
+
             if verbose {
-                if let (Some(target), Some(current)) = (first_slo.target_percent, first_slo.current_percent) {
+                if let (Some(target), Some(current)) =
+                    (first_slo.target_percent, first_slo.current_percent)
+                {
                     println!(
                         "    {} Target: {:.2}%, Current: {:.2}%",
                         "".dimmed(),
@@ -1266,13 +1272,10 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
                     if route_count > 5 {
                         println!("      {} ...and {} more", "".dimmed(), route_count - 5);
                     }
-                } else if let (Some(method), Some(path)) = (&first_slo.route_method, &first_slo.route_path) {
-                    println!(
-                        "    {} Monitors: {} {}",
-                        "".dimmed(),
-                        method,
-                        path
-                    );
+                } else if let (Some(method), Some(path)) =
+                    (&first_slo.route_method, &first_slo.route_path)
+                {
+                    println!("    {} Monitors: {} {}", "".dimmed(), method, path);
                 }
                 if let Some(url) = &first_slo.dashboard_url {
                     println!("    {} Dashboard: {}", "".dimmed(), url.blue().underline());
@@ -1282,7 +1285,8 @@ fn output_impact_formatted(response: &ImpactAnalysisResponse, verbose: bool) {
         println!();
 
         // Warning if any SLOs have low error budget (check unique SLOs only)
-        let low_budget_count = slo_groups.values()
+        let low_budget_count = slo_groups
+            .values()
             .filter_map(|slos| slos.first())
             .filter(|s| s.error_budget_remaining.map(|b| b < 30.0).unwrap_or(false))
             .count();

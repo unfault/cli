@@ -227,10 +227,7 @@ fn display_slo_summary(stats: &SloDiscoveryStats) {
             "Observability:".bold()
         );
         eprintln!();
-        eprintln!(
-            "   {}",
-            "To discover SLOs, configure one of:".dimmed()
-        );
+        eprintln!("   {}", "To discover SLOs, configure one of:".dimmed());
         eprintln!(
             "   {} GCP: {}",
             "•".dimmed(),
@@ -689,7 +686,8 @@ async fn execute_client_parse(
         )
     };
 
-    let build_result = match build_ir_cached(current_dir, file_paths.as_deref(), args.verbose, None) {
+    let build_result = match build_ir_cached(current_dir, file_paths.as_deref(), args.verbose, None)
+    {
         Ok(result) => result,
         Err(e) => {
             pb.finish_and_clear();
@@ -890,11 +888,13 @@ async fn execute_client_parse(
                                                     if let Some(slos_to_link) =
                                                         grouped.get(&selected_service)
                                                     {
-                                                        let route_count = graph.get_http_route_handlers().len();
+                                                        let route_count =
+                                                            graph.get_http_route_handlers().len();
                                                         for slo in slos_to_link {
-                                                            enricher.link_service_slo_to_all_routes(
-                                                                &mut graph, slo,
-                                                            );
+                                                            enricher
+                                                                .link_service_slo_to_all_routes(
+                                                                    &mut graph, slo,
+                                                                );
                                                         }
 
                                                         eprintln!(
@@ -1764,16 +1764,13 @@ fn display_ir_findings(
         // Friendly narrative summary first
         let friendly_insights = generate_friendly_summary(findings);
         if !friendly_insights.is_empty() {
-            println!(
-                "{} Quick take:",
-                "💡".bold()
-            );
+            println!("{} Quick take:", "💡".bold());
             for insight in &friendly_insights {
                 println!("   {} {}", "·".dimmed(), insight);
             }
             println!();
         }
-        
+
         println!(
             "{} Indexed {} signals",
             "⚠".yellow().bold(),
@@ -2121,16 +2118,18 @@ fn display_session_insights(
 }
 
 /// Generate friendly insights from session insights
-fn generate_friendly_insights_from_hotspots(items: Vec<&crate::api::SessionInsight>) -> Vec<String> {
+fn generate_friendly_insights_from_hotspots(
+    items: Vec<&crate::api::SessionInsight>,
+) -> Vec<String> {
     use std::collections::HashMap;
-    
+
     // Count patterns across all evidence facts
     let mut patterns: HashMap<&str, usize> = HashMap::new();
-    
+
     for item in items {
         for fact in &item.evidence.facts {
             let rule = fact.rule_id.as_deref().unwrap_or("").to_lowercase();
-            
+
             if rule.contains("timeout") {
                 *patterns.entry("timeout").or_default() += 1;
             } else if rule.contains("retry") {
@@ -2152,52 +2151,61 @@ fn generate_friendly_insights_from_hotspots(items: Vec<&crate::api::SessionInsig
             }
         }
     }
-    
+
     let mut insights = Vec::new();
-    
+
     // Generate conversational insights
     if let Some(&count) = patterns.get("timeout") {
         if count > 1 {
-            insights.push(format!("{} calls without timeouts — could hang if a service is slow", count));
+            insights.push(format!(
+                "{} calls without timeouts — could hang if a service is slow",
+                count
+            ));
         } else {
             insights.push("One call missing a timeout".to_string());
         }
     }
-    
+
     if let Some(&count) = patterns.get("retry") {
         if count > 1 {
-            insights.push(format!("{} spots where retry logic would help with flaky networks", count));
+            insights.push(format!(
+                "{} spots where retry logic would help with flaky networks",
+                count
+            ));
         } else {
             insights.push("One place could use retry logic".to_string());
         }
     }
-    
-    if patterns.get("circuit_breaker").is_some() {
-        insights.push("Circuit breakers would help fail fast when dependencies are down".to_string());
+
+    if patterns.contains_key("circuit_breaker") {
+        insights
+            .push("Circuit breakers would help fail fast when dependencies are down".to_string());
     }
-    
-    if patterns.get("rate_limit").is_some() {
+
+    if patterns.contains_key("rate_limit") {
         insights.push("Rate limiting would protect against abuse".to_string());
     }
-    
-    if patterns.get("health_check").is_some() {
-        insights.push("Health endpoints help load balancers and k8s know when you're ready".to_string());
+
+    if patterns.contains_key("health_check") {
+        insights.push(
+            "Health endpoints help load balancers and k8s know when you're ready".to_string(),
+        );
     }
-    
-    if patterns.get("cors").is_some() {
+
+    if patterns.contains_key("cors") {
         insights.push("CORS config needed if browsers will call this API".to_string());
     }
-    
+
     if let Some(&count) = patterns.get("error_handling") {
         if count > 1 {
             insights.push("Error handling could be more specific in a few places".to_string());
         }
     }
-    
-    if patterns.get("security").is_some() {
+
+    if patterns.contains_key("security") {
         insights.push("Security concern flagged — worth a closer look".to_string());
     }
-    
+
     // Keep it brief - max 4 insights
     insights.truncate(4);
     insights
@@ -2265,19 +2273,22 @@ fn generate_friendly_insights_from_hotspot_summaries(
         }
     }
 
-    if patterns.get("circuit_breaker").is_some() {
-        insights.push("Circuit breakers would help fail fast when dependencies are down".to_string());
+    if patterns.contains_key("circuit_breaker") {
+        insights
+            .push("Circuit breakers would help fail fast when dependencies are down".to_string());
     }
 
-    if patterns.get("rate_limit").is_some() {
+    if patterns.contains_key("rate_limit") {
         insights.push("Rate limiting would protect against abuse".to_string());
     }
 
-    if patterns.get("health_check").is_some() {
-        insights.push("Health endpoints help load balancers and k8s know when you're ready".to_string());
+    if patterns.contains_key("health_check") {
+        insights.push(
+            "Health endpoints help load balancers and k8s know when you're ready".to_string(),
+        );
     }
 
-    if patterns.get("cors").is_some() {
+    if patterns.contains_key("cors") {
         insights.push("CORS config needed if browsers will call this API".to_string());
     }
 
@@ -2287,7 +2298,7 @@ fn generate_friendly_insights_from_hotspot_summaries(
         }
     }
 
-    if patterns.get("security").is_some() {
+    if patterns.contains_key("security") {
         insights.push("Security concern flagged — worth a closer look".to_string());
     }
 
@@ -2522,34 +2533,39 @@ fn display_session_hotspots(
 /// Generate a friendly narrative summary of findings (like a colleague's take)
 fn generate_friendly_summary(findings: &[IrFinding]) -> Vec<String> {
     use std::collections::HashMap;
-    
+
     // Count findings by category
     let mut categories: HashMap<&str, usize> = HashMap::new();
-    
+
     for f in findings {
         let rule = f.rule_id.to_lowercase();
-        
+
         if rule.contains("timeout") {
             *categories.entry("timeout").or_default() += 1;
         } else if rule.contains("retry") || rule.contains("circuit") {
             *categories.entry("retry").or_default() += 1;
-        } else if rule.contains("logging") || rule.contains("trace") || rule.contains("correlation") {
+        } else if rule.contains("logging") || rule.contains("trace") || rule.contains("correlation")
+        {
             *categories.entry("observability").or_default() += 1;
-        } else if rule.contains("secret") || rule.contains("injection") || rule.contains("security") {
+        } else if rule.contains("secret") || rule.contains("injection") || rule.contains("security")
+        {
             *categories.entry("security").or_default() += 1;
         } else if rule.contains("error") || rule.contains("exception") || rule.contains("handle") {
             *categories.entry("error_handling").or_default() += 1;
         } else if rule.contains("validation") || rule.contains("input") {
             *categories.entry("validation").or_default() += 1;
-        } else if rule.contains("rate_limit") || rule.contains("cors") || rule.contains("middleware") {
+        } else if rule.contains("rate_limit")
+            || rule.contains("cors")
+            || rule.contains("middleware")
+        {
             *categories.entry("api_protection").or_default() += 1;
         } else if rule.contains("health") {
             *categories.entry("health_check").or_default() += 1;
         }
     }
-    
+
     let mut insights = Vec::new();
-    
+
     // Generate friendly messages for top categories
     if let Some(&count) = categories.get("timeout") {
         if count >= 3 {
@@ -2558,7 +2574,7 @@ fn generate_friendly_summary(findings: &[IrFinding]) -> Vec<String> {
             insights.push("A few external calls are missing timeouts".to_string());
         }
     }
-    
+
     if let Some(&count) = categories.get("retry") {
         if count >= 3 {
             insights.push(format!("{} places could benefit from retry logic", count));
@@ -2566,7 +2582,7 @@ fn generate_friendly_summary(findings: &[IrFinding]) -> Vec<String> {
             insights.push("Some calls might need retry logic for transient failures".to_string());
         }
     }
-    
+
     if let Some(&count) = categories.get("error_handling") {
         if count >= 3 {
             insights.push("Error handling could be tightened up in a few spots".to_string());
@@ -2574,13 +2590,17 @@ fn generate_friendly_summary(findings: &[IrFinding]) -> Vec<String> {
             insights.push("A couple of error handlers could be more specific".to_string());
         }
     }
-    
+
     if let Some(&count) = categories.get("security") {
         if count > 0 {
-            insights.push(format!("{} security concern{} flagged", count, if count == 1 { "" } else { "s" }));
+            insights.push(format!(
+                "{} security concern{} flagged",
+                count,
+                if count == 1 { "" } else { "s" }
+            ));
         }
     }
-    
+
     if let Some(&count) = categories.get("observability") {
         if count >= 3 {
             insights.push("Logging and tracing could be improved".to_string());
@@ -2588,25 +2608,26 @@ fn generate_friendly_summary(findings: &[IrFinding]) -> Vec<String> {
             insights.push("A bit more logging would help with debugging".to_string());
         }
     }
-    
+
     if let Some(&count) = categories.get("validation") {
         if count > 0 {
             insights.push("Some inputs could use stricter validation".to_string());
         }
     }
-    
+
     if let Some(&count) = categories.get("api_protection") {
         if count > 0 {
-            insights.push("API could use some protective middleware (rate limiting, CORS)".to_string());
+            insights
+                .push("API could use some protective middleware (rate limiting, CORS)".to_string());
         }
     }
-    
+
     if let Some(&count) = categories.get("health_check") {
         if count > 0 {
             insights.push("Consider adding health check endpoints".to_string());
         }
     }
-    
+
     // Limit to top 3 insights
     insights.truncate(3);
     insights
@@ -3015,7 +3036,6 @@ fn generate_llm_output(
 
 /// Generate SARIF 2.1.0 output for GitHub Code Scanning and IDE integration.
 fn generate_ir_sarif_output(findings: &[IrFinding], workspace_label: &str) -> serde_json::Value {
-
     let mut rules_map: HashMap<String, &IrFinding> = HashMap::new();
     for finding in findings {
         rules_map.entry(finding.rule_id.clone()).or_insert(finding);

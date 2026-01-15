@@ -820,14 +820,8 @@ mod tests {
 
     #[test]
     fn graph_critical_accepts_snake_case_sort_by() {
-        let cli = Cli::try_parse_from([
-            "unfault",
-            "graph",
-            "critical",
-            "--sort-by",
-            "in_degree",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["unfault", "graph", "critical", "--sort-by", "in_degree"])
+            .unwrap();
 
         match cli.command {
             Commands::Graph { command, .. } => match command {
@@ -846,7 +840,12 @@ mod tests {
         let cli = Cli::try_parse_from(["unfault", "graph"]).unwrap();
 
         match cli.command {
-            Commands::Graph { command, json, verbose, .. } => {
+            Commands::Graph {
+                command,
+                json,
+                verbose,
+                ..
+            } => {
                 assert!(command.is_none(), "expected no subcommand");
                 assert!(!json, "expected json to be false by default");
                 assert!(!verbose, "expected verbose to be false by default");

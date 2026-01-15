@@ -262,16 +262,11 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
     }
 
     // Track first finding in each category for detail fields
+    #[derive(Default)]
     struct Category<'a> {
         count: usize,
         severity: Option<String>,
         first_finding: Option<&'a FunctionImpactFinding>,
-    }
-
-    impl<'a> Default for Category<'a> {
-        fn default() -> Self {
-            Category { count: 0, severity: None, first_finding: None }
-        }
     }
 
     let mut timeout = Category::default();
@@ -283,10 +278,12 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
 
     for f in findings {
         // Extract rule_id from learn_more URL (e.g., "https://docs.unfault.dev/rules/python/http/missing_retry")
-        let rule_path = f.learn_more.as_ref()
+        let rule_path = f
+            .learn_more
+            .as_ref()
             .and_then(|url| url.strip_prefix("https://docs.unfault.dev/rules/"))
             .unwrap_or("");
-        
+
         // Categorize by rule_id patterns
         if rule_path.contains("timeout") {
             timeout.count += 1;
@@ -320,7 +317,13 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
             if error_handling.severity.is_none() || f.severity == "error" {
                 error_handling.severity = Some(f.severity.clone());
             }
-        } else if rule_path.contains("security") || rule_path.contains("auth") || rule_path.contains("injection") || rule_path.contains("secret") || rule_path.contains("xss") || rule_path.contains("csrf") {
+        } else if rule_path.contains("security")
+            || rule_path.contains("auth")
+            || rule_path.contains("injection")
+            || rule_path.contains("secret")
+            || rule_path.contains("xss")
+            || rule_path.contains("csrf")
+        {
             security.count += 1;
             if security.first_finding.is_none() {
                 security.first_finding = Some(f);
@@ -334,7 +337,11 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
     }
 
     // Helper to build insight with details from first finding
-    fn make_insight(message: &str, severity: String, finding: Option<&FunctionImpactFinding>) -> FunctionImpactInsight {
+    fn make_insight(
+        message: &str,
+        severity: String,
+        finding: Option<&FunctionImpactFinding>,
+    ) -> FunctionImpactInsight {
         FunctionImpactInsight {
             severity,
             message: message.to_string(),
@@ -366,7 +373,9 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
     if error_handling.count > 0 {
         insights.push(make_insight(
             "Some error paths could use attention",
-            error_handling.severity.unwrap_or_else(|| "warning".to_string()),
+            error_handling
+                .severity
+                .unwrap_or_else(|| "warning".to_string()),
             error_handling.first_finding,
         ));
     }
@@ -389,11 +398,7 @@ fn summarize_findings(findings: &[FunctionImpactFinding]) -> Vec<FunctionImpactI
     if insights.len() < 3 {
         if let Some(f) = other_findings.into_iter().next() {
             // Clean up the message - take last part after colon, truncate if needed
-            let cleaned = f.message
-                .rsplit(':')
-                .next()
-                .unwrap_or(&f.message)
-                .trim();
+            let cleaned = f.message.rsplit(':').next().unwrap_or(&f.message).trim();
             let truncated = if cleaned.len() > 50 {
                 format!("{}...", &cleaned[..47])
             } else {
@@ -738,7 +743,7 @@ impl UnfaultLsp {
                 // Create content override map with the current file's buffer content
                 let mut content_overrides = std::collections::HashMap::new();
                 content_overrides.insert(file_path.clone(), text.to_string());
-                
+
                 match build_ir_cached(&project_root, None, self.verbose, Some(&content_overrides)) {
                     Ok(result) => (result.ir, true), // Fresh IR, send dependencies
                     Err(e) => {
@@ -748,7 +753,7 @@ impl UnfaultLsp {
                         return;
                     }
                 }
-            },
+            }
         };
 
         // Send dependencies notification when IR is rebuilt (on file change/save)
@@ -836,7 +841,11 @@ impl UnfaultLsp {
         let workspace_id = get_or_compute_workspace_id(
             &project_root,
             git_remote.as_deref(),
-            if meta_files.is_empty() { None } else { Some(&meta_files) },
+            if meta_files.is_empty() {
+                None
+            } else {
+                Some(&meta_files)
+            },
             workspace_label.as_deref(),
         )
         .map(|r| r.id)
@@ -885,12 +894,7 @@ impl UnfaultLsp {
             debug!("[LSP] Using PATCH for incremental graph update...");
             match self
                 .api_client
-                .patch_graph(
-                    &api_key,
-                    &workspace_id,
-                    git_remote.as_deref(),
-                    graph,
-                )
+                .patch_graph(&api_key, &workspace_id, git_remote.as_deref(), graph)
                 .await
             {
                 Ok(resp) => {
@@ -943,7 +947,10 @@ impl UnfaultLsp {
                         let mut session = self.session_id.write().await;
                         *session = Some(resp.session_id.clone());
                     }
-                    debug!("[LSP] Full ingest completed, session_id cached: {}", resp.session_id);
+                    debug!(
+                        "[LSP] Full ingest completed, session_id cached: {}",
+                        resp.session_id
+                    );
                     resp.session_id
                 }
                 Err(e) => {
@@ -2156,13 +2163,18 @@ impl UnfaultLsp {
     /// to HTTP route handlers in the code graph.
     ///
     /// The discovery runs in the background and sends a notification when complete.
-    async fn discover_slos(&self, project_root: &Path, workspace_id: &str, git_remote: Option<&str>) {
+    async fn discover_slos(
+        &self,
+        project_root: &Path,
+        workspace_id: &str,
+        git_remote: Option<&str>,
+    ) {
         use crate::slo::SloEnricher;
 
         self.log_debug("Starting async SLO discovery...");
 
         let enricher = SloEnricher::new(self.verbose);
-        
+
         // Check if any providers are available
         if !enricher.any_provider_available() {
             self.log_debug("No SLO providers available, skipping discovery");
@@ -2233,7 +2245,10 @@ impl UnfaultLsp {
             return;
         }
 
-        self.log_debug(&format!("Found {} SLOs, building graph for enrichment...", slo_count));
+        self.log_debug(&format!(
+            "Found {} SLOs, building graph for enrichment...",
+            slo_count
+        ));
 
         // Build a fresh IR to get the graph with route handlers
         let ir = match build_ir_cached(project_root, None, self.verbose, None) {
@@ -2247,9 +2262,11 @@ impl UnfaultLsp {
         // Extract graph and enrich with SLOs
         let mut graph = ir.graph;
         let routes_before = graph.get_http_route_handlers().len();
-        
-        let linked_count = enricher.enrich_graph(&mut graph, &fetch_result.slos).unwrap_or(0);
-        
+
+        let linked_count = enricher
+            .enrich_graph(&mut graph, &fetch_result.slos)
+            .unwrap_or(0);
+
         self.log_debug(&format!(
             "Enriched graph: {} SLOs linked to routes (total routes: {})",
             linked_count, routes_before
@@ -2532,7 +2549,11 @@ impl LanguageServer for UnfaultLsp {
                 let workspace_id_result = get_or_compute_workspace_id(
                     &path,
                     git_remote.as_deref(),
-                    if meta_files.is_empty() { None } else { Some(&meta_files) },
+                    if meta_files.is_empty() {
+                        None
+                    } else {
+                        Some(&meta_files)
+                    },
                     workspace_label.as_deref(),
                 );
 
@@ -2765,9 +2786,10 @@ impl LanguageServer for UnfaultLsp {
                 if let Some(workspace_id) = workspace_id {
                     let git_remote = get_git_remote(proj_root);
                     let proj_root = proj_root.clone();
-                    
+
                     // Run SLO discovery asynchronously
-                    self.discover_slos(&proj_root, &workspace_id, git_remote.as_deref()).await;
+                    self.discover_slos(&proj_root, &workspace_id, git_remote.as_deref())
+                        .await;
                 }
             }
         }
@@ -2974,16 +2996,13 @@ impl LanguageServer for UnfaultLsp {
                 .function_cache
                 .get(uri)
                 .and_then(|functions| {
-                    functions
-                        .iter()
-                        .find(|f| f.name == function_name)
-                        .map(|f| {
-                            // LSP lines are 0-based, API expects 1-based
-                            (
-                                Some((f.range.start.line + 1) as i32),
-                                Some((f.range.end.line + 1) as i32),
-                            )
-                        })
+                    functions.iter().find(|f| f.name == function_name).map(|f| {
+                        // LSP lines are 0-based, API expects 1-based
+                        (
+                            Some((f.range.start.line + 1) as i32),
+                            Some((f.range.end.line + 1) as i32),
+                        )
+                    })
                 })
                 .unwrap_or((None, None));
 
@@ -3062,18 +3081,10 @@ impl LanguageServer for UnfaultLsp {
             .unwrap_or(serde_json::Value::Null);
 
         match params.command.as_str() {
-            "unfault/getFunctionImpact" => {
-                self.handle_get_function_impact(args_value).await
-            }
-            "unfault/getFileCentrality" => {
-                self.handle_get_file_centrality(args_value).await
-            }
-            "unfault/getFileDependencies" => {
-                self.handle_get_file_dependencies(args_value).await
-            }
-            "unfault/refreshFile" => {
-                self.handle_refresh_file(args_value).await
-            }
+            "unfault/getFunctionImpact" => self.handle_get_function_impact(args_value).await,
+            "unfault/getFileCentrality" => self.handle_get_file_centrality(args_value).await,
+            "unfault/getFileDependencies" => self.handle_get_file_dependencies(args_value).await,
+            "unfault/refreshFile" => self.handle_refresh_file(args_value).await,
             _ => Err(tower_lsp::jsonrpc::Error::method_not_found()),
         }
     }
@@ -3267,7 +3278,7 @@ impl UnfaultLsp {
                 line: f.line.unwrap_or(0),
             })
             .collect();
-        
+
         // Convert upstream findings to FunctionImpactFinding format for summarization
         let upstream_findings: Vec<FunctionImpactFinding> = response
             .upstream_findings
@@ -3290,7 +3301,7 @@ impl UnfaultLsp {
                 line: f.line.unwrap_or(0),
             })
             .collect();
-        
+
         // Convert downstream findings to FunctionImpactFinding format for summarization
         let downstream_findings: Vec<FunctionImpactFinding> = response
             .downstream_findings
@@ -3316,12 +3327,12 @@ impl UnfaultLsp {
 
         let insights = summarize_findings(&findings);
         let path_insights = summarize_findings(&path_findings);
-        
+
         // Summarize upstream/downstream findings into human-friendly insights
         // These tell a story: "Your callers have X issues" rather than raw rule IDs
         let upstream_insights = summarize_findings(&upstream_findings);
         let downstream_insights = summarize_findings(&downstream_findings);
-        
+
         Ok(Some(
             serde_json::to_value(GetFunctionImpactResponse {
                 name: response.function,
@@ -3447,10 +3458,13 @@ impl UnfaultLsp {
         let has_session = self.session_id.read().await.is_some();
         if !has_session {
             self.log_debug("No cached session_id, cannot refresh file");
-            return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                success: false,
-                finding_count: 0,
-            }).unwrap()));
+            return Ok(Some(
+                serde_json::to_value(RefreshFileResponse {
+                    success: false,
+                    finding_count: 0,
+                })
+                .unwrap(),
+            ));
         }
 
         // Get document content from cache (includes unsaved changes)
@@ -3458,10 +3472,13 @@ impl UnfaultLsp {
             Some(content) => content.get().clone(),
             None => {
                 self.log_debug("Document not in cache, cannot refresh");
-                return Ok(Some(serde_json::to_value(RefreshFileResponse {
-                    success: false,
-                    finding_count: 0,
-                }).unwrap()));
+                return Ok(Some(
+                    serde_json::to_value(RefreshFileResponse {
+                        success: false,
+                        finding_count: 0,
+                    })
+                    .unwrap(),
+                ));
             }
         };
 
@@ -3471,23 +3488,26 @@ impl UnfaultLsp {
         // 3. Run analyze_ir to get new findings
         // 4. Update cache and send notifications
         self.analyze_document(
-            &uri,
-            &text,
-            0, // version doesn't matter for refresh
+            &uri, &text, 0,    // version doesn't matter for refresh
             None, // no prebuilt IR
             true, // use_patch=true for incremental update
-        ).await;
+        )
+        .await;
 
         // Get the finding count from cache (analyze_document updates it)
-        let finding_count = self.findings_cache
+        let finding_count = self
+            .findings_cache
             .get(&uri)
             .map(|f| f.len() as i32)
             .unwrap_or(0);
 
-        Ok(Some(serde_json::to_value(RefreshFileResponse {
-            success: true,
-            finding_count,
-        }).unwrap()))
+        Ok(Some(
+            serde_json::to_value(RefreshFileResponse {
+                success: true,
+                finding_count,
+            })
+            .unwrap(),
+        ))
     }
 }
 
@@ -4009,14 +4029,16 @@ mod tests {
         assert_eq!(resp.path_insights.len(), 1);
         assert_eq!(resp.path_insights[0].message, "Path insight");
     }
-    
+
     #[test]
     fn test_summarize_findings() {
         // Test timeout detection via rule_id in learn_more URL
         let findings = vec![FunctionImpactFinding {
             severity: "warning".to_string(),
             message: "Database call without timeout".to_string(),
-            learn_more: Some("https://docs.unfault.dev/rules/python/db/missing_timeout".to_string()),
+            learn_more: Some(
+                "https://docs.unfault.dev/rules/python/db/missing_timeout".to_string(),
+            ),
             title: String::new(),
             description: String::new(),
             file_path: None,
@@ -4026,13 +4048,15 @@ mod tests {
         let insights = summarize_findings(&findings);
         assert_eq!(insights.len(), 1);
         assert_eq!(insights[0].message, "Missing timeout on external call");
-        
+
         // Test multiple categories using rule_id patterns
         let findings = vec![
             FunctionImpactFinding {
                 severity: "warning".to_string(),
                 message: "HTTP call without timeout".to_string(),
-                learn_more: Some("https://docs.unfault.dev/rules/python/http/missing_timeout".to_string()),
+                learn_more: Some(
+                    "https://docs.unfault.dev/rules/python/http/missing_timeout".to_string(),
+                ),
                 title: String::new(),
                 description: String::new(),
                 file_path: None,
@@ -4042,7 +4066,9 @@ mod tests {
             FunctionImpactFinding {
                 severity: "info".to_string(),
                 message: "HTTP call has no retry".to_string(),
-                learn_more: Some("https://docs.unfault.dev/rules/python/http/missing_retry".to_string()),
+                learn_more: Some(
+                    "https://docs.unfault.dev/rules/python/http/missing_retry".to_string(),
+                ),
                 title: String::new(),
                 description: String::new(),
                 file_path: None,
@@ -4052,7 +4078,9 @@ mod tests {
             FunctionImpactFinding {
                 severity: "error".to_string(),
                 message: "SQL injection possible".to_string(),
-                learn_more: Some("https://docs.unfault.dev/rules/python/security/sql_injection".to_string()),
+                learn_more: Some(
+                    "https://docs.unfault.dev/rules/python/security/sql_injection".to_string(),
+                ),
                 title: String::new(),
                 description: String::new(),
                 file_path: None,
@@ -4065,7 +4093,7 @@ mod tests {
         assert!(insights.iter().any(|i| i.message.contains("timeout")));
         assert!(insights.iter().any(|i| i.message.contains("retry")));
         assert!(insights.iter().any(|i| i.message.contains("Security")));
-        
+
         // Test that message content alone doesn't trigger false positives
         // (e.g., "connection timeouts" in a retry rule description shouldn't trigger timeout category)
         let findings = vec![FunctionImpactFinding {
@@ -4081,11 +4109,11 @@ mod tests {
         let insights = summarize_findings(&findings);
         assert_eq!(insights.len(), 1);
         assert_eq!(insights[0].message, "No retry logic for transient failures");
-        
+
         // Test empty findings
         let insights = summarize_findings(&[]);
         assert!(insights.is_empty());
-        
+
         // Test findings without learn_more go to "other"
         let findings = vec![FunctionImpactFinding {
             severity: "warning".to_string(),

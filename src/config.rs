@@ -278,8 +278,13 @@ impl Config {
     /// Set the workspace ID mapping for a directory path
     /// This locks in the workspace ID for a directory, preventing changes
     /// when git remote is added/changed
-    pub fn set_workspace_mapping(&mut self, path: &std::path::Path, workspace_id: String) -> anyhow::Result<()> {
-        let canonical = path.canonicalize()
+    pub fn set_workspace_mapping(
+        &mut self,
+        path: &std::path::Path,
+        workspace_id: String,
+    ) -> anyhow::Result<()> {
+        let canonical = path
+            .canonicalize()
             .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
         let key = canonical.to_string_lossy().to_string();
         self.workspace_mappings.insert(key, workspace_id);

@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::workspace_id::{
-    MetaFileInfo as WorkspaceIdMetaFile, WorkspaceIdSource, get_git_remote, get_or_compute_workspace_id,
+    MetaFileInfo as WorkspaceIdMetaFile, WorkspaceIdSource, get_git_remote,
+    get_or_compute_workspace_id,
 };
 use super::workspace_settings::{LoadedSettings, WorkspaceSettings, load_settings};
 use crate::api::{AdvertisedProfile, MetaFile, ProjectLayout, WorkspaceDescriptor};

@@ -1685,7 +1685,7 @@ impl ApiClient {
         git_remote: Option<&str>,
         graph: unfault_core::graph::CodeGraph,
     ) -> Result<GraphPatchResponse, ApiError> {
-        use crate::api::graph_stream::{encode_graph_stream, IdContext};
+        use crate::api::graph_stream::{IdContext, encode_graph_stream};
 
         let t0 = std::time::Instant::now();
 
