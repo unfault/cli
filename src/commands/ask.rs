@@ -2465,7 +2465,7 @@ mod tests {
             sessions: vec![],
             findings: vec![crate::api::rag::RAGFindingContext {
                 finding_id: "f1".to_string(),
-                rule_id: Some("R1".to_string()),
+                rule_id: Some("security.hardcoded_secret".to_string()),
                 dimension: Some("Security".to_string()),
                 severity: Some("High".to_string()),
                 file_path: Some("src/main.go".to_string()),
@@ -2486,7 +2486,7 @@ mod tests {
 
         let take = build_no_llm_quick_take(&response).unwrap();
         let lower = take.to_lowercase();
-        assert!(lower.contains("security"));
+        assert!(lower.contains("hardcoded secrets"), "expected 'hardcoded secrets' in: {}", lower);
         assert!(lower.contains("src/main.go"));
 
         let reply = build_colleague_reply(&response);

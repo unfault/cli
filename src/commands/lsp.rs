@@ -4047,7 +4047,7 @@ mod tests {
         }];
         let insights = summarize_findings(&findings);
         assert_eq!(insights.len(), 1);
-        assert_eq!(insights[0].message, "Missing timeout on external call");
+        assert_eq!(insights[0].message, "This call could hang without a timeout");
 
         // Test multiple categories using rule_id patterns
         let findings = vec![
@@ -4091,8 +4091,8 @@ mod tests {
         let insights = summarize_findings(&findings);
         assert!(insights.len() <= 3);
         assert!(insights.iter().any(|i| i.message.contains("timeout")));
-        assert!(insights.iter().any(|i| i.message.contains("retry")));
-        assert!(insights.iter().any(|i| i.message.contains("Security")));
+        assert!(insights.iter().any(|i| i.message.contains("Transient")));
+        assert!(insights.iter().any(|i| i.message.contains("security")));
 
         // Test that message content alone doesn't trigger false positives
         // (e.g., "connection timeouts" in a retry rule description shouldn't trigger timeout category)
@@ -4108,7 +4108,7 @@ mod tests {
         }];
         let insights = summarize_findings(&findings);
         assert_eq!(insights.len(), 1);
-        assert_eq!(insights[0].message, "No retry logic for transient failures");
+        assert_eq!(insights[0].message, "Transient failures might bubble up here");
 
         // Test empty findings
         let insights = summarize_findings(&[]);
