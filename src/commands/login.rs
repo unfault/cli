@@ -42,7 +42,7 @@ pub async fn execute() -> Result<i32> {
     let api_client = ApiClient::new(base_url.clone());
 
     // Start device flow to get device code, user code, and verification URI
-    let (device_code, user_code, verification_uri) = match api_client.start_device_flow().await {
+    let (device_code, user_code, _) = match api_client.start_device_flow().await {
         Ok(result) => result,
         Err(e) => {
             eprintln!("Network error: {}", e);
@@ -52,8 +52,7 @@ pub async fn execute() -> Result<i32> {
 
     // Display the authentication instructions
     println!(
-        "\nVisit {} and enter code: {}",
-        verification_uri.bright_blue().underline(),
+        "\nAuthorize the CLI with the code: {}",
         user_code.bright_yellow().bold()
     );
     println!("{}", "Waiting for authentication...".cyan());
