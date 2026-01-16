@@ -5,11 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.6] - 2026-01-15
+## [0.6.6] - 2026-01-16
+
+### Added
+
+- `unfault review --llm` now optionally includes SLO definitions when `--discover-observability` is enabled
+  - Adds `slos` array with provider/targets/budget/timeframe details
+  - Adds `summary.observability` with discovery coverage stats
 
 ### Changed
 
-- Slightly improve login message
+- CLI README is now intentionally short and docs-first (docs are the authority)
+
+### Fixed
+
+- CI now uses the published `unfault-core` crate by default (local `[patch.crates-io]` is commented out)
+- Test expectations updated to match current user-facing messages
+- `cargo fmt`/clippy hygiene fixes
 
 ## [0.6.5] - 2026-01-15
 
