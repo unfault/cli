@@ -955,13 +955,17 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
         println!("  {} Files using target library:", "→".cyan());
         for (idx, rel) in ctx.library_users.iter().enumerate() {
             let path = rel.path.as_deref().unwrap_or("<unknown>");
-            let relationship = rel.relationship.as_deref().unwrap_or("imports");
+            let relationship = rel.relationship.as_deref().unwrap_or("uses");
+            // Only show relationship detail if we have usage info
+            let relation_display = match rel.usage.as_deref() {
+                Some(usage) if !usage.is_empty() => format!("({} {})", relationship, usage),
+                _ => format!("({})", relationship),
+            };
             println!(
-                "  {} {} ({} {} )",
+                "  {} {} {}",
                 format!("{}.", idx + 1).bright_white(),
                 path.cyan(),
-                relationship,
-                rel.usage.as_deref().unwrap_or("")
+                relation_display.dimmed()
             );
         }
     }
@@ -2135,6 +2139,8 @@ fn output_formatted(
         // Show findings with code snippets (non-verbose mode)
         // Skip findings if we have good flow context - they're usually unrelated noise
         if !response.findings.is_empty() && !verbose && !has_flow_context {
+            println!("{} {}", "👀".cyan(), "Worth a look".bold());
+            println!();
             render_findings_with_snippets(&response.findings);
         }
     }
