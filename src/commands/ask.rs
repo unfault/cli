@@ -2124,13 +2124,6 @@ fn output_formatted(
             println!();
         }
 
-        // Show findings with code snippets (non-verbose mode)
-        // Skip findings if we have good flow context - they're usually unrelated noise
-        if !response.findings.is_empty() && !verbose && !has_flow_context {
-            println!("{}", "Worth a look".bold());
-            println!();
-            render_findings_with_snippets(&response.findings);
-        }
     }
 
     // If we have flow context, render it prominently (this is the "semantic" answer)
@@ -2141,11 +2134,20 @@ fn output_formatted(
         }
     }
 
+    // Render graph context (Usage, Impact, etc.) - this follows naturally from the summary
     if let Some(graph_context) = &response.graph_context {
         if graph_context_has_data(graph_context) {
             render_graph_context(graph_context, verbose);
             println!();
         }
+    }
+
+    // Show findings with code snippets (non-verbose mode)
+    // Skip findings if we have good flow context - they're usually unrelated noise
+    if !response.findings.is_empty() && !verbose && !has_flow_context {
+        println!("{}", "Worth a look".bold());
+        println!();
+        render_findings_with_snippets(&response.findings);
     }
 
     // Render SLO context if present
