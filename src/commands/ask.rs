@@ -888,7 +888,7 @@ fn graph_context_has_data(ctx: &RAGGraphContext) -> bool {
 fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
     let title = match ctx.query_type.as_str() {
         "impact" => "Impact analysis",
-        "library" => "Library usage",
+        "library" => "Usage",
         "dependencies" => "External dependencies",
         "centrality" => {
             // Check if this is function or file centrality
@@ -901,7 +901,7 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
         other => other,
     };
 
-    println!("{} {}", "📈".cyan(), title.bold());
+    println!("{}", title.bold());
 
     if ctx.query_type == "impact" {
         let target = ctx.target_file.as_deref().unwrap_or("target");
@@ -952,7 +952,7 @@ fn render_graph_context(ctx: &RAGGraphContext, verbose: bool) {
 
     if ctx.query_type == "library" && !ctx.library_users.is_empty() {
         println!();
-        println!("  {} Files using target library:", "→".cyan());
+        println!("  {} Files using it:", "→".cyan());
         for (idx, rel) in ctx.library_users.iter().enumerate() {
             let path = rel.path.as_deref().unwrap_or("<unknown>");
             let relationship = rel.relationship.as_deref().unwrap_or("uses");
@@ -1681,20 +1681,8 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
 
             if graph_context.query_type == "library" && !graph_context.library_users.is_empty() {
                 let n = graph_context.library_users.len();
-                let top: Vec<&str> = graph_context
-                    .library_users
-                    .iter()
-                    .filter_map(|r| r.path.as_deref())
-                    .take(3)
-                    .collect();
-
-                let list = if top.is_empty() {
-                    "".to_string()
-                } else {
-                    format!(" For example: {}.", top.join(", "))
-                };
-
-                return format!("I’m seeing {} usage site(s) for {}.{}", n, target, list);
+                let site_word = if n == 1 { "site" } else { "sites" };
+                return format!("Found {} usage {} for {}.", n, site_word, target.bright_yellow().bold());
             }
 
             if graph_context.query_type == "centrality" && !graph_context.affected_files.is_empty()
@@ -2139,7 +2127,7 @@ fn output_formatted(
         // Show findings with code snippets (non-verbose mode)
         // Skip findings if we have good flow context - they're usually unrelated noise
         if !response.findings.is_empty() && !verbose && !has_flow_context {
-            println!("{} {}", "👀".cyan(), "Worth a look".bold());
+            println!("{}", "Worth a look".bold());
             println!();
             render_findings_with_snippets(&response.findings);
         }
