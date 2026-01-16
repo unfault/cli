@@ -1432,16 +1432,18 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
     let seed = quick_take_seed(response);
 
     if let Some(hint) = &response.hint {
-        // If hint indicates "no results found" style message, don't add a confusing prefix
-        let is_no_results_hint = hint.contains("couldn't find")
+        // If hint indicates "no results found" or "all clear" style message, don't add a confusing prefix
+        let is_standalone_hint = hint.contains("couldn't find")
             || hint.contains("don't have any context")
             || hint.contains("no graph data")
-            || hint.contains("no SLO data");
+            || hint.contains("no SLO data")
+            || hint.contains("issues found")  // "No X issues found in your codebase"
+            || hint.contains("looks clean");  // "Your code looks clean"
 
         let styled_hint = highlight_unfault_commands(hint);
 
-        if is_no_results_hint {
-            // Just return the hint as-is for "no results" messages
+        if is_standalone_hint {
+            // Just return the hint as-is for "no results" or "all clear" messages
             return styled_hint;
         }
 
