@@ -175,7 +175,7 @@ pub struct ReviewArgs {
 }
 
 /// Stats from SLO discovery for display in review summary.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct SloDiscoveryStats {
     /// Number of SLOs discovered
     slo_count: usize,
@@ -1020,6 +1020,59 @@ async fn execute_client_parse(
         }
     }
 
+    // Precompute SLO definitions for LLM output before graph ingest (graph is moved).
+    let slo_definitions_llm: Option<Vec<LlmSloDefinition>> = if args.discover_observability {
+        let mut slos: Vec<LlmSloDefinition> = Vec::new();
+        for idx in graph.slo_nodes.values() {
+            if let Some(unfault_core::graph::GraphNode::Slo {
+                id,
+                name,
+                provider,
+                path_pattern,
+                http_method,
+                target_percent,
+                current_percent,
+                error_budget_remaining,
+                timeframe,
+                dashboard_url,
+            }) = graph.graph.node_weight(*idx)
+            {
+                let mut monitored_routes = graph
+                    .routes_for_slo(*idx)
+                    .into_iter()
+                    .filter_map(|route_idx| graph.get_route_info(route_idx).map(|r| r.2))
+                    .collect::<Vec<_>>();
+                monitored_routes.sort();
+                monitored_routes.dedup();
+                let monitored_route_count = monitored_routes.len();
+                monitored_routes.truncate(50);
+
+                slos.push(LlmSloDefinition {
+                    id: id.clone(),
+                    name: name.clone(),
+                    provider: format!("{:?}", provider),
+                    path_pattern: Some(path_pattern.clone()).filter(|p| !p.is_empty() && p != "*"),
+                    http_method: http_method.clone(),
+                    target_percent: *target_percent,
+                    current_percent: *current_percent,
+                    error_budget_remaining: *error_budget_remaining,
+                    timeframe: timeframe.clone(),
+                    dashboard_url: dashboard_url.clone(),
+                    monitored_route_count,
+                    monitored_routes,
+                });
+            }
+        }
+        if slos.is_empty() {
+            None
+        } else {
+            slos.sort_by(|a, b| a.name.cmp(&b.name));
+            Some(slos)
+        }
+    } else {
+        None
+    };
+
     // Step 3: Ingest full graph to API (streaming, compressed)
     pb.set_message("Uploading code graph... 0%");
 
@@ -1321,6 +1374,8 @@ async fn execute_client_parse(
             cache_hit_rate: cache_rate_opt,
             trace_id: trace_id.chars().take(8).collect(),
             profile: args.profile.clone(),
+            slo_stats: Some(slo_stats.clone()),
+            slo_definitions: slo_definitions_llm.clone(),
         };
 
         display_ir_findings(args, &findings, applied_patches, &display_context);
@@ -1394,6 +1449,8 @@ async fn execute_client_parse(
             cache_hit_rate: cache_rate_opt,
             trace_id: trace_id.chars().take(8).collect(),
             profile: args.profile.clone(),
+            slo_stats: Some(slo_stats.clone()),
+            slo_definitions: None,
         };
 
         let has_any = if let Some(insights) = &insights_resp {
@@ -1491,6 +1548,8 @@ struct ReviewOutputContext {
     cache_hit_rate: Option<f64>,
     trace_id: String,
     profile: Option<String>,
+    slo_stats: Option<SloDiscoveryStats>,
+    slo_definitions: Option<Vec<LlmSloDefinition>>,
 }
 
 /// Severity breakdown for the summary line.
@@ -2859,6 +2918,28 @@ fn display_ir_hotspots_summary(findings: &[IrFinding]) {
     );
 }
 
+/// SLO definition for LLM output
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmSloDefinition {
+    id: String,
+    name: String,
+    provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_method: Option<String>,
+    target_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_budget_remaining: Option<f64>,
+    timeframe: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dashboard_url: Option<String>,
+    monitored_route_count: usize,
+    monitored_routes: Vec<String>,
+}
+
 /// Target location for LLM output
 #[derive(Debug, Clone, serde::Serialize)]
 struct LlmTarget {
@@ -2900,6 +2981,8 @@ struct LlmReviewOutput {
     schema_version: String,
     stop_conditions: Vec<String>,
     summary: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slos: Option<Vec<LlmSloDefinition>>,
     apply_order: Vec<String>,
     findings: Vec<LlmFinding>,
 }
@@ -2969,6 +3052,14 @@ fn generate_llm_output(
         "findings_total": findings.len(),
         "findings_returned": merged.len(),
         "top": top_n,
+        "observability": {
+            "attempted": context.slo_stats.as_ref().map(|s| s.attempted).unwrap_or(false),
+            "slo_count": context.slo_stats.as_ref().map(|s| s.slo_count).unwrap_or(0),
+            "monitored_routes": context.slo_stats.as_ref().map(|s| s.monitored_routes).unwrap_or(0),
+            "total_routes": context.slo_stats.as_ref().map(|s| s.total_routes).unwrap_or(0),
+            "credentials_expired": context.slo_stats.as_ref().map(|s| s.credentials_expired).unwrap_or(false),
+            "no_credentials": context.slo_stats.as_ref().map(|s| s.no_credentials).unwrap_or(false)
+        }
     });
 
     let mut apply_order = Vec::new();
@@ -3029,6 +3120,7 @@ fn generate_llm_output(
         schema_version: "unfault.llm_review.v1".to_string(),
         stop_conditions,
         summary,
+        slos: context.slo_definitions.clone(),
         apply_order,
         findings: out_findings,
     }
@@ -3478,6 +3570,8 @@ mod tests {
             cache_hit_rate: Some(0.5),
             trace_id: "test-trace".to_string(),
             profile: Some("fastapi".to_string()),
+            slo_stats: None,
+            slo_definitions: None,
         };
 
         let findings = vec![IrFinding {
@@ -3505,6 +3599,12 @@ mod tests {
         assert_eq!(output.stop_conditions.len(), 4);
         assert_eq!(output.findings.len(), 1);
         assert_eq!(output.apply_order, vec!["F-0001"]);
+        assert!(output.slos.is_none());
+        assert!(
+            !output.summary["observability"]["attempted"]
+                .as_bool()
+                .unwrap()
+        );
 
         let finding = &output.findings[0];
         assert_eq!(finding.id, "F-0001");
@@ -3544,6 +3644,8 @@ mod tests {
             cache_hit_rate: None,
             trace_id: "test".to_string(),
             profile: None,
+            slo_stats: None,
+            slo_definitions: None,
         };
 
         // Two findings with same rule+file should merge
@@ -3654,6 +3756,8 @@ mod tests {
             cache_hit_rate: None,
             trace_id: "test".to_string(),
             profile: None,
+            slo_stats: None,
+            slo_definitions: None,
         };
 
         // Create 5 findings, each in different file (so they don't merge)
