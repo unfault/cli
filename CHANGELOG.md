@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.9] - 2026-01-20
+
+### Added
+
+- `UNFAULT_API_KEY` environment variable support for CI/CD authentication
+  - When set, the CLI uses this API key without requiring a config file
+  - Works alongside `UNFAULT_BASE_URL` for custom API endpoints
+  - Priority: environment variable takes precedence over config file
+
 ## [0.6.8] - 2026-01-16
 
 ### Added
@@ -162,6 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
+[0.6.9]: https://github.com/unfault/cli/compare/v0.6.8...v0.6.9
 [0.6.8]: https://github.com/unfault/cli/compare/v0.6.5...v0.6.8
 [0.6.5]: https://github.com/unfault/cli/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/unfault/cli/compare/v0.6.3...v0.6.4
