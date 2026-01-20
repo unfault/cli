@@ -1442,7 +1442,7 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
             || hint.contains("no graph data")
             || hint.contains("no SLO data")
             || hint.contains("issues found")  // "No X issues found in your codebase"
-            || hint.contains("looks clean");  // "Your code looks clean"
+            || hint.contains("looks clean"); // "Your code looks clean"
 
         let styled_hint = highlight_unfault_commands(hint);
 
@@ -1682,7 +1682,12 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
             if graph_context.query_type == "library" && !graph_context.library_users.is_empty() {
                 let n = graph_context.library_users.len();
                 let site_word = if n == 1 { "site" } else { "sites" };
-                return format!("Found {} usage {} for {}.", n, site_word, target.bright_yellow().bold());
+                return format!(
+                    "Found {} usage {} for {}.",
+                    n,
+                    site_word,
+                    target.bright_yellow().bold()
+                );
             }
 
             if graph_context.query_type == "centrality" && !graph_context.affected_files.is_empty()
@@ -2123,7 +2128,6 @@ fn output_formatted(
             }
             println!();
         }
-
     }
 
     // If we have flow context, render it prominently (this is the "semantic" answer)

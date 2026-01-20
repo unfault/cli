@@ -28,6 +28,9 @@ const DEFAULT_BASE_URL: &str = "https://app.unfault.dev";
 /// Environment variable for overriding the base URL
 const BASE_URL_ENV_VAR: &str = "UNFAULT_BASE_URL";
 
+/// Environment variable for API key (takes precedence over config file)
+const API_KEY_ENV_VAR: &str = "UNFAULT_API_KEY";
+
 /// LLM configuration for AI-powered insights
 ///
 /// Stores the configuration for the user's LLM provider (BYOLLM).
@@ -301,13 +304,33 @@ impl Config {
         }
     }
 
-    /// Load configuration from the default config file
+    /// Load configuration from environment variable or config file
+    ///
+    /// Priority:
+    /// 1. `UNFAULT_API_KEY` environment variable (for CI/CD)
+    /// 2. Config file on disk
+    ///
+    /// When using the environment variable, a minimal config is created
+    /// with the API key and default base URL.
     ///
     /// # Returns
     ///
     /// * `Ok(Config)` - Successfully loaded configuration
-    /// * `Err(_)` - Configuration file not found or invalid
+    /// * `Err(_)` - Configuration file not found or invalid and no env var
     pub fn load() -> Result<Self> {
+        // Check for API key in environment variable first (CI/CD scenario)
+        if let Ok(api_key) = std::env::var(API_KEY_ENV_VAR) {
+            // Create minimal config from env var
+            return Ok(Self {
+                api_key,
+                stored_base_url: default_base_url(),
+                llm: None,
+                workspace_services: std::collections::HashMap::new(),
+                workspace_mappings: std::collections::HashMap::new(),
+            });
+        }
+
+        // Fall back to config file
         let path = config_path()?;
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
@@ -528,5 +551,37 @@ mod tests {
         // This test depends on whether a config file exists on the system
         // Just verify it doesn't panic
         let _ = Config::exists();
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_load_from_api_key_env_var() {
+        // Clear any existing env vars
+        // SAFETY: Test code runs serially with serial_test, no other threads access this env var
+        unsafe { env::remove_var(BASE_URL_ENV_VAR) };
+        unsafe { env::set_var(API_KEY_ENV_VAR, "sk_live_env_test_123") };
+
+        let config = Config::load().expect("Should load config from env var");
+        assert_eq!(config.api_key, "sk_live_env_test_123");
+        assert_eq!(config.base_url(), DEFAULT_BASE_URL);
+
+        // Clean up
+        unsafe { env::remove_var(API_KEY_ENV_VAR) };
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_load_env_var_with_custom_base_url() {
+        // SAFETY: Test code runs serially with serial_test, no other threads access this env var
+        unsafe { env::set_var(API_KEY_ENV_VAR, "sk_live_env_test_456") };
+        unsafe { env::set_var(BASE_URL_ENV_VAR, "http://custom.example.com") };
+
+        let config = Config::load().expect("Should load config from env var");
+        assert_eq!(config.api_key, "sk_live_env_test_456");
+        assert_eq!(config.base_url(), "http://custom.example.com");
+
+        // Clean up
+        unsafe { env::remove_var(API_KEY_ENV_VAR) };
+        unsafe { env::remove_var(BASE_URL_ENV_VAR) };
     }
 }
