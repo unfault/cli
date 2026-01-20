@@ -1465,8 +1465,9 @@ async fn execute_client_parse(
         // Show SLO coverage summary if --discover-observability was used
         display_slo_summary(&slo_stats);
 
-        // Show tip at the very end
+        // Footer with compact metadata and tip at the very end
         println!();
+        render_session_footer(&display_context);
         println!(
             "{}",
             "Tip: use --output full to drill into hotspots.".dimmed()
@@ -1771,6 +1772,37 @@ fn format_list(values: &[String], separator: &str) -> String {
     }
 }
 
+/// Render a compact one-line footer with metadata
+/// Format: <long line>\n965ms - python / fastapi - 1 file
+fn render_session_footer(context: &ReviewOutputContext) {
+    // Long separator line
+    println!("{}", "─".repeat(MAX_WIDTH).dimmed());
+
+    // Compact metadata line: "965ms - python / fastapi - 1 file"
+    let langs = format_list(&context.languages, ", ");
+    let frameworks = format_list(&context.frameworks, ", ");
+
+    let lang_framework = if frameworks == "—" {
+        langs
+    } else {
+        format!("{} / {}", langs, frameworks)
+    };
+
+    let file_word = if context.file_count == 1 {
+        "file"
+    } else {
+        "files"
+    };
+
+    println!(
+        "{} - {} - {} {}",
+        format!("{}ms", context.elapsed_ms).dimmed(),
+        lang_framework.dimmed(),
+        context.file_count,
+        file_word.dimmed()
+    );
+}
+
 fn display_ir_findings(
     args: &ReviewArgs,
     findings: &[IrFinding],
@@ -2055,11 +2087,8 @@ fn shorten_example(title: &str) -> String {
 fn display_session_insights(
     args: &ReviewArgs,
     insights: &crate::api::SessionInsightsResponse,
-    context: &ReviewOutputContext,
+    _context: &ReviewOutputContext,
 ) {
-    println!();
-    render_session_overview(context);
-
     // Filter test scopes unless explicitly included.
     let mut items: Vec<_> = insights
         .insights
@@ -2068,7 +2097,6 @@ fn display_session_insights(
         .collect();
 
     if items.is_empty() {
-        println!();
         println!(
             "{} No issues found! Your code looks good.",
             "✓".bright_green().bold()
@@ -2156,9 +2184,6 @@ fn display_session_insights(
             " If an incident hits, correlation IDs and structured logs make the follow-up a lot calmer.",
         );
     }
-
-    println!();
-    println!("{}", "Summary".bold());
 
     let wrapped = wrap_text(&paragraph, MAX_WIDTH, "");
     for line in wrapped {
@@ -2369,7 +2394,7 @@ fn generate_friendly_insights_from_hotspot_summaries(
 fn display_session_hotspots(
     args: &ReviewArgs,
     hotspots: &crate::api::SessionHotspotsResponse,
-    context: &ReviewOutputContext,
+    _context: &ReviewOutputContext,
 ) {
     // JSON/SARIF paths should not reach here
     if args.output_format == "json" {
@@ -2382,12 +2407,8 @@ fn display_session_hotspots(
         return;
     }
 
-    println!();
-    render_session_overview(context);
-
     let has_any = hotspots.hotspots.iter().any(|h| h.total_count > 0);
     if !has_any {
-        println!();
         println!(
             "{} No issues found! Your code looks good.",
             "✓".bright_green().bold()
@@ -2493,9 +2514,6 @@ fn display_session_hotspots(
                 " If an incident hits, correlation IDs and structured logs make the follow-up a lot calmer.",
             );
         }
-
-        println!();
-        println!("{}", "Summary".bold());
 
         // Wrap to 80 columns.
         let wrapped = wrap_text(&paragraph, MAX_WIDTH, "");
