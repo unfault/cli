@@ -19,6 +19,7 @@
 //! ```
 
 use clap::{Parser, Subcommand, ValueEnum};
+use colored::Colorize;
 use unfault::commands;
 
 /// Initialize logger based on verbose flag
@@ -167,6 +168,30 @@ enum Commands {
     },
     /// Check authentication and service configuration status
     Status,
+
+    /// Manage optional addons (fault, editors, ...)
+    Addon {
+        #[command(subcommand)]
+        command: AddonCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AddonCommands {
+    /// Install an addon
+    Install {
+        #[arg(value_enum, value_name = "NAME")]
+        name: AddonName,
+        /// Reinstall even if already present
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum AddonName {
+    Fault,
+    Vscode,
 }
 
 /// Graph subcommands
@@ -552,6 +577,24 @@ async fn run_command(command: Commands) -> i32 {
                 eprintln!("Status error: {}", e);
                 EXIT_CONFIG_ERROR
             }
+        },
+        Commands::Addon { command } => match command {
+            AddonCommands::Install { name, force } => match name {
+                AddonName::Fault => match commands::addon::install_fault(force).await {
+                    Ok(exit_code) => exit_code,
+                    Err(e) => {
+                        eprintln!("Addon install error: {}", e);
+                        EXIT_CONFIG_ERROR
+                    }
+                },
+                AddonName::Vscode => {
+                    eprintln!(
+                        "{} VS Code addon install not implemented yet.",
+                        "✗".red().bold()
+                    );
+                    EXIT_CONFIG_ERROR
+                }
+            },
         },
     }
 }

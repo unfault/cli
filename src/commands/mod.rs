@@ -14,6 +14,7 @@
 //! - [`status`] - Check authentication and service configuration status
 
 pub mod ask;
+pub mod addon;
 pub mod config;
 pub mod graph;
 pub mod login;

@@ -14,6 +14,7 @@ use colored::Colorize;
 use crate::api::ApiClient;
 use crate::config::Config;
 use crate::exit_codes::*;
+use crate::commands::addon::{detect_fault, AddonStatus};
 
 /// Execute the status command
 ///
@@ -108,6 +109,9 @@ pub async fn execute() -> Result<i32> {
         );
 
         println!();
+        render_addons_status();
+
+        println!();
         println!(
             "{} Ready to analyze code. Run `unfault review` to start.",
             "✓".bright_green().bold()
@@ -121,8 +125,41 @@ pub async fn execute() -> Result<i32> {
             "✗".red().bold()
         );
 
+        println!();
+        render_addons_status();
+
         Ok(EXIT_CONFIG_ERROR)
     }
+}
+
+fn render_addons_status() {
+    println!("{} {}", "🧩".cyan(), "Addons".bold());
+
+    let fault = detect_fault();
+    match fault.status {
+        AddonStatus::Installed => {
+            let extra = match (&fault.version, &fault.path) {
+                (Some(v), Some(p)) => format!("{} ({})", v, p.display()),
+                (Some(v), None) => v.clone(),
+                (None, Some(p)) => p.display().to_string(),
+                (None, None) => "installed".to_string(),
+            };
+            println!(
+                "  {} fault: {}",
+                "✓".bright_green().bold(),
+                extra.green()
+            );
+        }
+        AddonStatus::Missing => {
+            println!("  {} fault: {}", "✗".red().bold(), "missing".red());
+            println!(
+                "    {} Run `unfault addon install fault`",
+                "→".cyan()
+            );
+        }
+    }
+
+    println!("  {} vscode: {}", "ℹ".blue(), "not checked yet".dimmed());
 }
 
 /// Mask an API key for display
