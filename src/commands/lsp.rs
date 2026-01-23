@@ -498,6 +498,23 @@ struct LspDiagnosticsSettings {
     min_severity: FindingSeverityThreshold,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LspFaultSettings {
+    #[serde(default = "default_fault_base_url")]
+    base_url: String,
+    #[serde(default = "default_fault_local_port")]
+    local_port: u16,
+}
+
+fn default_fault_base_url() -> String {
+    "http://127.0.0.1:8000".to_string()
+}
+
+fn default_fault_local_port() -> u16 {
+    9090
+}
+
 fn default_min_severity() -> FindingSeverityThreshold {
     FindingSeverityThreshold::High
 }
@@ -511,30 +528,50 @@ impl Default for LspDiagnosticsSettings {
     }
 }
 
+impl Default for LspFaultSettings {
+    fn default() -> Self {
+        Self {
+            base_url: default_fault_base_url(),
+            local_port: default_fault_local_port(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LspClientSettings {
     #[serde(default)]
     diagnostics: LspDiagnosticsSettings,
+    #[serde(default)]
+    fault: LspFaultSettings,
 }
 
 fn apply_lsp_settings(current: &mut LspClientSettings, raw: &serde_json::Value) {
     let root = raw.get("unfault").unwrap_or(raw);
-    let Some(diagnostics) = root.get("diagnostics") else {
-        return;
-    };
 
-    if let Some(enabled) = diagnostics.get("enabled").and_then(|v| v.as_bool()) {
-        current.diagnostics.enabled = enabled;
+    if let Some(diagnostics) = root.get("diagnostics") {
+        if let Some(enabled) = diagnostics.get("enabled").and_then(|v| v.as_bool()) {
+            current.diagnostics.enabled = enabled;
+        }
+
+        if let Some(min_severity) = diagnostics.get("minSeverity").and_then(|v| v.as_str()) {
+            current.diagnostics.min_severity = match min_severity.to_lowercase().as_str() {
+                "critical" => FindingSeverityThreshold::Critical,
+                "high" => FindingSeverityThreshold::High,
+                "medium" => FindingSeverityThreshold::Medium,
+                "low" => FindingSeverityThreshold::Low,
+                _ => current.diagnostics.min_severity,
+            };
+        }
     }
 
-    if let Some(min_severity) = diagnostics.get("minSeverity").and_then(|v| v.as_str()) {
-        current.diagnostics.min_severity = match min_severity.to_lowercase().as_str() {
-            "critical" => FindingSeverityThreshold::Critical,
-            "high" => FindingSeverityThreshold::High,
-            "medium" => FindingSeverityThreshold::Medium,
-            "low" => FindingSeverityThreshold::Low,
-            _ => current.diagnostics.min_severity,
-        };
+    if let Some(fault) = root.get("fault") {
+        if let Some(base_url) = fault.get("baseUrl").and_then(|v| v.as_str()) {
+            current.fault.base_url = base_url.to_string();
+        }
+
+        if let Some(local_port) = fault.get("localPort").and_then(|v| v.as_u64()) {
+            current.fault.local_port = local_port.clamp(1, u16::MAX as u64) as u16;
+        }
     }
 }
 
@@ -2598,6 +2635,7 @@ impl LanguageServer for UnfaultLsp {
                         "unfault/getFunctionImpact".to_string(),
                         "unfault/getFileCentrality".to_string(),
                         "unfault/getFileDependencies".to_string(),
+                        "unfault/generateFaultScenarios".to_string(),
                         "unfault/refreshFile".to_string(),
                     ],
                     ..Default::default()
@@ -3084,6 +3122,7 @@ impl LanguageServer for UnfaultLsp {
             "unfault/getFunctionImpact" => self.handle_get_function_impact(args_value).await,
             "unfault/getFileCentrality" => self.handle_get_file_centrality(args_value).await,
             "unfault/getFileDependencies" => self.handle_get_file_dependencies(args_value).await,
+            "unfault/generateFaultScenarios" => self.handle_generate_fault_scenarios(args_value).await,
             "unfault/refreshFile" => self.handle_refresh_file(args_value).await,
             _ => Err(tower_lsp::jsonrpc::Error::method_not_found()),
         }
@@ -3348,6 +3387,160 @@ impl UnfaultLsp {
         ))
     }
 
+    async fn handle_generate_fault_scenarios(
+        &self,
+        args: serde_json::Value,
+    ) -> RpcResult<Option<serde_json::Value>> {
+        use crate::fault_scenarios::{
+            find_available_file_path, get_or_create_scenario_dir, render_route_scenario_suite,
+            ScenarioSuiteConfig,
+        };
+
+        #[derive(Debug, Clone, Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct GenerateFaultScenariosResponse {
+            created_files: Vec<String>,
+        }
+
+        let req: GetFunctionImpactRequest = serde_json::from_value(args)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+        let uri = Url::parse(&req.uri).ok();
+        let file_path = uri.as_ref().and_then(|u| u.to_file_path().ok());
+        let workspace_root = { self.workspace_root.read().await.clone() };
+        let relative_path = match (&file_path, &workspace_root) {
+            (Some(fp), Some(ws)) => fp
+                .strip_prefix(ws)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| fp.to_string_lossy().to_string()),
+            (Some(fp), None) => fp.to_string_lossy().to_string(),
+            _ => return Ok(None),
+        };
+
+        let api_key = match &self.config {
+            Some(c) => c.api_key.clone(),
+            None => return Ok(None),
+        };
+        let workspace_id = match self.workspace_id.read().await.clone() {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        let git_remote = workspace_root.as_ref().and_then(|p| get_git_remote(p));
+        let file_id = Some(compute_file_id(
+            git_remote.as_deref(),
+            &workspace_id,
+            &relative_path,
+        ));
+
+        let (start_line, end_line) = uri
+            .as_ref()
+            .and_then(|u| self.function_cache.get(u))
+            .and_then(|functions| {
+                functions
+                    .iter()
+                    .find(|f| f.name == req.function_name)
+                    .map(|f| {
+                        (
+                            Some((f.range.start.line + 1) as i32),
+                            Some((f.range.end.line + 1) as i32),
+                        )
+                    })
+            })
+            .unwrap_or((None, None));
+
+        let impact_request = crate::api::graph::FunctionImpactRequest {
+            session_id: None,
+            workspace_id: Some(workspace_id),
+            file_id,
+            file_path: relative_path,
+            function_name: req.function_name.clone(),
+            start_line,
+            end_line,
+            max_depth: 5,
+            require_current: true,
+        };
+
+        let response = match self
+            .api_client
+            .graph_function_impact(&api_key, &impact_request)
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+
+        let mut routes: Vec<(String, String)> = Vec::new();
+        if response.is_route_handler {
+            if let (Some(m), Some(p)) = (&response.route_method, &response.route_path) {
+                routes.push((m.to_uppercase(), p.clone()));
+            }
+        }
+
+        for c in response
+            .direct_callers
+            .iter()
+            .chain(response.transitive_callers.iter())
+            .filter(|c| c.is_route_handler)
+        {
+            if let (Some(m), Some(p)) = (&c.route_method, &c.route_path) {
+                routes.push((m.to_uppercase(), p.clone()));
+            }
+        }
+
+        // Deduplicate by (method, path)
+        let mut seen = std::collections::HashSet::new();
+        routes.retain(|(m, p)| seen.insert((m.clone(), p.clone())));
+
+        if routes.is_empty() {
+            return Ok(Some(
+                serde_json::to_value(GenerateFaultScenariosResponse {
+                    created_files: vec![],
+                })
+                .unwrap(),
+            ));
+        }
+
+        let (remote, local_port) = {
+            let settings = self.settings.read().await;
+            (
+                normalize_remote_origin(&settings.fault.base_url),
+                settings.fault.local_port,
+            )
+        };
+
+        let ws_root = match workspace_root {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let out_dir = match get_or_create_scenario_dir(&ws_root) {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+
+        let mut created_files = Vec::new();
+        for (method, path) in routes {
+            let generated = render_route_scenario_suite(
+                &ScenarioSuiteConfig {
+                    local_port,
+                    remote: remote.clone(),
+                },
+                &method,
+                &path,
+            );
+
+            let file_path = find_available_file_path(&out_dir, &generated.file_name);
+            if std::fs::write(&file_path, generated.yaml).is_ok() {
+                created_files.push(file_path.to_string_lossy().to_string());
+            }
+        }
+
+        Ok(Some(
+            serde_json::to_value(GenerateFaultScenariosResponse { created_files }).unwrap(),
+        ))
+    }
+
     async fn handle_get_file_centrality(
         &self,
         args: serde_json::Value,
@@ -3582,6 +3775,19 @@ pub async fn execute(args: LspArgs) -> anyhow::Result<i32> {
     Server::new(stdin, stdout, socket).serve(service).await;
 
     Ok(EXIT_SUCCESS)
+}
+
+fn normalize_remote_origin(base_url: &str) -> String {
+    if let Ok(u) = Url::parse(base_url) {
+        let scheme = u.scheme();
+        if let Some(host) = u.host_str() {
+            if let Some(port) = u.port() {
+                return format!("{}://{}:{}", scheme, host, port);
+            }
+            return format!("{}://{}", scheme, host);
+        }
+    }
+    base_url.to_string()
 }
 
 #[cfg(test)]

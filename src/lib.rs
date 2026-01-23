@@ -18,6 +18,7 @@ pub mod commands;
 pub mod config;
 pub mod errors;
 pub mod exit_codes;
+pub mod fault_scenarios;
 pub mod session;
 pub mod slo;
 
