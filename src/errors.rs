@@ -92,7 +92,7 @@ pub fn display_service_error(message: &str) {
     eprintln!("  • Service is temporarily unavailable");
     eprintln!();
     eprintln!(
-        "{} Check https://status.unfault.dev for service status.",
+        "{} Check https://unfault.dev for service updates.",
         "Tip:".cyan().bold()
     );
 }
