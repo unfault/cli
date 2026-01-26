@@ -123,11 +123,11 @@ pub fn execute_show(args: ConfigShowArgs) -> Result<i32> {
             };
             println!("  {} {} ({})", "API Key Env:".dimmed(), env_var, status);
         }
-        if llm.api_key.is_some() {
+        if let Some(api_key) = llm.api_key.as_deref() {
             let display = if args.show_secrets {
-                llm.api_key.as_ref().unwrap().clone()
+                api_key.to_string()
             } else {
-                llm.masked_api_key().unwrap_or_else(|| "****".to_string())
+                mask_key(api_key)
             };
             println!("  {} {}", "API Key:".dimmed(), display);
         }
@@ -274,11 +274,11 @@ fn show_llm_config(show_secrets: bool) -> Result<i32> {
             println!("  {} {} ({})", "API Key Env:".dimmed(), env_var, status);
         }
 
-        if llm.api_key.is_some() {
+        if let Some(api_key) = llm.api_key.as_deref() {
             let display = if show_secrets {
-                llm.api_key.as_ref().unwrap().clone()
+                api_key.to_string()
             } else {
-                llm.masked_api_key().unwrap_or_else(|| "****".to_string())
+                mask_key(api_key)
             };
             println!("  {} {}", "API Key:".dimmed(), display);
         }
