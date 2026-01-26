@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.11] - 2026-01-26
+
+### Added
+
+- New `unfault addon install fault` command to download and install the `fault` CLI
+- `unfault status` now reports whether the `fault` addon is installed
+- LSP can generate fault scenario suites
+
+### Fixed
+
+- Removed unsupported status link
+
 ## [0.6.10] - 2026-01-20
 
 ### Changed
@@ -179,6 +191,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
+[0.6.11]: https://github.com/unfault/cli/compare/v0.6.10...v0.6.11
+[0.6.10]: https://github.com/unfault/cli/compare/v0.6.9...v0.6.10
 [0.6.9]: https://github.com/unfault/cli/compare/v0.6.8...v0.6.9
 [0.6.8]: https://github.com/unfault/cli/compare/v0.6.5...v0.6.8
 [0.6.5]: https://github.com/unfault/cli/compare/v0.6.4...v0.6.5
