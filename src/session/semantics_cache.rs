@@ -23,6 +23,7 @@ use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use log::debug;
 use xxhash_rust::xxh3::xxh3_64;
 
 use unfault_core::semantics::SourceSemantics;
@@ -92,6 +93,8 @@ impl SemanticsCache {
     ///
     /// Creates `.unfault/cache/semantics/` if it doesn't exist.
     pub fn open(workspace_path: &Path) -> Result<Self> {
+        ensure_unfault_ignored_in_gitignore(workspace_path);
+
         let cache_dir = workspace_path
             .join(".unfault")
             .join("cache")
@@ -293,9 +296,66 @@ impl SemanticsCache {
     }
 }
 
+fn ensure_unfault_ignored_in_gitignore(workspace_path: &Path) {
+    let gitignore_path = workspace_path.join(".gitignore");
+    if !gitignore_path.is_file() {
+        return;
+    }
+
+    let content = match fs::read_to_string(&gitignore_path) {
+        Ok(c) => c,
+        Err(e) => {
+            debug!("failed to read {}: {}", gitignore_path.display(), e);
+            return;
+        }
+    };
+
+    if gitignore_mentions_unfault_dir(&content) {
+        return;
+    }
+
+    let eol = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut updated = content;
+    if !updated.is_empty() && !updated.ends_with(eol) {
+        updated.push_str(eol);
+    }
+    updated.push_str(".unfault/");
+    updated.push_str(eol);
+
+    if let Err(e) = fs::write(&gitignore_path, updated) {
+        debug!("failed to write {}: {}", gitignore_path.display(), e);
+    }
+}
+
+fn gitignore_mentions_unfault_dir(content: &str) -> bool {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|l| !l.starts_with('#'))
+        .any(|line| {
+            // If the user already configured any rule mentioning `.unfault`, do not mutate
+            // the file (especially important for explicit un-ignore rules like `!.unfault/`).
+            let line = line.trim_start_matches('!');
+
+            line == ".unfault"
+                || line == ".unfault/"
+                || line == "/.unfault"
+                || line == "/.unfault/"
+                || line.contains("/.unfault/")
+                || line.contains(".unfault/")
+                || line.ends_with(".unfault")
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
     use unfault_core::parse::ast::FileId;
     use unfault_core::parse::python;
@@ -403,5 +463,49 @@ mod tests {
 
         let result = cache.get("test.py", 12345);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_gitignore_is_not_created_when_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        ensure_unfault_ignored_in_gitignore(temp_dir.path());
+        assert!(!temp_dir.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn test_gitignore_adds_unfault_when_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let gitignore_path = temp_dir.path().join(".gitignore");
+        fs::write(&gitignore_path, "target/\n").unwrap();
+
+        ensure_unfault_ignored_in_gitignore(temp_dir.path());
+
+        let updated = fs::read_to_string(&gitignore_path).unwrap();
+        assert!(updated.contains(".unfault/\n"));
+    }
+
+    #[test]
+    fn test_gitignore_does_not_duplicate_unfault() {
+        let temp_dir = TempDir::new().unwrap();
+        let gitignore_path = temp_dir.path().join(".gitignore");
+        fs::write(&gitignore_path, "target/\n.unfault/\n").unwrap();
+
+        ensure_unfault_ignored_in_gitignore(temp_dir.path());
+
+        let updated = fs::read_to_string(&gitignore_path).unwrap();
+        assert_eq!(updated.matches(".unfault/").count(), 1);
+    }
+
+    #[test]
+    fn test_gitignore_does_not_override_unignore_rule() {
+        let temp_dir = TempDir::new().unwrap();
+        let gitignore_path = temp_dir.path().join(".gitignore");
+        fs::write(&gitignore_path, "!.unfault/\n").unwrap();
+
+        ensure_unfault_ignored_in_gitignore(temp_dir.path());
+
+        let updated = fs::read_to_string(&gitignore_path).unwrap();
+        assert_eq!(updated.matches(".unfault/").count(), 1);
+        assert!(!updated.contains("\n.unfault/\n"));
     }
 }
