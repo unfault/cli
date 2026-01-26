@@ -12,9 +12,9 @@ use anyhow::Result;
 use colored::Colorize;
 
 use crate::api::ApiClient;
+use crate::commands::addon::{AddonStatus, detect_fault};
 use crate::config::Config;
 use crate::exit_codes::*;
-use crate::commands::addon::{detect_fault, AddonStatus};
 
 /// Execute the status command
 ///
@@ -144,18 +144,11 @@ fn render_addons_status() {
                 (None, Some(p)) => p.display().to_string(),
                 (None, None) => "installed".to_string(),
             };
-            println!(
-                "  {} fault: {}",
-                "✓".bright_green().bold(),
-                extra.green()
-            );
+            println!("  {} fault: {}", "✓".bright_green().bold(), extra.green());
         }
         AddonStatus::Missing => {
             println!("  {} fault: {}", "✗".red().bold(), "missing".red());
-            println!(
-                "    {} Run `unfault addon install fault`",
-                "→".cyan()
-            );
+            println!("    {} Run `unfault addon install fault`", "→".cyan());
         }
     }
 

@@ -5,7 +5,7 @@
 //! Today this is intentionally narrow and first-party:
 //! - `fault` CLI binary (downloaded from GitHub releases)
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
 use futures_util::StreamExt;
 use reqwest::header;
@@ -40,7 +40,11 @@ pub fn detect_fault() -> FaultAddonInfo {
             let path = which_in_path(FAULT_BIN_NAME);
             return FaultAddonInfo {
                 status: AddonStatus::Installed,
-                version: if version.is_empty() { None } else { Some(version) },
+                version: if version.is_empty() {
+                    None
+                } else {
+                    Some(version)
+                },
                 path,
             };
         }
@@ -84,12 +88,17 @@ pub async fn install_fault(force: bool) -> Result<i32> {
             println!("  {} {}", "version:".dimmed(), v.dimmed());
         }
         if let Some(p) = detected.path {
-            println!("  {} {}", "path:".dimmed(), p.display().to_string().dimmed());
+            println!(
+                "  {} {}",
+                "path:".dimmed(),
+                p.display().to_string().dimmed()
+            );
         }
         return Ok(EXIT_SUCCESS);
     }
 
-    let install_dir = default_user_bin_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
+    let install_dir =
+        default_user_bin_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
     tokio::fs::create_dir_all(&install_dir)
         .await
         .with_context(|| format!("Failed to create {}", install_dir.display()))?;
@@ -155,7 +164,10 @@ struct GithubAsset {
 }
 
 async fn fetch_latest_fault_release(client: &reqwest::Client) -> Result<GithubRelease> {
-    let url = format!("https://api.github.com/repos/{}/releases/latest", FAULT_REPO);
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        FAULT_REPO
+    );
     let resp = client
         .get(url)
         .header(header::USER_AGENT, "unfault-cli")
@@ -186,7 +198,7 @@ fn select_fault_asset(release: &GithubRelease) -> Result<GithubAsset> {
                 "Unsupported platform for fault addon install: {} {}",
                 os,
                 arch
-            ))
+            ));
         }
     };
 

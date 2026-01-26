@@ -3122,7 +3122,9 @@ impl LanguageServer for UnfaultLsp {
             "unfault/getFunctionImpact" => self.handle_get_function_impact(args_value).await,
             "unfault/getFileCentrality" => self.handle_get_file_centrality(args_value).await,
             "unfault/getFileDependencies" => self.handle_get_file_dependencies(args_value).await,
-            "unfault/generateFaultScenarios" => self.handle_generate_fault_scenarios(args_value).await,
+            "unfault/generateFaultScenarios" => {
+                self.handle_generate_fault_scenarios(args_value).await
+            }
             "unfault/refreshFile" => self.handle_refresh_file(args_value).await,
             _ => Err(tower_lsp::jsonrpc::Error::method_not_found()),
         }
@@ -3392,8 +3394,8 @@ impl UnfaultLsp {
         args: serde_json::Value,
     ) -> RpcResult<Option<serde_json::Value>> {
         use crate::fault_scenarios::{
-            find_available_file_path, get_or_create_scenario_dir, render_route_scenario_suite,
-            ScenarioSuiteConfig,
+            ScenarioSuiteConfig, find_available_file_path, get_or_create_scenario_dir,
+            render_route_scenario_suite,
         };
 
         #[derive(Debug, Clone, Serialize)]
