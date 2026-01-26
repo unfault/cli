@@ -17,6 +17,8 @@ pub struct GeneratedScenarioFile {
     pub yaml: String,
 }
 
+type ScenarioDoc = (String, String, Vec<String>, Vec<String>, bool);
+
 pub fn render_route_scenario_suite(
     config: &ScenarioSuiteConfig,
     method: &str,
@@ -104,7 +106,7 @@ fn render_suite_yaml(
         config.local_port, config.remote
     );
 
-    let mut docs: Vec<(String, String, Vec<String>, Vec<String>, bool)> = Vec::new();
+    let mut docs: Vec<ScenarioDoc> = Vec::new();
 
     // Periodic pulses under load (matches the kind of example you shared)
     docs.push((
