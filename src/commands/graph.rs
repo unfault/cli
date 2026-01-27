@@ -2121,6 +2121,8 @@ fn output_stats_formatted(response: &GraphStatsResponse, verbose: bool) {
 pub struct DumpArgs {
     /// Workspace path to analyze (defaults to current directory)
     pub workspace_path: Option<String>,
+    /// Dump extracted semantics instead of the code graph
+    pub semantics: bool,
     /// Output only call edges
     pub calls_only: bool,
     /// Output only specific file's information
@@ -2132,6 +2134,8 @@ pub struct DumpArgs {
 /// Execute the graph dump command - builds local graph and outputs JSON
 pub fn execute_dump(args: DumpArgs) -> Result<i32> {
     use crate::session::graph_builder::build_local_graph;
+    use crate::session::ir_builder::build_ir_cached;
+    use unfault_core::SourceSemantics;
 
     // Determine workspace path
     let workspace_path = match &args.workspace_path {
@@ -2145,6 +2149,35 @@ pub fn execute_dump(args: DumpArgs) -> Result<i32> {
             "→".cyan(),
             workspace_path.display()
         );
+    }
+
+    if args.semantics {
+        if args.verbose {
+            eprintln!(
+                "{} Building semantics for: {}",
+                "→".cyan(),
+                workspace_path.display()
+            );
+        }
+
+        let ir = build_ir_cached(&workspace_path, None, args.verbose, None)?.ir;
+
+        let semantics: Vec<SourceSemantics> = if let Some(ref file_filter) = args.file {
+            ir.semantics
+                .into_iter()
+                .filter(|s| match s {
+                    SourceSemantics::Python(py) => py.path.contains(file_filter),
+                    SourceSemantics::Go(go) => go.path.contains(file_filter),
+                    SourceSemantics::Rust(rs) => rs.path.contains(file_filter),
+                    SourceSemantics::Typescript(ts) => ts.path.contains(file_filter),
+                })
+                .collect()
+        } else {
+            ir.semantics
+        };
+
+        println!("{}", serde_json::to_string_pretty(&semantics)?);
+        return Ok(0);
     }
 
     // Build the local graph

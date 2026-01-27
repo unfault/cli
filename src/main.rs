@@ -316,6 +316,9 @@ enum GraphCommands {
         /// Workspace path to analyze (defaults to current directory)
         #[arg(long, short = 'w', value_name = "PATH")]
         workspace: Option<String>,
+        /// Dump extracted semantics instead of the code graph
+        #[arg(long)]
+        semantics: bool,
         /// Output only call edges (useful for debugging call graph issues)
         #[arg(long)]
         calls_only: bool,
@@ -820,12 +823,14 @@ async fn run_graph_command(
         }
         GraphCommands::Dump {
             workspace,
+            semantics,
             calls_only,
             file,
             verbose,
         } => {
             let args = commands::graph::DumpArgs {
                 workspace_path: workspace,
+                semantics,
                 calls_only,
                 file,
                 verbose,
