@@ -75,6 +75,8 @@ use crate::session::{
 // Import patch types from unfault-core for parsing patch_json
 use unfault_core::IntermediateRepresentation;
 use unfault_core::graph::GraphNode;
+use unfault_core::semantics::common::CommonSemantics;
+use unfault_core::SourceSemantics;
 use unfault_core::types::{FilePatch, PatchRange};
 
 /// Arguments for the LSP command
@@ -428,6 +430,32 @@ pub struct GetFunctionImpactRequest {
     #[serde(rename = "functionName")]
     pub function_name: String,
     pub position: Position,
+}
+
+/// Request for unfault/getHttpCallAtPosition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetHttpCallAtPositionRequest {
+    pub uri: String,
+    pub position: Position,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HttpUrlExprResponse {
+    text: String,
+    kind: String,
+    env_var: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HttpCallAtPositionResponse {
+    library: String,
+    method: String,
+    url: Option<String>,
+    url_expr: Option<HttpUrlExprResponse>,
+    start_byte: usize,
+    end_byte: usize,
 }
 
 /// Response for unfault/getFunctionImpact
@@ -2406,6 +2434,59 @@ fn byte_offset_to_position(
     Some((line_idx, col))
 }
 
+/// Convert an LSP (UTF-16) position to a byte offset in the source.
+///
+/// VS Code sends `Position.character` in UTF-16 code units. Tree-sitter byte
+/// offsets are UTF-8 bytes. This converts by walking the target line and
+/// counting UTF-16 units.
+fn position_to_byte_offset_utf16(source: &str, position: Position) -> Option<usize> {
+    let line_idx = position.line as usize;
+    let target_col = position.character as usize;
+
+    let mut line_start = 0usize;
+    let mut current_line = 0usize;
+
+    // Find the start offset of the requested line.
+    for (i, ch) in source.char_indices() {
+        if current_line == line_idx {
+            break;
+        }
+        if ch == '\n' {
+            current_line += 1;
+            line_start = i + 1;
+        }
+    }
+
+    if current_line != line_idx {
+        // Out of bounds
+        return None;
+    }
+
+    let line_end = source[line_start..]
+        .find('\n')
+        .map(|rel| line_start + rel)
+        .unwrap_or_else(|| source.len());
+    let line = &source[line_start..line_end];
+
+    let mut utf16_units = 0usize;
+    let mut byte_in_line = 0usize;
+    for (i, ch) in line.char_indices() {
+        let units = ch.len_utf16();
+        if utf16_units + units > target_col {
+            break;
+        }
+        utf16_units += units;
+        byte_in_line = i + ch.len_utf8();
+    }
+
+    if utf16_units < target_col {
+        // Column beyond end of line
+        byte_in_line = line.len();
+    }
+
+    Some(line_start + byte_in_line)
+}
+
 /// Check if two ranges overlap
 fn ranges_overlap(a: &Range, b: &Range) -> bool {
     !(a.end.line < b.start.line
@@ -3125,6 +3206,9 @@ impl LanguageServer for UnfaultLsp {
             "unfault/generateFaultScenarios" => {
                 self.handle_generate_fault_scenarios(args_value).await
             }
+            "unfault/getHttpCallAtPosition" => {
+                self.handle_get_http_call_at_position(args_value).await
+            }
             "unfault/refreshFile" => self.handle_refresh_file(args_value).await,
             _ => Err(tower_lsp::jsonrpc::Error::method_not_found()),
         }
@@ -3540,6 +3624,125 @@ impl UnfaultLsp {
 
         Ok(Some(
             serde_json::to_value(GenerateFaultScenariosResponse { created_files }).unwrap(),
+        ))
+    }
+
+    async fn handle_get_http_call_at_position(
+        &self,
+        args: serde_json::Value,
+    ) -> RpcResult<Option<serde_json::Value>> {
+        let req: GetHttpCallAtPositionRequest = serde_json::from_value(args)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+
+        let uri = Url::parse(&req.uri)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(e.to_string()))?;
+        let file_path = uri
+            .to_file_path()
+            .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("Invalid file URI"))?;
+
+        let workspace_root = { self.workspace_root.read().await.clone() };
+        let project_root = find_project_root(&file_path, workspace_root.as_ref()).unwrap_or_else(|| {
+            workspace_root
+                .clone()
+                .unwrap_or_else(|| file_path.parent().unwrap_or(&file_path).to_path_buf())
+        });
+
+        let relative_path = file_path
+            .strip_prefix(&project_root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if relative_path.is_empty() {
+            return Ok(None);
+        }
+
+        // Prefer in-memory content for accurate byte offsets.
+        let source = if let Some(content) = self.document_cache.get_async(&uri).await {
+            content.get().clone()
+        } else {
+            match std::fs::read_to_string(&file_path) {
+                Ok(s) => s,
+                Err(_) => return Ok(None),
+            }
+        };
+
+        let byte_offset = match position_to_byte_offset_utf16(&source, req.position) {
+            Some(o) => o,
+            None => return Ok(None),
+        };
+
+        // Build semantics for this file only (still via the standard IR builder/caches).
+        let mut content_overrides = std::collections::HashMap::new();
+        content_overrides.insert(file_path.clone(), source.clone());
+        let ir = match build_ir_cached(
+            &project_root,
+            Some(&[file_path.clone()]),
+            self.verbose,
+            Some(&content_overrides),
+        ) {
+            Ok(result) => result.ir,
+            Err(_) => return Ok(None),
+        };
+
+        let sem = match ir.semantics.into_iter().find(|s| match s {
+            SourceSemantics::Python(py) => py.path == relative_path,
+            SourceSemantics::Go(go) => go.path == relative_path,
+            SourceSemantics::Rust(rs) => rs.path == relative_path,
+            SourceSemantics::Typescript(ts) => ts.path == relative_path,
+        }) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let http_calls = match sem {
+            SourceSemantics::Python(py) => py.http_calls(),
+            SourceSemantics::Go(go) => go.http_calls(),
+            SourceSemantics::Rust(rs) => rs.http_calls(),
+            SourceSemantics::Typescript(ts) => ts.http_calls(),
+        };
+
+        let mut best: Option<unfault_core::semantics::common::http::HttpCall> = None;
+        for call in http_calls {
+            if byte_offset >= call.start_byte && byte_offset < call.end_byte {
+                match &best {
+                    Some(existing) => {
+                        let existing_len = existing.end_byte.saturating_sub(existing.start_byte);
+                        let call_len = call.end_byte.saturating_sub(call.start_byte);
+                        if call_len < existing_len {
+                            best = Some(call);
+                        }
+                    }
+                    None => best = Some(call),
+                }
+            }
+        }
+
+        let call = match best {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        let url_expr = call.url_expr.map(|expr| {
+            let kind = serde_json::to_value(&expr.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown".to_string());
+            HttpUrlExprResponse {
+                text: expr.text,
+                kind,
+                env_var: expr.env_var,
+            }
+        });
+
+        Ok(Some(
+            serde_json::to_value(HttpCallAtPositionResponse {
+                library: call.library.as_str().to_string(),
+                method: call.method.as_str().to_string(),
+                url: call.url,
+                url_expr,
+                start_byte: call.start_byte,
+                end_byte: call.end_byte,
+            })
+            .unwrap(),
         ))
     }
 
