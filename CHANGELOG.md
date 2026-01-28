@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.16] - 2026-01-28
+
+### Changed
+
+- Bumped dependency on `unfault-core` to 0.1.10
+
+## [0.6.15] - 2026-01-28
+
+### Added
+
+- LSP: return the outbound HTTP call under cursor (for egress fault injection UX)
+- `unfault graph dump --semantics` for debugging extracted semantics
+
+### Changed
+
+- Bumped dependency on `unfault-core` to 0.1.9
+
 ## [0.6.12] - 2026-01-26
 
 ### Added
@@ -197,6 +214,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
+[0.6.16]: https://github.com/unfault/cli/compare/v0.6.12...580bc99
+[0.6.15]: https://github.com/unfault/cli/compare/v0.6.12...7b03019
 [0.6.12]: https://github.com/unfault/cli/compare/v0.6.11...v0.6.12
 [0.6.11]: https://github.com/unfault/cli/compare/v0.6.10...v0.6.11
 [0.6.10]: https://github.com/unfault/cli/compare/v0.6.9...v0.6.10

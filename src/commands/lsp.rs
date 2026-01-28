@@ -74,9 +74,9 @@ use crate::session::{
 
 // Import patch types from unfault-core for parsing patch_json
 use unfault_core::IntermediateRepresentation;
+use unfault_core::SourceSemantics;
 use unfault_core::graph::GraphNode;
 use unfault_core::semantics::common::CommonSemantics;
-use unfault_core::SourceSemantics;
 use unfault_core::types::{FilePatch, PatchRange};
 
 /// Arguments for the LSP command
@@ -3641,11 +3641,12 @@ impl UnfaultLsp {
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("Invalid file URI"))?;
 
         let workspace_root = { self.workspace_root.read().await.clone() };
-        let project_root = find_project_root(&file_path, workspace_root.as_ref()).unwrap_or_else(|| {
-            workspace_root
-                .clone()
-                .unwrap_or_else(|| file_path.parent().unwrap_or(&file_path).to_path_buf())
-        });
+        let project_root =
+            find_project_root(&file_path, workspace_root.as_ref()).unwrap_or_else(|| {
+                workspace_root
+                    .clone()
+                    .unwrap_or_else(|| file_path.parent().unwrap_or(&file_path).to_path_buf())
+            });
 
         let relative_path = file_path
             .strip_prefix(&project_root)
