@@ -3676,7 +3676,7 @@ impl UnfaultLsp {
         content_overrides.insert(file_path.clone(), source.clone());
         let ir = match build_ir_cached(
             &project_root,
-            Some(&[file_path.clone()]),
+            Some(std::slice::from_ref(&file_path)),
             self.verbose,
             Some(&content_overrides),
         ) {
