@@ -4,7 +4,7 @@
 //! that is shared across all API operations.
 
 use reqwest::Client;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{ACCEPT, ACCEPT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -162,6 +162,11 @@ impl ApiClient {
         // Accept header for JSON responses
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
+        // Prefer uncompressed responses.
+        // Some proxy/tunnel setups have been observed to send incorrect Content-Encoding,
+        // which triggers reqwest "error decoding response body".
+        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+
         // Content-Type header for JSON request bodies
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -176,6 +181,11 @@ impl ApiClient {
         }
 
         let client = Client::builder()
+            // Disable automatic decompression to avoid failing on mismatched
+            // Content-Encoding headers from intermediaries.
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
             .default_headers(headers)
             .build()
             .unwrap_or_else(|_| Client::new());
