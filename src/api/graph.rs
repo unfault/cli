@@ -19,12 +19,21 @@
 
 use crate::api::client::{ApiClient, ApiError};
 use log::debug;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tower_lsp::lsp_types::Range;
 
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+/// Deserialize a u32 that may be null in the JSON, treating null as 0.
+fn deserialize_null_as_zero<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<u32> = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or(0))
+}
 
 /// Helper for serde skip_serializing_if - returns true if value is false
 fn is_false(v: &bool) -> bool {
@@ -167,11 +176,11 @@ pub struct IrFinding {
     pub dimension: String,
     /// File path where the issue was found
     pub file_path: String,
-    /// Line number (1-indexed) - optional for backwards compatibility
-    #[serde(default)]
+    /// Line number (1-indexed) - optional, API may return null
+    #[serde(default, deserialize_with = "deserialize_null_as_zero")]
     pub line: u32,
-    /// Column number (1-indexed)
-    #[serde(default)]
+    /// Column number (1-indexed) - optional, API may return null
+    #[serde(default, deserialize_with = "deserialize_null_as_zero")]
     pub column: u32,
     /// End line (1-indexed)
     #[serde(default)]
@@ -1421,9 +1430,24 @@ impl ApiClient {
             return Err(to_http_error(status, error_text));
         }
 
+        // Read the response body as text first so we can log it on parse failure
+        let response_text = response.text().await.map_err(|e| ApiError::ParseError {
+            message: format!("Failed to read IR analysis response body: {}", e),
+        })?;
+
         let analyze_response: IrAnalyzeResponse =
-            response.json().await.map_err(|e| ApiError::ParseError {
-                message: format!("Failed to parse IR analysis response: {}", e),
+            serde_json::from_str(&response_text).map_err(|e| {
+                // Log the first 500 chars of response for debugging
+                let preview = if response_text.len() > 500 {
+                    format!("{}...", &response_text[..500])
+                } else {
+                    response_text.clone()
+                };
+                debug!("[API] Failed to parse response: {}", e);
+                debug!("[API] Response body preview: {}", preview);
+                ApiError::ParseError {
+                    message: format!("Failed to parse IR analysis response: {}", e),
+                }
             })?;
 
         debug!("[API] === Received IR Analysis Response ===");
