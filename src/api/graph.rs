@@ -1401,6 +1401,8 @@ impl ApiClient {
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
+            // Avoid buggy intermediaries / compression decode errors.
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .json(&request)
             .send()
             .await
@@ -1520,6 +1522,7 @@ impl ApiClient {
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .json(&request)
             .send()
             .await
@@ -1605,6 +1608,7 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/x-msgpack")
             .header("Content-Encoding", "zstd")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .body(chunk_data)
             .send()
             .await
@@ -1640,6 +1644,7 @@ impl ApiClient {
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .header("Content-Length", 0)
             .body(Vec::<u8>::new())
             .send()

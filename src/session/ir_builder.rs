@@ -35,16 +35,17 @@ use colored::Colorize;
 use log::debug;
 use rayon::prelude::*;
 
-use unfault_core::IntermediateRepresentation;
 use unfault_core::graph::build_code_graph;
 use unfault_core::parse::ast::FileId;
 use unfault_core::parse::{go, python, rust as rust_parse, typescript};
-use unfault_core::semantics::SourceSemantics;
 use unfault_core::semantics::go::model::GoFileSemantics;
 use unfault_core::semantics::python::model::PyFileSemantics;
+use unfault_core::semantics::rust::build_rust_semantics;
 use unfault_core::semantics::rust::model::RustFileSemantics;
 use unfault_core::semantics::typescript::model::TsFileSemantics;
+use unfault_core::semantics::SourceSemantics;
 use unfault_core::types::context::{Language, SourceFile};
+use unfault_core::IntermediateRepresentation;
 
 use super::semantics_cache::{CacheStats, SemanticsCache};
 
@@ -191,7 +192,18 @@ pub fn build_ir(
                             return None;
                         }
                     };
-                    let sem = RustFileSemantics::from_parsed(&parsed);
+                    let sem = match build_rust_semantics(&parsed) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if verbose {
+                                eprintln!(
+                                    "Warning: Semantics analysis failed for {}: {}",
+                                    relative_path, e
+                                );
+                            }
+                            RustFileSemantics::from_parsed(&parsed)
+                        }
+                    };
                     SourceSemantics::Rust(sem)
                 }
                 Language::Typescript => {
@@ -434,7 +446,18 @@ pub fn build_ir_cached(
                             return None;
                         }
                     };
-                    let sem = RustFileSemantics::from_parsed(&parsed);
+                    let sem = match build_rust_semantics(&parsed) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if verbose {
+                                eprintln!(
+                                    "Warning: Semantics analysis failed for {}: {}",
+                                    relative_path, e
+                                );
+                            }
+                            RustFileSemantics::from_parsed(&parsed)
+                        }
+                    };
                     SourceSemantics::Rust(sem)
                 }
                 Language::Typescript => {
@@ -760,6 +783,46 @@ def fetch_data():
             stats_before.external_module_count,
             stats_after.external_module_count
         );
+    }
+
+    #[test]
+    fn test_build_ir_rust_axum_routes() {
+        let temp_dir = TempDir::new().unwrap();
+        let rs_file = temp_dir.path().join("main.rs");
+        fs::write(
+            &rs_file,
+            r#"
+use axum::{routing::get, Router};
+
+async fn index() -> &'static str {
+    "ok"
+}
+
+fn main() {
+    let _app = Router::new().route("/", get(index));
+}
+"#,
+        )
+        .unwrap();
+
+        let ir = build_ir(temp_dir.path(), None, false).unwrap();
+        assert_eq!(ir.file_count(), 1);
+
+        // Ensure Rust semantics was actually built.
+        let rust_sem = ir
+            .semantics
+            .iter()
+            .find_map(|s| match s {
+                SourceSemantics::Rust(rs) => Some(rs),
+                _ => None,
+            })
+            .expect("expected Rust semantics");
+        assert!(!rust_sem.functions.is_empty());
+        let fw = rust_sem
+            .rust_framework
+            .as_ref()
+            .expect("expected Rust framework summary");
+        assert!(fw.routes.iter().any(|r| r.path == "/" && r.method == "GET"));
     }
 
     #[test]

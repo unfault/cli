@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Rust semantics: use the full Rust semantics builder so Axum routes are detected (instead of returning an empty Rust semantics stub).
+- API client: disable response compression (`Accept-Encoding: identity`) for IR analysis endpoints to avoid decode errors through some proxies/tunnels.
+
 ## [0.6.19] - 2026-01-29
 
 ### Changed
