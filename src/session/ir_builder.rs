@@ -35,17 +35,17 @@ use colored::Colorize;
 use log::debug;
 use rayon::prelude::*;
 
+use unfault_core::IntermediateRepresentation;
 use unfault_core::graph::build_code_graph;
 use unfault_core::parse::ast::FileId;
 use unfault_core::parse::{go, python, rust as rust_parse, typescript};
+use unfault_core::semantics::SourceSemantics;
 use unfault_core::semantics::go::model::GoFileSemantics;
 use unfault_core::semantics::python::model::PyFileSemantics;
 use unfault_core::semantics::rust::build_rust_semantics;
 use unfault_core::semantics::rust::model::RustFileSemantics;
 use unfault_core::semantics::typescript::model::TsFileSemantics;
-use unfault_core::semantics::SourceSemantics;
 use unfault_core::types::context::{Language, SourceFile};
-use unfault_core::IntermediateRepresentation;
 
 use super::semantics_cache::{CacheStats, SemanticsCache};
 
