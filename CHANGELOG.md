@@ -9,10 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.20] - 2026-01-29
 
-## Changed
-
-- Bump unfault-core to 0.1.14
-
 ### Fixed
 
 - Rust semantics: use the full Rust semantics builder so Axum routes are detected (instead of returning an empty Rust semantics stub).
@@ -21,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Bumped dependency on `unfault-core` to 0.1.13 (uses local path for development).
+- Bumped dependency on `unfault-core` to 0.1.14 (uses local path for development).
 
 ## [0.6.19] - 2026-01-29
 
