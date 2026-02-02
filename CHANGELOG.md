@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `unfault addon fault plan` output is now more agent-friendly (ASCII, stable `key: value` hints, and a pointer to `--json`).
+
 ## [0.6.22] - 2026-02-02
 
 ### Added

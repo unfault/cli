@@ -3,7 +3,7 @@
 //! This command intentionally supports a small, curated subset of fault scenarios.
 //! It generates a concrete `fault run ...` command so users can copy/paste it.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 
 #[derive(Debug, Clone)]
 pub struct FaultPlanArgs {
@@ -406,9 +406,15 @@ pub fn execute_plan(args: FaultPlanArgs) -> Result<i32> {
             println!("{}", n);
         }
     }
-    println!("Traffic: curl -i http://127.0.0.1:{}/", args.proxy_port);
-    println!("Logs: {} > fault.log 2>&1", shell);
-    println!("Tip: fault also supports --log-file fault.log (global flag)");
+
+    // Keep the output ASCII-only and easy to parse (humans + agents).
+    // The first line remains the runnable `fault run ...` command.
+    println!("");
+    println!("fault_run: {}", shell);
+    println!("traffic: curl -i http://127.0.0.1:{}/", args.proxy_port);
+    println!("logs: {} > fault.log 2>&1", shell);
+    println!("tip: fault also supports --log-file fault.log (global flag)");
+    println!("machine: re-run with --json for structured output");
 
     Ok(EXIT_SUCCESS)
 }
