@@ -809,13 +809,29 @@ fn output_summary_json(
         "nodes": {
             "functions": graph.stats.function_count,
             "classes": graph.stats.class_count,
-            "routes": graph.stats.route_count
+            "routes": graph.stats.route_count,
+            "remote_servers": graph.stats.remote_server_count
         },
         "edges": {
             "calls": graph.stats.calls_edge_count,
+            "http_calls": graph.stats.http_call_edge_count,
             "imports": graph.stats.import_edge_count
         },
-        "entry_points": entry_points
+        "entry_points": entry_points,
+        "egress": graph
+            .http_calls
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "method": e.method,
+                    "remote": e.remote,
+                    "caller": e.caller,
+                    "file": e.caller_file,
+                    "library": e.library,
+                    "url": e.url
+                })
+            })
+            .collect::<Vec<_>>()
     });
 
     // Add SLOs from API if present
@@ -865,18 +881,20 @@ fn output_summary_formatted(
 ) {
     // Nodes summary line
     println!(
-        "{} {} functions, {} classes, {} routes",
+        "{} {} functions, {} classes, {} routes, {} remote servers",
         "Nodes:".bold(),
         graph.stats.function_count.to_string().cyan(),
         graph.stats.class_count.to_string().cyan(),
-        graph.stats.route_count.to_string().cyan()
+        graph.stats.route_count.to_string().cyan(),
+        graph.stats.remote_server_count.to_string().cyan()
     );
 
     // Edges summary line
     println!(
-        "{} {} calls, {} imports",
+        "{} {} calls, {} http calls, {} imports",
         "Edges:".bold(),
         graph.stats.calls_edge_count.to_string().green(),
+        graph.stats.http_call_edge_count.to_string().green(),
         graph.stats.import_edge_count.to_string().green()
     );
     println!();
@@ -905,13 +923,34 @@ fn output_summary_formatted(
                 _ => format!("{:6}", method).normal(),
             };
 
-            println!(
-                "  {} {} {} {}",
-                method_colored,
-                path.bright_white(),
-                "→".dimmed(),
-                handler.dimmed()
-            );
+            // First line: route signature
+            println!("  {} {}", method_colored, path.bright_white());
+
+            // Second line: handler
+            println!("           {} {}", "└─".dimmed(), handler.dimmed());
+
+            // Optional: egress calls from this handler
+            let egress: Vec<_> = graph.http_calls.iter().filter(|e| e.caller == *handler).collect();
+            for (idx, e) in egress.iter().enumerate() {
+                let method = e.method.as_str();
+                let m = match method {
+                    "GET" => format!("{:6}", method).green(),
+                    "POST" => format!("{:6}", method).yellow(),
+                    "PUT" => format!("{:6}", method).blue(),
+                    "DELETE" => format!("{:6}", method).red(),
+                    "PATCH" => format!("{:6}", method).cyan(),
+                    _ => format!("{:6}", method).normal(),
+                };
+
+                let connector = if idx + 1 == egress.len() { "└─" } else { "├─" };
+                println!(
+                    "               {} {} {} {}",
+                    connector.dimmed(),
+                    "Egress:".dimmed(),
+                    m,
+                    e.remote.bright_white()
+                );
+            }
         }
 
         // Show "and N more" if there are more routes
@@ -920,6 +959,39 @@ fn output_summary_formatted(
                 "   {} ... and {} more",
                 "".dimmed(),
                 (routes.len() - 3).to_string().cyan()
+            );
+        }
+        println!();
+    }
+
+    // Egress (outbound HTTP calls) - show globally only when we have no entry points.
+    if routes.is_empty() && !graph.http_calls.is_empty() {
+        println!("{}", "Egress:".bold());
+        for e in graph.http_calls.iter().take(3) {
+            let method = e.method.as_str();
+            let method_colored = match method {
+                "GET" => format!("{:6}", method).green(),
+                "POST" => format!("{:6}", method).yellow(),
+                "PUT" => format!("{:6}", method).blue(),
+                "DELETE" => format!("{:6}", method).red(),
+                "PATCH" => format!("{:6}", method).cyan(),
+                _ => format!("{:6}", method).normal(),
+            };
+
+            println!(
+                "  {} {} {} {}",
+                method_colored,
+                e.remote.bright_white(),
+                "←".dimmed(),
+                e.caller.dimmed()
+            );
+        }
+
+        if graph.http_calls.len() > 3 {
+            println!(
+                "   {} ... and {} more",
+                "".dimmed(),
+                (graph.http_calls.len() - 3).to_string().cyan()
             );
         }
         println!();

@@ -9,14 +9,16 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use unfault_core::graph::{CodeGraph, GraphEdgeKind, GraphNode, build_code_graph};
+use unfault_core::graph::{
+    build_code_graph, CodeGraph, GraphEdgeKind, GraphNode, RemoteServerKind,
+};
 use unfault_core::parse::ast::FileId;
 use unfault_core::parse::{go, python, rust as rust_parse, typescript};
-use unfault_core::semantics::SourceSemantics;
 use unfault_core::semantics::go::model::GoFileSemantics;
 use unfault_core::semantics::python::model::PyFileSemantics;
 use unfault_core::semantics::rust::{build_rust_semantics, model::RustFileSemantics};
 use unfault_core::semantics::typescript::model::TsFileSemantics;
+use unfault_core::semantics::SourceSemantics;
 use unfault_core::types::context::{Language, SourceFile};
 
 /// A serializable representation of the code graph for sending to the API.
@@ -40,6 +42,10 @@ pub struct SerializableGraph {
     pub dependency_injections: Vec<DependencyInjectionEdge>,
     /// External library usage
     pub library_usage: Vec<LibraryUsage>,
+    /// Remote server nodes referenced by outbound HTTP calls
+    pub remote_servers: Vec<RemoteServerNode>,
+    /// Outbound HTTP call edges (function -> remote server)
+    pub http_calls: Vec<HttpCallEdge>,
     /// Framework references (e.g., FastAPI lifespan handlers)
     pub framework_references: Vec<FrameworkReferenceEdge>,
     /// SLO nodes from observability providers
@@ -164,6 +170,26 @@ pub struct GraphStats {
     pub route_count: usize,
     pub import_edge_count: usize,
     pub calls_edge_count: usize,
+    pub remote_server_count: usize,
+    pub http_call_edge_count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RemoteServerNode {
+    pub kind: String,
+    pub id: String,
+    pub display: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HttpCallEdge {
+    pub caller: String,
+    pub caller_file: String,
+    pub remote: String,
+    pub method: String,
+    pub library: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// Build a code graph from files in a directory.
@@ -328,6 +354,8 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
     let mut calls = Vec::new();
     let mut dependency_injections = Vec::new();
     let mut library_usage = Vec::new();
+    let mut remote_servers = Vec::new();
+    let mut http_calls = Vec::new();
     let mut framework_references = Vec::new();
     let mut slos = Vec::new();
 
@@ -418,6 +446,23 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
                         monitored_routes: Vec::new(), // Will be populated from MonitoredBy edges
                     },
                 );
+            }
+            GraphNode::RemoteServer { kind, id } => {
+                let kind_str = match kind {
+                    RemoteServerKind::Host => "host",
+                    RemoteServerKind::EnvVar => "env_var",
+                    RemoteServerKind::Expr => "expr",
+                };
+                let display = match kind {
+                    RemoteServerKind::Host => id.clone(),
+                    RemoteServerKind::EnvVar => format!("env:{}", id),
+                    RemoteServerKind::Expr => format!("expr:{}", id),
+                };
+                remote_servers.push(RemoteServerNode {
+                    kind: kind_str.to_string(),
+                    id: id.clone(),
+                    display,
+                });
             }
             _ => {}
         }
@@ -541,6 +586,44 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
                     });
                 }
             }
+            GraphEdgeKind::HttpCall {
+                method,
+                library,
+                url,
+            } => {
+                let source_node = &graph.graph[source_idx];
+                let target_node = &graph.graph[target_idx];
+
+                let (caller_name, caller_file) = match source_node {
+                    GraphNode::Function {
+                        qualified_name,
+                        file_id,
+                        ..
+                    } => {
+                        let file_path = file_id_to_path.get(file_id).cloned().unwrap_or_default();
+                        (qualified_name.clone(), file_path)
+                    }
+                    _ => continue,
+                };
+
+                let remote = match target_node {
+                    GraphNode::RemoteServer { kind, id } => match kind {
+                        RemoteServerKind::Host => id.clone(),
+                        RemoteServerKind::EnvVar => format!("env:{}", id),
+                        RemoteServerKind::Expr => format!("expr:{}", id),
+                    },
+                    _ => continue,
+                };
+
+                http_calls.push(HttpCallEdge {
+                    caller: caller_name,
+                    caller_file,
+                    remote,
+                    method: method.clone(),
+                    library: library.clone(),
+                    url: url.clone(),
+                });
+            }
             GraphEdgeKind::FastApiAppLifespan => {
                 let source_node = &graph.graph[source_idx];
                 let target_node = &graph.graph[target_idx];
@@ -608,6 +691,8 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
         calls,
         dependency_injections,
         library_usage,
+        remote_servers,
+        http_calls,
         framework_references,
         slos,
         stats: GraphStats {
@@ -617,6 +702,8 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
             route_count,
             import_edge_count: graph_stats.import_edge_count,
             calls_edge_count: graph_stats.calls_edge_count,
+            remote_server_count: graph_stats.remote_server_count,
+            http_call_edge_count: graph_stats.http_call_edge_count,
         },
     }
 }
@@ -634,6 +721,7 @@ fn get_file_path(
         | GraphNode::FastApiRoute { file_id, .. }
         | GraphNode::FastApiMiddleware { file_id, .. } => file_id_to_path.get(file_id).cloned(),
         GraphNode::ExternalModule { .. } => None,
+        GraphNode::RemoteServer { .. } => None,
         GraphNode::Slo { .. } => None, // SLO nodes don't have a file association
     }
 }

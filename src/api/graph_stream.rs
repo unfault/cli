@@ -172,6 +172,10 @@ fn node_id_for_node(node: &GraphNode, ctx: &mut IdContext) -> String {
             // External modules use simple format - not cross-workspace linkable
             format!("ext:{name}")
         }
+        GraphNode::RemoteServer { kind, id } => {
+            // Remote servers are best-effort identifiers.
+            format!("remote:{:?}:{}", kind, id)
+        }
         GraphNode::Function {
             file_id,
             qualified_name,
@@ -312,6 +316,34 @@ pub fn encode_nodes_chunk(
                     http_method: None,
                     http_path: None,
                     category: Some(format!("{:?}", category)),
+                    var_name: None,
+                    start_line: None,
+                    end_line: None,
+                    slo_provider: None,
+                    slo_path_pattern: None,
+                    slo_target_percent: None,
+                    slo_current_percent: None,
+                    slo_error_budget_remaining: None,
+                    slo_timeframe: None,
+                    slo_dashboard_url: None,
+                },
+            )?,
+            GraphNode::RemoteServer { kind, id } => push_frame(
+                &mut raw,
+                &NodeRecord {
+                    record_type: "node",
+                    node_id,
+                    node_type: "remote_server",
+                    path: None,
+                    language: None,
+                    name: Some(id),
+                    qualified_name: None,
+                    file_path: None,
+                    is_async: None,
+                    is_handler: None,
+                    http_method: None,
+                    http_path: None,
+                    category: Some(format!("{:?}", kind)),
                     var_name: None,
                     start_line: None,
                     end_line: None,
@@ -601,6 +633,36 @@ pub fn encode_graph_stream(graph: &CodeGraph, mut ctx: IdContext) -> anyhow::Res
                     },
                 )?;
             }
+            GraphNode::RemoteServer { kind, id } => {
+                push_frame(
+                    &mut raw,
+                    &NodeRecord {
+                        record_type: "node",
+                        node_id,
+                        node_type: "remote_server",
+                        path: None,
+                        language: None,
+                        name: Some(id),
+                        qualified_name: None,
+                        file_path: None,
+                        is_async: None,
+                        is_handler: None,
+                        http_method: None,
+                        http_path: None,
+                        category: Some(format!("{:?}", kind)),
+                        var_name: None,
+                        start_line: None,
+                        end_line: None,
+                        slo_provider: None,
+                        slo_path_pattern: None,
+                        slo_target_percent: None,
+                        slo_current_percent: None,
+                        slo_error_budget_remaining: None,
+                        slo_timeframe: None,
+                        slo_dashboard_url: None,
+                    },
+                )?;
+            }
             GraphNode::Function {
                 file_id,
                 name,
@@ -788,6 +850,7 @@ pub fn encode_graph_stream(graph: &CodeGraph, mut ctx: IdContext) -> anyhow::Res
             GraphEdgeKind::Calls => ("calls", None),
             GraphEdgeKind::Inherits => ("inherits", None),
             GraphEdgeKind::UsesLibrary => ("uses_library", None),
+            GraphEdgeKind::HttpCall { .. } => ("http_call", None),
             GraphEdgeKind::FastApiAppOwnsRoute => ("fastapi_app_owns_route", None),
             GraphEdgeKind::FastApiAppHasMiddleware => ("fastapi_app_has_middleware", None),
             GraphEdgeKind::DependencyInjection => ("dependency_injection", None),
@@ -867,6 +930,7 @@ pub fn encode_edges_chunk(
             GraphEdgeKind::Calls => ("calls", None),
             GraphEdgeKind::Inherits => ("inherits", None),
             GraphEdgeKind::UsesLibrary => ("uses_library", None),
+            GraphEdgeKind::HttpCall { .. } => ("http_call", None),
             GraphEdgeKind::FastApiAppOwnsRoute => ("fastapi_app_owns_route", None),
             GraphEdgeKind::FastApiAppHasMiddleware => ("fastapi_app_has_middleware", None),
             GraphEdgeKind::DependencyInjection => ("dependency_injection", None),

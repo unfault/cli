@@ -138,6 +138,37 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
         })
         .collect();
 
+    // Convert remote servers
+    let remote_servers: Vec<HashMap<String, serde_json::Value>> = graph
+        .remote_servers
+        .iter()
+        .map(|r| {
+            let mut map = HashMap::new();
+            map.insert("kind".to_string(), serde_json::json!(r.kind));
+            map.insert("id".to_string(), serde_json::json!(r.id));
+            map.insert("display".to_string(), serde_json::json!(r.display));
+            map
+        })
+        .collect();
+
+    // Convert outbound HTTP calls
+    let http_calls: Vec<HashMap<String, serde_json::Value>> = graph
+        .http_calls
+        .iter()
+        .map(|e| {
+            let mut map = HashMap::new();
+            map.insert("caller".to_string(), serde_json::json!(e.caller));
+            map.insert("caller_file".to_string(), serde_json::json!(e.caller_file));
+            map.insert("remote".to_string(), serde_json::json!(e.remote));
+            map.insert("method".to_string(), serde_json::json!(e.method));
+            map.insert("library".to_string(), serde_json::json!(e.library));
+            if let Some(ref url) = e.url {
+                map.insert("url".to_string(), serde_json::json!(url));
+            }
+            map
+        })
+        .collect();
+
     // Convert SLOs
     let slos: Vec<HashMap<String, serde_json::Value>> = graph
         .slos
@@ -194,6 +225,14 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
         "calls_edge_count".to_string(),
         graph.stats.calls_edge_count as i32,
     );
+    stats.insert(
+        "remote_server_count".to_string(),
+        graph.stats.remote_server_count as i32,
+    );
+    stats.insert(
+        "http_call_edge_count".to_string(),
+        graph.stats.http_call_edge_count as i32,
+    );
 
     ClientGraphData {
         files,
@@ -203,6 +242,8 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
         imports,
         contains,
         library_usage,
+        remote_servers,
+        http_calls,
         slos,
         stats,
     }

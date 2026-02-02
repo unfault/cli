@@ -38,6 +38,12 @@ pub struct ClientGraphData {
     /// External library usage.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub library_usage: Vec<HashMap<String, serde_json::Value>>,
+    /// Remote servers referenced by outbound HTTP calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_servers: Vec<HashMap<String, serde_json::Value>>,
+    /// Outbound HTTP call edges (function -> remote server).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub http_calls: Vec<HashMap<String, serde_json::Value>>,
     /// SLO nodes from observability providers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slos: Vec<HashMap<String, serde_json::Value>>,
