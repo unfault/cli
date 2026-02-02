@@ -1073,6 +1073,10 @@ async fn execute_client_parse(
         None
     };
 
+    // Precompute operational healthiness routes for LLM output before graph ingest (graph is moved).
+    let (operational_healthiness_routes_total, operational_healthiness_routes) =
+        extract_operational_healthiness_routes(&graph);
+
     // Step 3: Ingest full graph to API (streaming, compressed)
     pb.set_message("Uploading code graph... 0%");
 
@@ -1305,6 +1309,7 @@ async fn execute_client_parse(
                     message: f.description.clone(),
                     patch_json: None,
                     fix_preview: f.fix_preview.clone(),
+                    applicability_json: f.applicability_json.clone(),
                     patch: f.diff.clone(),
                     byte_start: None,
                     byte_end: None,
@@ -1376,6 +1381,8 @@ async fn execute_client_parse(
             profile: args.profile.clone(),
             slo_stats: Some(slo_stats.clone()),
             slo_definitions: slo_definitions_llm.clone(),
+            operational_healthiness_routes_total,
+            operational_healthiness_routes: operational_healthiness_routes.clone(),
         };
 
         display_ir_findings(args, &findings, applied_patches, &display_context);
@@ -1451,6 +1458,8 @@ async fn execute_client_parse(
             profile: args.profile.clone(),
             slo_stats: Some(slo_stats.clone()),
             slo_definitions: None,
+            operational_healthiness_routes_total,
+            operational_healthiness_routes,
         };
 
         let has_any = if let Some(insights) = &insights_resp {
@@ -1551,6 +1560,165 @@ struct ReviewOutputContext {
     profile: Option<String>,
     slo_stats: Option<SloDiscoveryStats>,
     slo_definitions: Option<Vec<LlmSloDefinition>>,
+    operational_healthiness_routes_total: usize,
+    operational_healthiness_routes: Vec<LlmDiscoveredRoute>,
+}
+
+const LLM_OPERATIONAL_HEALTHINESS_ROUTE_LIMIT: usize = 50;
+
+fn extract_operational_healthiness_routes(
+    graph: &unfault_core::graph::CodeGraph,
+) -> (usize, Vec<LlmDiscoveredRoute>) {
+    use std::collections::HashSet;
+    use petgraph::visit::EdgeRef;
+    use unfault_core::parse::ast::FileId;
+    use unfault_core::graph::ModuleCategory;
+
+    // Build FileId -> path mapping
+    let mut file_paths: HashMap<FileId, String> = HashMap::new();
+    for idx in graph.file_nodes.values() {
+        if let Some(unfault_core::graph::GraphNode::File { file_id, path, .. }) =
+            graph.graph.node_weight(*idx)
+        {
+            file_paths.insert(*file_id, path.clone());
+        }
+    }
+
+    fn is_outbound_category(category: &ModuleCategory) -> bool {
+        matches!(category, ModuleCategory::HttpClient | ModuleCategory::Database)
+    }
+
+    // Helper: detect outbound calls for a node and its file (best-effort)
+    let outbound_calls = |func_idx: petgraph::graph::NodeIndex,
+                          file_id: FileId|
+     -> LlmOutboundCalls {
+        let mut evidence: Vec<LlmOutboundEvidence> = Vec::new();
+        let mut file_hits = 0usize;
+        let mut func_hits = 0usize;
+
+        if let Some(file_idx) = graph.file_nodes.get(&file_id) {
+            for edge in graph.graph.edges(*file_idx) {
+                if !matches!(edge.weight(), unfault_core::graph::GraphEdgeKind::UsesLibrary) {
+                    continue;
+                }
+                if let Some(unfault_core::graph::GraphNode::ExternalModule { name, category }) =
+                    graph.graph.node_weight(edge.target())
+                {
+                    if is_outbound_category(category) {
+                        file_hits += 1;
+                        evidence.push(LlmOutboundEvidence {
+                            kind: "uses_library".to_string(),
+                            source: "file_import".to_string(),
+                            category: format!("{:?}", category),
+                            name: name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        for edge in graph.graph.edges(func_idx) {
+            if !matches!(edge.weight(), unfault_core::graph::GraphEdgeKind::UsesLibrary) {
+                continue;
+            }
+            if let Some(unfault_core::graph::GraphNode::ExternalModule { name, category }) =
+                graph.graph.node_weight(edge.target())
+            {
+                if is_outbound_category(category) {
+                    func_hits += 1;
+                    evidence.push(LlmOutboundEvidence {
+                        kind: "uses_library".to_string(),
+                        source: "function_usage".to_string(),
+                        category: format!("{:?}", category),
+                        name: name.clone(),
+                    });
+                }
+            }
+        }
+
+        evidence.sort_by(|a, b| {
+            a.source
+                .cmp(&b.source)
+                .then_with(|| a.category.cmp(&b.category))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        evidence.dedup_by(|a, b| a.source == b.source && a.category == b.category && a.name == b.name);
+
+        let has = file_hits > 0 || func_hits > 0;
+        let confidence = if func_hits > 0 {
+            "high"
+        } else if file_hits > 0 {
+            "medium"
+        } else {
+            "low"
+        };
+
+        LlmOutboundCalls {
+            has,
+            confidence: confidence.to_string(),
+            evidence,
+        }
+    };
+
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+    let mut routes: Vec<LlmDiscoveredRoute> = Vec::new();
+
+    for idx in graph.function_nodes.values() {
+        let Some(node) = graph.graph.node_weight(*idx) else {
+            continue;
+        };
+
+        let (method, path, file_id, handler, start_line, end_line) = match node {
+            unfault_core::graph::GraphNode::Function {
+                file_id,
+                http_method: Some(method),
+                http_path: Some(path),
+                qualified_name,
+                start_line,
+                end_line,
+                ..
+            } => (
+                method.clone(),
+                path.clone(),
+                *file_id,
+                qualified_name.clone(),
+                *start_line,
+                *end_line,
+            ),
+            _ => continue,
+        };
+
+        let file = file_paths.get(&file_id).cloned().unwrap_or_default();
+        let key = (method.clone(), path.clone(), file.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+
+        routes.push(LlmDiscoveredRoute {
+            path,
+            method,
+            file,
+            handler,
+            location: Some(LlmCodeLocation {
+                start_line,
+                end_line,
+            })
+            .filter(|loc| loc.start_line.is_some() || loc.end_line.is_some()),
+            outbound_calls: outbound_calls(*idx, file_id),
+            slo_ids: vec![],
+        });
+    }
+
+    routes.sort_by(|a, b| {
+        a.method
+            .cmp(&b.method)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.file.cmp(&b.file))
+    });
+
+    let total = routes.len();
+    routes.truncate(LLM_OPERATIONAL_HEALTHINESS_ROUTE_LIMIT);
+    (total, routes)
 }
 
 /// Severity breakdown for the summary line.
@@ -2968,12 +3136,133 @@ struct LlmTarget {
     end_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     end_col: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    byte_start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    byte_end: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
 }
 
 /// Candidate fix for LLM output (advisory, not authoritative)
 #[derive(Debug, Clone, serde::Serialize)]
 struct LlmCandidateFix {
     fix_preview: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmOperationalHealthinessSummary {
+    routes_total: usize,
+    routes_returned: usize,
+    templates_returned: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmOperationalHealthiness {
+    schema_version: String,
+    description: String,
+    explanation: String,
+    schema: serde_json::Value,
+    generation_methods: Vec<LlmScenarioGenerationMethod>,
+    quickstart: Vec<String>,
+    summary: LlmOperationalHealthinessSummary,
+    routes: Vec<LlmDiscoveredRoute>,
+    templates: Vec<LlmFaultTemplate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slos: Option<Vec<LlmSloDefinition>>,
+    safety_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmDiscoveredRoute {
+    path: String,
+    method: String,
+    file: String,
+    handler: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<LlmCodeLocation>,
+    outbound_calls: LlmOutboundCalls,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    slo_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmCodeLocation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmOutboundCalls {
+    has: bool,
+    confidence: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    evidence: Vec<LlmOutboundEvidence>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmOutboundEvidence {
+    kind: String,
+    source: String,
+    category: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmScenarioGenerationMethod {
+    name: String,
+    description: String,
+    command_template: String,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    when_to_use: String,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmFaultTemplate {
+    name: String,
+    description: String,
+    scenario: LlmScenarioTemplate,
+    run: LlmRunTemplate,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmScenarioTemplate {
+    command_template: String,
+    file_suggestion: String,
+    content_generation: LlmScenarioContentGeneration,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmScenarioContentGeneration {
+    kind: String,
+    inputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmRunTemplate {
+    command_template: String,
+    inputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LlmFindingDecisionSupport {
+    /// How immediately actionable the recommendation is.
+    /// Values: high, medium, low.
+    actionability: String,
+    /// What kind of decision is required to act.
+    /// Values: code, config, api_contract, architecture.
+    decision_level: String,
+    /// True when applying the recommendation likely requires a product/API contract choice.
+    requires_product_decision: bool,
+    /// Confidence in the recommendation.
+    /// Values: high, medium, low.
+    confidence: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    prerequisites: Vec<String>,
 }
 
 /// A single merged finding for LLM output
@@ -2985,6 +3274,9 @@ struct LlmFinding {
     dimension: String,
     title: String,
     why: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    applicability: Option<serde_json::Value>,
+    decision: LlmFindingDecisionSupport,
     blast_radius: String,
     files_allowed_to_change: Vec<String>,
     targets: Vec<LlmTarget>,
@@ -2993,16 +3285,263 @@ struct LlmFinding {
     merged_count: usize,
 }
 
+fn infer_llm_finding_decision_support(
+    rule_id: &str,
+    title: &str,
+    why: &str,
+    applicability: Option<&serde_json::Value>,
+) -> LlmFindingDecisionSupport {
+    if let Some(app) = applicability {
+        if let (Some(investment_level), Some(min_stage), Some(decision_level)) = (
+            app.get("investment_level").and_then(|v| v.as_str()),
+            app.get("min_stage").and_then(|v| v.as_str()),
+            app.get("decision_level").and_then(|v| v.as_str()),
+        ) {
+            let actionability = match investment_level {
+                "low" => "high",
+                "medium" => "medium",
+                "high" => "low",
+                _ => "medium",
+            };
+
+            let requires_product_decision = decision_level == "api_contract";
+            let mut prerequisites: Vec<String> = app
+                .get("prerequisites")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            prerequisites.sort();
+            prerequisites.dedup();
+
+            // Heuristic confidence: treat production-only guidance as lower confidence
+            // unless the rule itself is inherently local.
+            let confidence = if min_stage == "production" {
+                "low"
+            } else {
+                "medium"
+            };
+
+            return LlmFindingDecisionSupport {
+                actionability: actionability.to_string(),
+                decision_level: decision_level.to_string(),
+                requires_product_decision,
+                confidence: confidence.to_string(),
+                prerequisites,
+            };
+        }
+    }
+
+    let hay = format!("{} {} {}", rule_id, title, why).to_lowercase();
+
+    // Defaults: treat as code-local and actionable unless we see strong signals otherwise.
+    let mut out = LlmFindingDecisionSupport {
+        actionability: "high".to_string(),
+        decision_level: "code".to_string(),
+        requires_product_decision: false,
+        confidence: "medium".to_string(),
+        prerequisites: vec![],
+    };
+
+    // Contract / product-level suggestions
+    if hay.contains("correlation") || hay.contains("trace") || hay.contains("x-request-id") {
+        out.actionability = "medium".to_string();
+        out.decision_level = "api_contract".to_string();
+        out.requires_product_decision = true;
+        out.confidence = "medium".to_string();
+        out.prerequisites
+            .push("Decide on header names and propagation rules across services".to_string());
+    }
+    if hay.contains("idempot") || hay.contains("idempotency") {
+        out.actionability = "medium".to_string();
+        out.decision_level = "api_contract".to_string();
+        out.requires_product_decision = true;
+        out.confidence = "medium".to_string();
+        out.prerequisites.push(
+            "Define idempotency key contract (scope, TTL, conflict behavior)".to_string(),
+        );
+    }
+
+    // Architecture-level suggestions
+    if hay.contains("circuit breaker") || hay.contains("circuit-breaker") {
+        out.actionability = "low".to_string();
+        out.decision_level = "architecture".to_string();
+        out.requires_product_decision = false;
+        out.confidence = "low".to_string();
+        out.prerequisites
+            .push("Choose a resilience library and failure semantics".to_string());
+    }
+
+    // Highly actionable code-level hazards
+    if hay.contains("unwrap") || hay.contains("panic") {
+        out.actionability = "high".to_string();
+        out.decision_level = "code".to_string();
+        out.requires_product_decision = false;
+        out.confidence = "high".to_string();
+    }
+    if hay.contains("timeout") {
+        out.actionability = "high".to_string();
+        out.decision_level = "code".to_string();
+        out.requires_product_decision = false;
+        out.confidence = "high".to_string();
+    }
+    if hay.contains("graceful shutdown") || hay.contains("shutdown") {
+        out.actionability = "high".to_string();
+        out.decision_level = "config".to_string();
+        out.requires_product_decision = false;
+        out.confidence = "high".to_string();
+    }
+    if hay.contains("ignored result") || hay.contains("unused result") || hay.contains("must use") {
+        out.actionability = "high".to_string();
+        out.decision_level = "code".to_string();
+        out.requires_product_decision = false;
+        out.confidence = "high".to_string();
+    }
+
+    out.prerequisites.sort();
+    out.prerequisites.dedup();
+    out
+}
+
 /// Top-level LLM review output
 #[derive(Debug, Clone, serde::Serialize)]
 struct LlmReviewOutput {
     schema_version: String,
     stop_conditions: Vec<String>,
+    /// High-signal, ordered actions the agent should consider next.
+    ///
+    /// This is a convenience field meant to prevent important sections from being skipped.
+    next_steps: Vec<String>,
     summary: serde_json::Value,
+    operational_healthiness: LlmOperationalHealthiness,
+    /// Alias for `operational_healthiness` with a more action-oriented name.
+    ///
+    /// Keep `operational_healthiness` for backward compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resilience_testing: Option<LlmOperationalHealthiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     slos: Option<Vec<LlmSloDefinition>>,
     apply_order: Vec<String>,
     findings: Vec<LlmFinding>,
+}
+
+fn default_operational_healthiness_templates() -> Vec<LlmFaultTemplate> {
+    let scenario_inputs = vec![
+        "method".to_string(),
+        "route_path".to_string(),
+        "local_port".to_string(),
+        "remote_origin".to_string(),
+    ];
+
+    let run_inputs = vec![
+        "duration".to_string(),
+        "proxy_port".to_string(),
+        "remote_origin".to_string(),
+    ];
+
+    let scenario = LlmScenarioTemplate {
+        command_template: "fault scenario run --scenario <path-to-yaml-file>".to_string(),
+        file_suggestion: "tests/fault/<method>-<sanitized-route>.yaml".to_string(),
+        content_generation: LlmScenarioContentGeneration {
+            kind: "unfault.route_suite_v1".to_string(),
+            inputs: scenario_inputs,
+        },
+    };
+
+    vec![
+        LlmFaultTemplate {
+            name: "latency".to_string(),
+            description: "Inject constant latency (good for timeout handling)".to_string(),
+            scenario: scenario.clone(),
+            run: LlmRunTemplate {
+                command_template: "unfault addon fault plan \"latency 350ms for <duration>\" --proxy-port <proxy_port> --target <remote_origin>".to_string(),
+                inputs: run_inputs.clone(),
+            },
+        },
+        LlmFaultTemplate {
+            name: "jitter".to_string(),
+            description: "Inject jitter (good for tail-latency sensitivity)".to_string(),
+            scenario: scenario.clone(),
+            run: LlmRunTemplate {
+                command_template: "unfault addon fault plan \"jitter 80ms at 8hz for <duration>\" --proxy-port <proxy_port> --target <remote_origin>".to_string(),
+                inputs: run_inputs.clone(),
+            },
+        },
+        LlmFaultTemplate {
+            name: "bandwidth".to_string(),
+            description: "Cap bandwidth (good for large responses and streaming)".to_string(),
+            scenario: scenario.clone(),
+            run: LlmRunTemplate {
+                command_template: "unfault addon fault plan \"bandwidth 512 KBps for <duration>\" --proxy-port <proxy_port> --target <remote_origin>".to_string(),
+                inputs: run_inputs.clone(),
+            },
+        },
+        LlmFaultTemplate {
+            name: "packet-loss".to_string(),
+            description: "Enable packet loss (good for flaky networks)".to_string(),
+            scenario: scenario.clone(),
+            run: LlmRunTemplate {
+                command_template: "unfault addon fault plan \"drop 5% for <duration>\" --proxy-port <proxy_port> --target <remote_origin>".to_string(),
+                inputs: run_inputs.clone(),
+            },
+        },
+        LlmFaultTemplate {
+            name: "blackhole".to_string(),
+            description: "Blackhole traffic (good for timeout and retry behavior)".to_string(),
+            scenario: scenario.clone(),
+            run: LlmRunTemplate {
+                command_template: "unfault addon fault plan \"blackhole for <duration>\" --proxy-port <proxy_port> --target <remote_origin>".to_string(),
+                inputs: run_inputs.clone(),
+            },
+        },
+        LlmFaultTemplate {
+            name: "http-status".to_string(),
+            description: "Return an HTTP error response (good for error handling paths)".to_string(),
+            scenario,
+            run: LlmRunTemplate {
+                command_template: "unfault addon fault plan \"http 500 prob 0.25 for <duration>\" --proxy-port <proxy_port> --target <remote_origin>".to_string(),
+                inputs: run_inputs,
+            },
+        },
+    ]
+}
+
+fn default_operational_healthiness_generation_methods() -> Vec<LlmScenarioGenerationMethod> {
+    vec![
+        LlmScenarioGenerationMethod {
+            name: "openapi".to_string(),
+            description: "Generate fault scenarios from a running service's OpenAPI spec".to_string(),
+            command_template: "fault scenario generate --openapi <openapi_url> --out <dir>".to_string(),
+            inputs: vec!["openapi_url".to_string(), "dir".to_string()],
+            outputs: vec!["scenario_dir".to_string()],
+            when_to_use: "Preferred when the service exposes openapi.json (FastAPI, etc.).".to_string(),
+            notes: vec![
+                "Start the server first.".to_string(),
+                "Common OpenAPI URL is /openapi.json (framework-dependent).".to_string(),
+                "Auth-protected specs may require headers/cookies.".to_string(),
+            ],
+        },
+        LlmScenarioGenerationMethod {
+            name: "unfault_route_suite_v1".to_string(),
+            description: "Generate minimal scenarios from discovered routes without OpenAPI".to_string(),
+            command_template: "unfault addon fault scenarios generate --workspace <workspace_path> --proxy-port <proxy_port> --remote <remote_origin> --write".to_string(),
+            inputs: vec![
+                "proxy_port".to_string(),
+                "remote_origin".to_string(),
+                "workspace_path".to_string(),
+            ],
+            outputs: vec!["scenario_dir".to_string()],
+            when_to_use: "Fallback when OpenAPI is unavailable.".to_string(),
+            notes: vec![
+                "This payload does not embed YAML to keep tokens low.".to_string(),
+                "By default, the command writes files under tests/fault.".to_string(),
+                "Use --json to get a machine-readable list of files.".to_string(),
+            ],
+        },
+    ]
 }
 
 /// Severity ranking for sorting (lower = more severe)
@@ -3029,6 +3568,20 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     } else {
         format!("{}…", &s[..max_len.saturating_sub(1)])
     }
+}
+
+fn read_line_snippet(path: &str, line_1_based: u32) -> Option<String> {
+    if line_1_based == 0 {
+        return None;
+    }
+
+    let text = std::fs::read_to_string(path).ok()?;
+    let line = text.lines().nth((line_1_based - 1) as usize)?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(truncate_str(trimmed, 200))
 }
 
 /// Generate LLM-optimized JSON output for one-shot coding agent workflows.
@@ -3080,6 +3633,109 @@ fn generate_llm_output(
         }
     });
 
+    let templates = default_operational_healthiness_templates();
+    let generation_methods = default_operational_healthiness_generation_methods();
+
+    let mut operational_routes = context.operational_healthiness_routes.clone();
+    if let Some(slos) = &context.slo_definitions {
+        let mut handler_to_slo_ids: HashMap<&str, Vec<String>> = HashMap::new();
+        for slo in slos {
+            for handler in &slo.monitored_routes {
+                handler_to_slo_ids
+                    .entry(handler.as_str())
+                    .or_default()
+                    .push(slo.id.clone());
+            }
+        }
+        for ids in handler_to_slo_ids.values_mut() {
+            ids.sort();
+            ids.dedup();
+        }
+        for route in &mut operational_routes {
+            if let Some(ids) = handler_to_slo_ids.get(route.handler.as_str()) {
+                route.slo_ids = ids.clone();
+            }
+        }
+    }
+
+    let operational_healthiness = LlmOperationalHealthiness {
+        schema_version: "unfault.operational_healthiness.v1".to_string(),
+        description: "Fault injection patterns to verify code resilience.".to_string(),
+        explanation: "Writing code is one step in the journey; ensuring it runs soundly is equally important. If your code makes network calls, explore its reliability so it does not bite users. This section contains HTTP routes we discovered and common resilience patterns to verify reliability and availability. Use the fault CLI (https://fault-project.com/). For a simpler UX, generate a runnable `fault run ...` command with `unfault addon fault plan`, then run the command it prints and drive traffic through the local proxy.".to_string(),
+        schema: serde_json::json!({
+            "fields": [
+                {
+                    "path": "operational_healthiness.routes",
+                    "type": "array",
+                    "required": true,
+                    "description": "Discovered HTTP routes in this workspace. Use this to choose what to test."
+                },
+                {
+                    "path": "operational_healthiness.routes[].outbound_calls",
+                    "type": "object",
+                    "required": true,
+                    "description": "Best-effort indicator for outbound dependencies, with confidence and evidence."
+                },
+                {
+                    "path": "operational_healthiness.generation_methods",
+                    "type": "array",
+                    "required": true,
+                    "description": "Ways to obtain scenario files (preferred: generate from OpenAPI)."
+                },
+                {
+                    "path": "operational_healthiness.quickstart",
+                    "type": "array",
+                    "required": true,
+                    "description": "Short, ordered steps an agent can follow to go from code -> runnable fault injection."
+                },
+                {
+                    "path": "operational_healthiness.templates",
+                    "type": "array",
+                    "required": true,
+                    "description": "Well-known fault injection patterns. Each template includes a file-based scenario run and a direct proxy run."
+                },
+                {
+                    "path": "operational_healthiness.slos",
+                    "type": "array|null",
+                    "required": false,
+                    "description": "SLO definitions discovered from observability providers (if enabled)."
+                }
+            ]
+        }),
+        generation_methods,
+        quickstart: vec![
+            "Ensure the service is running locally (dev environment, not prod). If it is not running, ask the user to start it.".to_string(),
+            "Pick a quick scenario and generate a runnable command: unfault addon fault plan \"latency 200ms for 30s\" --proxy-port 9090 --target <remote_origin>".to_string(),
+            "Run the `fault run ...` command printed by the planner.".to_string(),
+            "Send traffic through the proxy while fault is running (example): curl -i http://127.0.0.1:9090/<route>".to_string(),
+            "After the run, ask the user whether the dev server and any test resources should be torn down (and do not tear down anything without confirmation).".to_string(),
+            "For repeatable checks, generate scenario files: fault scenario generate --openapi <openapi_url> --out tests/fault".to_string(),
+        ],
+        summary: LlmOperationalHealthinessSummary {
+            routes_total: context.operational_healthiness_routes_total,
+            routes_returned: operational_routes.len(),
+            templates_returned: templates.len(),
+        },
+        routes: operational_routes,
+        templates,
+        slos: context.slo_definitions.clone(),
+        safety_notes: vec![
+            "Never run fault injection against production.".to_string(),
+            "Prefer localhost/dev environments and test accounts.".to_string(),
+            "Ensure outbound targets are configurable via environment variables.".to_string(),
+        ],
+    };
+
+    // Short, high-signal steps intended for agents that skim.
+    // Keep this short: it should not duplicate the full section.
+    let mut next_steps: Vec<String> = Vec::new();
+    for s in operational_healthiness.quickstart.iter().take(4) {
+        next_steps.push(s.clone());
+    }
+
+    // Alias field with action-oriented naming.
+    let resilience_testing = Some(operational_healthiness.clone());
+
     let mut apply_order = Vec::new();
     let mut out_findings = Vec::new();
 
@@ -3089,17 +3745,22 @@ fn generate_llm_output(
 
         let rep = fs[0]; // Representative finding
 
-        // Collect all targets from merged findings
-        let targets: Vec<LlmTarget> = fs
-            .iter()
-            .map(|f| LlmTarget {
+        // Collect all targets from merged findings.
+        // Include a short line-level snippet to make verification fast.
+        let mut targets: Vec<LlmTarget> = Vec::with_capacity(fs.len());
+        for f in fs {
+            let snippet = read_line_snippet(&f.file_path, f.line);
+            targets.push(LlmTarget {
                 path: f.file_path.clone(),
                 start_line: f.line,
                 start_col: f.column,
                 end_line: f.end_line,
                 end_col: f.end_column,
-            })
-            .collect();
+                byte_start: f.byte_start,
+                byte_end: f.byte_end,
+                snippet,
+            });
+        }
 
         // Build "why" from description or message
         let why = if !rep.description.is_empty() {
@@ -3115,17 +3776,33 @@ fn generate_llm_output(
             fix_preview: truncate_str(p, 500),
         });
 
+        let applicability: Option<serde_json::Value> = rep
+            .applicability_json
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+
+        let title = if rep.title.is_empty() {
+            rep.rule_id.clone()
+        } else {
+            rep.title.clone()
+        };
+
+        let decision = infer_llm_finding_decision_support(
+            &rep.rule_id,
+            &title,
+            &why,
+            applicability.as_ref(),
+        );
+
         out_findings.push(LlmFinding {
             id,
             rule_id: rep.rule_id.clone(),
             severity: rep.severity.clone(),
             dimension: rep.dimension.clone(),
-            title: if rep.title.is_empty() {
-                rep.rule_id.clone()
-            } else {
-                rep.title.clone()
-            },
+            title,
             why,
+            applicability,
+            decision,
             blast_radius: "local".to_string(),
             files_allowed_to_change: vec![rep.file_path.clone()],
             targets,
@@ -3137,7 +3814,10 @@ fn generate_llm_output(
     LlmReviewOutput {
         schema_version: "unfault.llm_review.v1".to_string(),
         stop_conditions,
+        next_steps,
         summary,
+        operational_healthiness,
+        resilience_testing,
         slos: context.slo_definitions.clone(),
         apply_order,
         findings: out_findings,
@@ -3392,6 +4072,7 @@ mod tests {
             message: "This is a test finding".to_string(),
             patch_json: None,
             fix_preview: None,
+            applicability_json: None,
             patch: None,
             byte_start: None,
             byte_end: None,
@@ -3417,6 +4098,7 @@ mod tests {
                 message: "HTTP call without timeout".to_string(),
                 patch_json: None,
                 fix_preview: None,
+                applicability_json: None,
                 patch: None,
                 byte_start: None,
                 byte_end: None,
@@ -3435,6 +4117,7 @@ mod tests {
                 message: "Another HTTP call without timeout".to_string(),
                 patch_json: None,
                 fix_preview: None,
+                applicability_json: None,
                 patch: None,
                 byte_start: None,
                 byte_end: None,
@@ -3453,6 +4136,7 @@ mod tests {
                 message: "No CORS configured".to_string(),
                 patch_json: None,
                 fix_preview: None,
+                applicability_json: None,
                 patch: None,
                 byte_start: None,
                 byte_end: None,
@@ -3471,6 +4155,7 @@ mod tests {
                 message: "A critical issue".to_string(),
                 patch_json: None,
                 fix_preview: None,
+                applicability_json: None,
                 patch: None,
                 byte_start: None,
                 byte_end: None,
@@ -3496,6 +4181,7 @@ mod tests {
             message: "HTTP request without timeout".to_string(),
             patch_json: None,
             fix_preview: None,
+            applicability_json: None,
             patch: Some(
                 "--- a/src/main.py\n+++ b/src/main.py\n@@ -10,1 +10,1 @@\n-requests.get(url)\n+requests.get(url, timeout=30)"
                     .to_string(),
@@ -3590,6 +4276,8 @@ mod tests {
             profile: Some("fastapi".to_string()),
             slo_stats: None,
             slo_definitions: None,
+            operational_healthiness_routes_total: 0,
+            operational_healthiness_routes: vec![],
         };
 
         let findings = vec![IrFinding {
@@ -3606,6 +4294,7 @@ mod tests {
             message: "Add timeout".to_string(),
             patch_json: None,
             fix_preview: Some("requests.get(url, timeout=30)".to_string()),
+            applicability_json: None,
             patch: None,
             byte_start: None,
             byte_end: None,
@@ -3618,6 +4307,14 @@ mod tests {
         assert_eq!(output.findings.len(), 1);
         assert_eq!(output.apply_order, vec!["F-0001"]);
         assert!(output.slos.is_none());
+
+        assert_eq!(
+            output.operational_healthiness.schema_version,
+            "unfault.operational_healthiness.v1"
+        );
+        assert_eq!(output.operational_healthiness.summary.routes_total, 0);
+        assert_eq!(output.operational_healthiness.summary.routes_returned, 0);
+        assert!(output.operational_healthiness.summary.templates_returned > 0);
         assert!(
             !output.summary["observability"]["attempted"]
                 .as_bool()
@@ -3664,6 +4361,8 @@ mod tests {
             profile: None,
             slo_stats: None,
             slo_definitions: None,
+            operational_healthiness_routes_total: 0,
+            operational_healthiness_routes: vec![],
         };
 
         // Two findings with same rule+file should merge
@@ -3682,6 +4381,7 @@ mod tests {
                 message: "".to_string(),
                 patch_json: None,
                 fix_preview: None,
+                applicability_json: None,
                 patch: None,
                 byte_start: None,
                 byte_end: None,
@@ -3700,6 +4400,7 @@ mod tests {
                 message: "".to_string(),
                 patch_json: None,
                 fix_preview: None,
+                applicability_json: None,
                 patch: None,
                 byte_start: None,
                 byte_end: None,
@@ -3719,6 +4420,7 @@ mod tests {
                 message: "".to_string(),
                 patch_json: None,
                 fix_preview: None,
+                applicability_json: None,
                 patch: None,
                 byte_start: None,
                 byte_end: None,
@@ -3776,6 +4478,8 @@ mod tests {
             profile: None,
             slo_stats: None,
             slo_definitions: None,
+            operational_healthiness_routes_total: 0,
+            operational_healthiness_routes: vec![],
         };
 
         // Create 5 findings, each in different file (so they don't merge)
@@ -3800,6 +4504,7 @@ mod tests {
                 message: "".to_string(),
                 patch_json: None,
                 fix_preview: None,
+                applicability_json: None,
                 patch: None,
                 byte_start: None,
                 byte_end: None,
@@ -3849,6 +4554,7 @@ mod tests {
             message: "".to_string(),
             patch_json: None,
             fix_preview: None,
+            applicability_json: None,
             patch: None,
             byte_start: None,
             byte_end: None,

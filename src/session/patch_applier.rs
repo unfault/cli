@@ -375,6 +375,7 @@ mod tests {
             message: "Add timeout".to_string(),
             patch_json: None,
             fix_preview: None,
+            applicability_json: None,
             patch: Some(
                 r#"--- a/test.py
 +++ b/test.py
@@ -418,6 +419,7 @@ mod tests {
             message: "Add timeout".to_string(),
             patch_json: None,
             fix_preview: None,
+            applicability_json: None,
             patch: Some(
                 r#"--- a/test.py
 +++ b/test.py
@@ -462,6 +464,7 @@ mod tests {
                 message: "Add timeout".to_string(),
                 patch_json: None,
                 fix_preview: None,
+                applicability_json: None,
                 patch: Some(
                     r#"--- a/test.py
 +++ b/test.py
@@ -487,6 +490,7 @@ mod tests {
                 message: "Add timeout".to_string(),
                 patch_json: None,
                 fix_preview: None,
+                applicability_json: None,
                 patch: Some(
                     r#"--- a/test.py
 +++ b/test.py
@@ -532,6 +536,7 @@ mod tests {
             message: "Add timeout".to_string(),
             patch_json: None,
             fix_preview: None,
+            applicability_json: None,
             patch: None, // No patch
             byte_start: None,
             byte_end: None,

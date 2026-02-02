@@ -177,6 +177,37 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum FaultScenarioCommands {
+    /// Generate scenario YAML files under tests/fault (or preview)
+    Generate {
+        /// Workspace path to analyze (defaults to current directory)
+        #[arg(long, short = 'w', value_name = "PATH")]
+        workspace: Option<String>,
+        /// Local proxy port to call during scenarios
+        #[arg(long, value_name = "PORT", default_value = "9090")]
+        proxy_port: u16,
+        /// Remote upstream origin to proxy to (e.g., http://127.0.0.1:8000)
+        #[arg(long, value_name = "ORIGIN", default_value = "http://127.0.0.1:8000")]
+        remote: String,
+        /// Maximum number of routes to generate scenarios for
+        #[arg(long, value_name = "N", default_value = "50")]
+        limit: usize,
+        /// Only include routes that likely have outbound dependencies
+        #[arg(long)]
+        only_outbound: bool,
+        /// Write files to tests/fault (default: preview only)
+        #[arg(long)]
+        write: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Include YAML content in JSON output (can be large)
+        #[arg(long)]
+        include_yaml: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum AddonCommands {
     /// Install an addon
     Install {
@@ -185,6 +216,46 @@ enum AddonCommands {
         /// Reinstall even if already present
         #[arg(long)]
         force: bool,
+    },
+
+    /// Fault addon utilities
+    Fault {
+        #[command(subcommand)]
+        command: FaultAddonCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum FaultAddonCommands {
+    /// Scenario generation helpers (local-only)
+    Scenarios {
+        #[command(subcommand)]
+        command: FaultScenarioCommands,
+    },
+
+    /// Generate a runnable `fault run ...` command from a short scenario string
+    ///
+    /// This is a curated subset intended to be easy to use for humans and AI agents.
+    Plan {
+        /// Scenario recipe (e.g. "latency 200ms for 30s")
+        #[arg(value_name = "SCENARIO")]
+        scenario: String,
+        /// Upstream origin to proxy to (e.g., http://127.0.0.1:8000)
+        #[arg(long, value_name = "ORIGIN", default_value = "http://127.0.0.1:8000")]
+        target: String,
+        /// Local proxy port to call (fault will listen on 127.0.0.1:<port>)
+        #[arg(long, value_name = "PORT", default_value = "9090")]
+        proxy_port: u16,
+        /// Output as JSON (agent-friendly)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List supported scenario recipes
+    List {
+        /// Output as JSON (agent-friendly)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -597,6 +668,68 @@ async fn run_command(command: Commands) -> i32 {
                     );
                     EXIT_CONFIG_ERROR
                 }
+            },
+            AddonCommands::Fault { command } => match command {
+                FaultAddonCommands::Scenarios { command } => match command {
+                    FaultScenarioCommands::Generate {
+                        workspace,
+                        proxy_port,
+                        remote,
+                        limit,
+                        only_outbound,
+                        write,
+                        json,
+                        include_yaml,
+                    } => {
+                        let args = commands::fault_scenarios_cmd::GenerateFaultScenariosArgs {
+                            workspace,
+                            proxy_port,
+                            remote,
+                            limit,
+                            only_outbound,
+                            write,
+                            json,
+                            include_yaml,
+                        };
+                        match commands::fault_scenarios_cmd::execute_generate(args) {
+                            Ok(exit_code) => exit_code,
+                            Err(e) => {
+                                eprintln!("Fault scenarios error: {}", e);
+                                EXIT_CONFIG_ERROR
+                            }
+                        }
+                    }
+                },
+
+                FaultAddonCommands::Plan {
+                    scenario,
+                    target,
+                    proxy_port,
+                    json,
+                } => {
+                    let args = commands::fault_plan_cmd::FaultPlanArgs {
+                        scenario,
+                        target,
+                        proxy_port,
+                        json,
+                    };
+                    match commands::fault_plan_cmd::execute_plan(args) {
+                        Ok(exit_code) => exit_code,
+                        Err(e) => {
+                            eprintln!("Fault plan error: {}", e);
+                            EXIT_CONFIG_ERROR
+                        }
+                    }
+                }
+
+                FaultAddonCommands::List { json } => match commands::fault_plan_cmd::execute_list(json)
+                {
+                    Ok(exit_code) => exit_code,
+                    Err(e) => {
+                        eprintln!("Fault list error: {}", e);
+                        EXIT_CONFIG_ERROR
+                    }
+                },
             },
         },
     }

@@ -197,6 +197,10 @@ pub struct IrFinding {
     /// Human-readable fix preview
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix_preview: Option<String>,
+
+    /// JSON-serialized applicability metadata (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applicability_json: Option<String>,
     /// Legacy: Suggested fix patch (unified diff format)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patch: Option<String>,

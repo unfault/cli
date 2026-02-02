@@ -358,6 +358,13 @@ pub struct Finding {
     pub diff: Option<String>,
     /// Preview of the fix
     pub fix_preview: Option<String>,
+
+    /// JSON-serialized applicability metadata (if available).
+    ///
+    /// This helps consumers decide whether a recommendation is appropriate for
+    /// the current context (prototype vs production) without guessing repo maturity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applicability_json: Option<String>,
 }
 
 /// Analysis results for a context
