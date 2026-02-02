@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.22] - 2026-02-02
+
+### Added
+
+- `unfault addon fault plan` and `unfault addon fault list` to generate runnable `fault run ...` commands from short recipes.
+- `unfault review --llm`: top-level `next_steps` and `resilience_testing` alias to make fault injection guidance harder for agents to miss.
+
+### Changed
+
+- `unfault review --llm` fault injection templates now point to `unfault addon fault plan` (instead of raw `fault run ...` flags).
+
 ## [0.6.21] - 2026-01-29
 
 ### Fixed
@@ -255,6 +266,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
+[Unreleased]: https://github.com/unfault/cli/compare/v0.6.22...HEAD
+[0.6.22]: https://github.com/unfault/cli/compare/v0.6.21...v0.6.22
 [0.6.17]: https://github.com/unfault/cli/compare/580bc99...HEAD
 [0.6.16]: https://github.com/unfault/cli/compare/v0.6.12...580bc99
 [0.6.15]: https://github.com/unfault/cli/compare/v0.6.12...7b03019
