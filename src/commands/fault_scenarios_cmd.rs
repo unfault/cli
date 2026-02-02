@@ -8,10 +8,10 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::fault_scenarios::{
-    find_available_file_path, get_or_create_scenario_dir, render_route_scenario_suite,
-    ScenarioSuiteConfig,
+    ScenarioSuiteConfig, find_available_file_path, get_or_create_scenario_dir,
+    render_route_scenario_suite,
 };
-use crate::session::{build_ir_cached, WorkspaceScanner};
+use crate::session::{WorkspaceScanner, build_ir_cached};
 
 #[derive(Debug, Clone)]
 pub struct GenerateFaultScenariosArgs {

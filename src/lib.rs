@@ -13,6 +13,11 @@
 //! - [`session`] - Session management for workspace scanning and analysis
 //! - [`slo`] - SLO discovery from observability platforms
 
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::manual_strip)]
+#![allow(clippy::redundant_closure)]
+
 pub mod api;
 pub mod commands;
 pub mod config;

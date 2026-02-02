@@ -254,7 +254,7 @@ impl WorkspaceInfo {
         }
 
         // Add generic language profiles for languages without framework detection
-        for (language, _count) in &self.languages {
+        for language in self.languages.keys() {
             let has_framework_profile = profiles.iter().any(|p| {
                 p.id.starts_with(match language {
                     Language::Python => "python_",

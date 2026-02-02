@@ -1569,10 +1569,10 @@ const LLM_OPERATIONAL_HEALTHINESS_ROUTE_LIMIT: usize = 50;
 fn extract_operational_healthiness_routes(
     graph: &unfault_core::graph::CodeGraph,
 ) -> (usize, Vec<LlmDiscoveredRoute>) {
-    use std::collections::HashSet;
     use petgraph::visit::EdgeRef;
-    use unfault_core::parse::ast::FileId;
+    use std::collections::HashSet;
     use unfault_core::graph::ModuleCategory;
+    use unfault_core::parse::ast::FileId;
 
     // Build FileId -> path mapping
     let mut file_paths: HashMap<FileId, String> = HashMap::new();
@@ -1585,7 +1585,10 @@ fn extract_operational_healthiness_routes(
     }
 
     fn is_outbound_category(category: &ModuleCategory) -> bool {
-        matches!(category, ModuleCategory::HttpClient | ModuleCategory::Database)
+        matches!(
+            category,
+            ModuleCategory::HttpClient | ModuleCategory::Database
+        )
     }
 
     // Helper: detect outbound calls for a node and its file (best-effort)
@@ -1598,7 +1601,10 @@ fn extract_operational_healthiness_routes(
 
         if let Some(file_idx) = graph.file_nodes.get(&file_id) {
             for edge in graph.graph.edges(*file_idx) {
-                if !matches!(edge.weight(), unfault_core::graph::GraphEdgeKind::UsesLibrary) {
+                if !matches!(
+                    edge.weight(),
+                    unfault_core::graph::GraphEdgeKind::UsesLibrary
+                ) {
                     continue;
                 }
                 if let Some(unfault_core::graph::GraphNode::ExternalModule { name, category }) =
@@ -1618,7 +1624,10 @@ fn extract_operational_healthiness_routes(
         }
 
         for edge in graph.graph.edges(func_idx) {
-            if !matches!(edge.weight(), unfault_core::graph::GraphEdgeKind::UsesLibrary) {
+            if !matches!(
+                edge.weight(),
+                unfault_core::graph::GraphEdgeKind::UsesLibrary
+            ) {
                 continue;
             }
             if let Some(unfault_core::graph::GraphNode::ExternalModule { name, category }) =
@@ -1642,7 +1651,8 @@ fn extract_operational_healthiness_routes(
                 .then_with(|| a.category.cmp(&b.category))
                 .then_with(|| a.name.cmp(&b.name))
         });
-        evidence.dedup_by(|a, b| a.source == b.source && a.category == b.category && a.name == b.name);
+        evidence
+            .dedup_by(|a, b| a.source == b.source && a.category == b.category && a.name == b.name);
 
         let has = file_hits > 0 || func_hits > 0;
         let confidence = if func_hits > 0 {
@@ -3360,9 +3370,8 @@ fn infer_llm_finding_decision_support(
         out.decision_level = "api_contract".to_string();
         out.requires_product_decision = true;
         out.confidence = "medium".to_string();
-        out.prerequisites.push(
-            "Define idempotency key contract (scope, TTL, conflict behavior)".to_string(),
-        );
+        out.prerequisites
+            .push("Define idempotency key contract (scope, TTL, conflict behavior)".to_string());
     }
 
     // Architecture-level suggestions
@@ -3787,12 +3796,8 @@ fn generate_llm_output(
             rep.title.clone()
         };
 
-        let decision = infer_llm_finding_decision_support(
-            &rep.rule_id,
-            &title,
-            &why,
-            applicability.as_ref(),
-        );
+        let decision =
+            infer_llm_finding_decision_support(&rep.rule_id, &title, &why, applicability.as_ref());
 
         out_findings.push(LlmFinding {
             id,

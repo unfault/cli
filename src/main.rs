@@ -18,6 +18,11 @@
 //!
 //! ```
 
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::manual_strip)]
+#![allow(clippy::redundant_closure)]
+
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use unfault::commands;
@@ -722,14 +727,15 @@ async fn run_command(command: Commands) -> i32 {
                     }
                 }
 
-                FaultAddonCommands::List { json } => match commands::fault_plan_cmd::execute_list(json)
-                {
-                    Ok(exit_code) => exit_code,
-                    Err(e) => {
-                        eprintln!("Fault list error: {}", e);
-                        EXIT_CONFIG_ERROR
+                FaultAddonCommands::List { json } => {
+                    match commands::fault_plan_cmd::execute_list(json) {
+                        Ok(exit_code) => exit_code,
+                        Err(e) => {
+                            eprintln!("Fault list error: {}", e);
+                            EXIT_CONFIG_ERROR
+                        }
                     }
-                },
+                }
             },
         },
     }

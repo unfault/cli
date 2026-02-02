@@ -3,7 +3,7 @@
 //! This command intentionally supports a small, curated subset of fault scenarios.
 //! It generates a concrete `fault run ...` command so users can copy/paste it.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 #[derive(Debug, Clone)]
 pub struct FaultPlanArgs {

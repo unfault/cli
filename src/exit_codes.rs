@@ -73,14 +73,16 @@ mod tests {
 
     #[test]
     fn test_error_codes_are_positive() {
-        assert!(EXIT_ERROR > 0);
-        assert!(EXIT_CONFIG_ERROR > 0);
-        assert!(EXIT_AUTH_ERROR > 0);
-        assert!(EXIT_NETWORK_ERROR > 0);
-        assert!(EXIT_FINDINGS_FOUND > 0);
-        assert!(EXIT_INVALID_INPUT > 0);
-        assert!(EXIT_SERVICE_UNAVAILABLE > 0);
-        assert!(EXIT_SESSION_ERROR > 0);
-        assert!(EXIT_SUBSCRIPTION_REQUIRED > 0);
+        const _: () = {
+            assert!(EXIT_ERROR > 0);
+            assert!(EXIT_CONFIG_ERROR > 0);
+            assert!(EXIT_AUTH_ERROR > 0);
+            assert!(EXIT_NETWORK_ERROR > 0);
+            assert!(EXIT_FINDINGS_FOUND > 0);
+            assert!(EXIT_INVALID_INPUT > 0);
+            assert!(EXIT_SERVICE_UNAVAILABLE > 0);
+            assert!(EXIT_SESSION_ERROR > 0);
+            assert!(EXIT_SUBSCRIPTION_REQUIRED > 0);
+        };
     }
 }
