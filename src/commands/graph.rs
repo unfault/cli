@@ -703,6 +703,13 @@ pub async fn execute_summary(args: SummaryArgs) -> Result<i32> {
         })?,
     };
 
+    // Get workspace label (directory name)
+    let workspace_label = workspace_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace")
+        .to_string();
+
     // Resolve workspace ID for API call
     let identifier = match resolve_identifier(None, args.workspace_path.as_deref(), args.verbose) {
         Ok(id) => id,
@@ -839,6 +846,7 @@ pub async fn execute_summary(args: SummaryArgs) -> Result<i32> {
         output_summary_json(&graph, api_stats_ref.as_ref(), slo_context.as_ref())?;
     } else {
         output_summary_formatted(
+            &workspace_label,
             &graph,
             api_stats_ref.as_ref(),
             slo_context.as_ref(),
@@ -1032,6 +1040,7 @@ fn format_egress_with_resolution(
 }
 
 fn output_summary_formatted(
+    workspace_label: &str,
     graph: &crate::session::graph_builder::SerializableGraph,
     api_stats: Option<&GraphStatsResponse>,
     slo_context: Option<&crate::api::rag::RAGSloContext>,
@@ -1041,6 +1050,9 @@ fn output_summary_formatted(
     let cross_links: &[crate::api::graph::CrossWorkspaceLink] = api_stats
         .map(|s| s.cross_workspace_links.as_slice())
         .unwrap_or(&[]);
+
+    // Workspace name
+    println!("{} {}", "Workspace:".bold(), workspace_label.cyan());
 
     // Nodes summary line
     println!(
