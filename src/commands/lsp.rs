@@ -940,7 +940,7 @@ impl UnfaultLsp {
         debug!("[LSP] Profiles to use: {:?}", profiles);
 
         // Split IR so we can free the in-memory graph early
-        let unfault_core::IntermediateRepresentation { semantics, graph } = ir;
+        let unfault_core::IntermediateRepresentation { semantics, graph, .. } = ir;
 
         // Decide whether to use PATCH (incremental) or full ingest
         // Use PATCH only if:
@@ -1002,6 +1002,7 @@ impl UnfaultLsp {
                     Some(workspace_label_str),
                     git_remote.as_deref(),
                     None, // TODO: Pass package_export for cross-workspace tracking
+                    &[],  // TODO: Pass listening_ports for cross-workspace tracing
                     graph,
                 )
                 .await

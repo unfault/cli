@@ -39,7 +39,7 @@ use crate::errors::{
 };
 use crate::exit_codes::*;
 use crate::session::{
-    MetaFileInfo, PatchApplier, ScanProgress, WorkspaceScanner, build_ir_cached,
+    MetaFileInfo, PatchApplier, ScanProgress, WorkspaceScanner,
     extract_package_export, get_git_remote, get_or_compute_workspace_id,
 };
 
@@ -686,8 +686,19 @@ async fn execute_client_parse(
         )
     };
 
-    let build_result = match build_ir_cached(current_dir, file_paths.as_deref(), args.verbose, None)
-    {
+    // Build workspace metadata for cross-workspace tracing
+    let workspace_metadata = crate::session::ir_builder::WorkspaceMetadata {
+        workspace_id: workspace_info.workspace_id.clone(),
+        listening_ports: Vec::new(), // TODO: extract from framework detection
+    };
+
+    let build_result = match crate::session::ir_builder::build_ir_cached_with_metadata(
+        current_dir,
+        file_paths.as_deref(),
+        args.verbose,
+        None,
+        Some(workspace_metadata),
+    ) {
         Ok(result) => result,
         Err(e) => {
             pb.finish_and_clear();
@@ -724,6 +735,8 @@ async fn execute_client_parse(
     let unfault_core::IntermediateRepresentation {
         semantics,
         mut graph,
+        listening_ports,
+        ..
     } = ir;
 
     // Extract package export info for cross-workspace dependency tracking
@@ -1099,6 +1112,7 @@ async fn execute_client_parse(
             Some(workspace_label),
             git_remote.as_deref(),
             package_export.as_ref(),
+            &listening_ports,
             graph,
             move |progress| {
                 pb_upload.set_message(format!("Uploading code graph... {}%", progress.percent));

@@ -1105,6 +1105,7 @@ impl ApiClient {
         workspace_label: Option<&str>,
         git_remote: Option<&str>,
         package_export: Option<&crate::session::PackageExport>,
+        listening_ports: &[u16],
         graph: unfault_core::graph::CodeGraph,
     ) -> Result<GraphIngestResponse, ApiError> {
         self.ingest_graph_with_progress(
@@ -1113,6 +1114,7 @@ impl ApiClient {
             workspace_label,
             git_remote,
             package_export,
+            listening_ports,
             graph,
             |_| {},
         )
@@ -1133,6 +1135,7 @@ impl ApiClient {
     /// * `git_remote` - Git remote URL for computing stable file IDs. If provided,
     ///   file IDs will be globally unique across machines for the same repo.
     /// * `package_export` - Package export info for cross-workspace dependency tracking
+    /// * `listening_ports` - Ports this service listens on for cross-workspace tracing
     /// * `graph` - The code graph to ingest
     /// * `on_progress` - Progress callback
     #[allow(clippy::too_many_arguments)]
@@ -1143,6 +1146,7 @@ impl ApiClient {
         workspace_label: Option<&str>,
         git_remote: Option<&str>,
         package_export: Option<&crate::session::PackageExport>,
+        listening_ports: &[u16],
         graph: unfault_core::graph::CodeGraph,
         mut on_progress: F,
     ) -> Result<GraphIngestResponse, ApiError>
@@ -1177,6 +1181,16 @@ impl ApiClient {
             if let Some(remote) = git_remote {
                 start_url.push_str(&format!("&git_remote={}", urlencoding::encode(remote),));
             }
+        }
+
+        // Add listening ports for cross-workspace HTTP call tracing
+        if !listening_ports.is_empty() {
+            let ports_str = listening_ports
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            start_url.push_str(&format!("&listening_ports={}", ports_str));
         }
 
         let start_resp = self
