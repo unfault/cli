@@ -889,7 +889,7 @@ fn output_summary_json(
 fn format_egress_target(remote: &str, url: Option<&str>) -> colored::ColoredString {
     // Try to extract path from URL if available
     let path_hint = url
-        .and_then(|u| u.split('/').skip(3).next())
+        .and_then(|u| u.split('/').nth(3))
         .map(|p| format!("/{}", p));
 
     if let Some(stripped) = remote.strip_prefix("expr:") {

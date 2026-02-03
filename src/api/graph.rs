@@ -1098,6 +1098,7 @@ impl ApiClient {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn ingest_graph(
         &self,
         api_key: &str,
