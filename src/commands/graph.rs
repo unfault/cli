@@ -780,7 +780,12 @@ pub async fn execute_summary(args: SummaryArgs) -> Result<i32> {
     if args.json {
         output_summary_json(&graph, api_stats_ref.as_ref(), slo_context.as_ref())?;
     } else {
-        output_summary_formatted(&graph, api_stats_ref.as_ref(), slo_context.as_ref(), args.verbose);
+        output_summary_formatted(
+            &graph,
+            api_stats_ref.as_ref(),
+            slo_context.as_ref(),
+            args.verbose,
+        );
     }
 
     Ok(EXIT_SUCCESS)
@@ -1071,12 +1076,8 @@ fn output_summary_formatted(
                 };
 
                 // Format egress target with cross-workspace resolution
-                let target = format_egress_with_resolution(
-                    &e.remote,
-                    e.url.as_deref(),
-                    method,
-                    cross_links,
-                );
+                let target =
+                    format_egress_with_resolution(&e.remote, e.url.as_deref(), method, cross_links);
                 println!(
                     "               {} {} {} {}",
                     connector.dimmed(),
@@ -1112,7 +1113,8 @@ fn output_summary_formatted(
                 _ => format!("{:6}", method).normal(),
             };
 
-            let target = format_egress_with_resolution(&e.remote, e.url.as_deref(), method, cross_links);
+            let target =
+                format_egress_with_resolution(&e.remote, e.url.as_deref(), method, cross_links);
             println!(
                 "  {} {} {} {}",
                 method_colored,

@@ -39,8 +39,8 @@ use crate::errors::{
 };
 use crate::exit_codes::*;
 use crate::session::{
-    MetaFileInfo, PatchApplier, ScanProgress, WorkspaceScanner,
-    extract_package_export, get_git_remote, get_or_compute_workspace_id,
+    MetaFileInfo, PatchApplier, ScanProgress, WorkspaceScanner, extract_package_export,
+    get_git_remote, get_or_compute_workspace_id,
 };
 
 /// Get uncommitted files from git (staged, unstaged, and untracked).

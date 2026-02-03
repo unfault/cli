@@ -940,7 +940,9 @@ impl UnfaultLsp {
         debug!("[LSP] Profiles to use: {:?}", profiles);
 
         // Split IR so we can free the in-memory graph early
-        let unfault_core::IntermediateRepresentation { semantics, graph, .. } = ir;
+        let unfault_core::IntermediateRepresentation {
+            semantics, graph, ..
+        } = ir;
 
         // Decide whether to use PATCH (incremental) or full ingest
         // Use PATCH only if:
