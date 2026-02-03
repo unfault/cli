@@ -251,6 +251,9 @@ enum FaultAddonCommands {
         /// Local proxy port to call (fault will listen on 127.0.0.1:<port>)
         #[arg(long, value_name = "PORT", default_value = "9090")]
         proxy_port: u16,
+        /// Quiet output: print only the runnable `fault run ...` command
+        #[arg(long, short = 'q', conflicts_with = "json")]
+        quiet: bool,
         /// Output as JSON (agent-friendly)
         #[arg(long)]
         json: bool,
@@ -686,7 +689,7 @@ async fn run_command(command: Commands) -> i32 {
                         json,
                         include_yaml,
                     } => {
-                        let args = commands::fault_scenarios_cmd::GenerateFaultScenariosArgs {
+                        let args = commands::fault_scenarios::GenerateFaultScenariosArgs {
                             workspace,
                             proxy_port,
                             remote,
@@ -696,7 +699,7 @@ async fn run_command(command: Commands) -> i32 {
                             json,
                             include_yaml,
                         };
-                        match commands::fault_scenarios_cmd::execute_generate(args) {
+                        match commands::fault_scenarios::execute_generate(args) {
                             Ok(exit_code) => exit_code,
                             Err(e) => {
                                 eprintln!("Fault scenarios error: {}", e);
@@ -710,15 +713,17 @@ async fn run_command(command: Commands) -> i32 {
                     scenario,
                     target,
                     proxy_port,
+                    quiet,
                     json,
                 } => {
-                    let args = commands::fault_plan_cmd::FaultPlanArgs {
+                    let args = commands::fault_plan::FaultPlanArgs {
                         scenario,
                         target,
                         proxy_port,
                         json,
+                        quiet,
                     };
-                    match commands::fault_plan_cmd::execute_plan(args) {
+                    match commands::fault_plan::execute_plan(args) {
                         Ok(exit_code) => exit_code,
                         Err(e) => {
                             eprintln!("Fault plan error: {}", e);
@@ -728,7 +733,7 @@ async fn run_command(command: Commands) -> i32 {
                 }
 
                 FaultAddonCommands::List { json } => {
-                    match commands::fault_plan_cmd::execute_list(json) {
+                    match commands::fault_plan::execute_list(json) {
                         Ok(exit_code) => exit_code,
                         Err(e) => {
                             eprintln!("Fault list error: {}", e);

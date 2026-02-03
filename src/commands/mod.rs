@@ -16,8 +16,8 @@
 pub mod addon;
 pub mod ask;
 pub mod config;
-pub mod fault_plan_cmd;
-pub mod fault_scenarios_cmd;
+pub mod fault_plan;
+pub mod fault_scenarios;
 pub mod graph;
 pub mod login;
 pub mod lsp;

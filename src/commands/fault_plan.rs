@@ -11,6 +11,30 @@ pub struct FaultPlanArgs {
     pub target: String,
     pub proxy_port: u16,
     pub json: bool,
+    pub quiet: bool,
+}
+
+fn render_plan_text(shell: &str, notes: &[String], proxy_port: u16) -> String {
+    let mut out = String::new();
+    out.push_str(shell);
+    out.push('\n');
+    for n in notes {
+        out.push_str(n);
+        out.push('\n');
+    }
+
+    // Keep the output ASCII-only and easy to parse (humans + agents).
+    // The first line remains the runnable `fault run ...` command.
+    out.push('\n');
+    out.push_str(&format!("fault_run: {}\n", shell));
+    out.push_str(&format!(
+        "traffic: curl -i http://127.0.0.1:{}/\n",
+        proxy_port
+    ));
+    out.push_str(&format!("logs: {} > fault.log 2>&1\n", shell));
+    out.push_str("tip: fault also supports --log-file fault.log (global flag)\n");
+    out.push_str("machine: re-run with --json for structured output\n");
+    out
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -278,6 +302,7 @@ fn build_fault_run_command(
         "run".to_string(),
         "--duration".to_string(),
         recipe.duration.clone(),
+        "--disable-http-proxy".to_string(),
         "--proxy".to_string(),
         proxy_mapping.clone(),
     ];
@@ -288,11 +313,7 @@ fn build_fault_run_command(
             let ms = recipe.latency_ms.unwrap_or(200);
             argv.extend([
                 "--with-latency".to_string(),
-                "--latency-distribution".to_string(),
-                "uniform".to_string(),
-                "--latency-min".to_string(),
-                ms.to_string(),
-                "--latency-max".to_string(),
+                "--latency-mean".to_string(),
                 ms.to_string(),
             ]);
         }
@@ -375,6 +396,14 @@ pub fn execute_plan(args: FaultPlanArgs) -> Result<i32> {
     let recipe = parse_recipe(&args.scenario)?;
     let (argv, shell, notes) = build_fault_run_command(&recipe, args.proxy_port, &args.target);
 
+    if args.quiet {
+        // Note: quotes printed by a command are NOT treated as shell quoting when the
+        // output is used via command substitution: $(...). So for -q we output a
+        // substitution-safe version without quotes.
+        println!("{}", argv.join(" "));
+        return Ok(EXIT_SUCCESS);
+    }
+
     if args.json {
         let out = serde_json::json!({
             "schema_version": "unfault.fault_plan.v1",
@@ -400,21 +429,7 @@ pub fn execute_plan(args: FaultPlanArgs) -> Result<i32> {
         return Ok(EXIT_SUCCESS);
     }
 
-    println!("{}", shell);
-    if !notes.is_empty() {
-        for n in notes {
-            println!("{}", n);
-        }
-    }
-
-    // Keep the output ASCII-only and easy to parse (humans + agents).
-    // The first line remains the runnable `fault run ...` command.
-    println!();
-    println!("fault_run: {}", shell);
-    println!("traffic: curl -i http://127.0.0.1:{}/", args.proxy_port);
-    println!("logs: {} > fault.log 2>&1", shell);
-    println!("tip: fault also supports --log-file fault.log (global flag)");
-    println!("machine: re-run with --json for structured output");
+    print!("{}", render_plan_text(&shell, &notes, args.proxy_port));
 
     Ok(EXIT_SUCCESS)
 }
@@ -508,7 +523,26 @@ mod tests {
         let (_argv, shell, _notes) = build_fault_run_command(&r, 9090, "http://127.0.0.1:8000");
         assert!(shell.contains("fault run"));
         assert!(shell.contains("--with-latency"));
-        assert!(shell.contains("--latency-min 200"));
+        assert!(shell.contains("--latency-mean 200"));
         assert!(shell.contains("\"9090=http://127.0.0.1:8000\""));
+    }
+
+    #[test]
+    fn quiet_text_output_is_single_line_command() {
+        let r = parse_recipe("latency 200ms for 10s").unwrap();
+        let (argv, _shell, _notes) = build_fault_run_command(&r, 9090, "http://127.0.0.1:8000");
+        let out = format!("{}\n", argv.join(" "));
+        assert_eq!(out.lines().count(), 1);
+        assert!(out.contains("--proxy 9090=http://127.0.0.1:8000"));
+    }
+
+    #[test]
+    fn non_quiet_text_output_includes_hints() {
+        let shell =
+            "fault run --duration 10s --proxy \"9090=http://127.0.0.1:8000\" --with-latency";
+        let out = render_plan_text(shell, &[], 9090);
+        assert!(out.contains("fault_run:"));
+        assert!(out.contains("traffic: curl -i http://127.0.0.1:9090/"));
+        assert!(out.contains("machine: re-run with --json"));
     }
 }
