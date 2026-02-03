@@ -745,7 +745,7 @@ pub async fn execute_summary(args: SummaryArgs) -> Result<i32> {
     };
 
     // Fetch stats from API (to verify connection and get persisted data)
-    let api_stats = match &identifier {
+    let api_stats_res = match &identifier {
         ResolvedIdentifier::SessionId(sid) => {
             api_client
                 .graph_stats(&config.api_key, sid, Some(&egress_ports))
@@ -758,8 +758,43 @@ pub async fn execute_summary(args: SummaryArgs) -> Result<i32> {
         }
     };
 
+    if let Err(ref e) = api_stats_res {
+        // This is what powers cross-workspace resolution. If it fails, still print the
+        // local graph, but make the failure explicit.
+        if args.verbose {
+            eprintln!(
+                "  {} Cross-workspace resolution unavailable (API stats error): {}",
+                "ℹ".blue(),
+                e
+            );
+        }
+    }
+
+    // Debug: show cross_workspace_links if present
+    if args.verbose {
+        if let Ok(ref stats) = api_stats_res {
+            if stats.cross_workspace_links.is_empty() {
+                eprintln!(
+                    "  {} API returned 0 cross_workspace_links for egress_ports={:?}",
+                    "ℹ".dimmed(),
+                    egress_ports
+                );
+            } else {
+                for link in &stats.cross_workspace_links {
+                    eprintln!(
+                        "  {} Resolved port {} → {} ({})",
+                        "ℹ".dimmed(),
+                        link.egress_port,
+                        link.target_workspace_name.as_deref().unwrap_or("?"),
+                        link.target_workspace_id
+                    );
+                }
+            }
+        }
+    }
+
     // If API call fails, show local stats but warn
-    let has_api_data = api_stats.is_ok();
+    let has_api_data = api_stats_res.is_ok();
     if !has_api_data && args.verbose {
         eprintln!(
             "  {} No graph data on server. Run 'unfault review' to persist the graph.",
@@ -799,7 +834,7 @@ pub async fn execute_summary(args: SummaryArgs) -> Result<i32> {
     };
 
     // Output results
-    let api_stats_ref = api_stats.ok();
+    let api_stats_ref = api_stats_res.ok();
     if args.json {
         output_summary_json(&graph, api_stats_ref.as_ref(), slo_context.as_ref())?;
     } else {
@@ -1025,15 +1060,6 @@ fn output_summary_formatted(
         graph.stats.http_call_edge_count.to_string().green(),
         graph.stats.import_edge_count.to_string().green()
     );
-
-    // If the server has no persisted graph session, we can't resolve egress calls to known workspaces.
-    if api_stats.is_none() && !graph.http_calls.is_empty() {
-        println!(
-            "{} {}",
-            "ℹ".blue(),
-            "Cross-workspace resolution requires a server session. Run 'unfault review' to persist the graph.".dimmed()
-        );
-    }
 
     // Listening ports line (best-effort)
     // We currently detect ports via env var defaults, which can include egress ports.
