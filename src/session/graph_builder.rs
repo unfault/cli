@@ -10,15 +10,15 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use unfault_core::graph::{
-    build_code_graph, CodeGraph, GraphEdgeKind, GraphNode, RemoteServerKind,
+    CodeGraph, GraphEdgeKind, GraphNode, RemoteServerKind, build_code_graph,
 };
 use unfault_core::parse::ast::FileId;
 use unfault_core::parse::{go, python, rust as rust_parse, typescript};
+use unfault_core::semantics::SourceSemantics;
 use unfault_core::semantics::go::model::GoFileSemantics;
 use unfault_core::semantics::python::model::PyFileSemantics;
 use unfault_core::semantics::rust::{build_rust_semantics, model::RustFileSemantics};
 use unfault_core::semantics::typescript::model::TsFileSemantics;
-use unfault_core::semantics::SourceSemantics;
 use unfault_core::types::context::{Language, SourceFile};
 
 /// A serializable representation of the code graph for sending to the API.

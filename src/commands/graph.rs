@@ -930,7 +930,11 @@ fn output_summary_formatted(
             println!("           {} {}", "└─".dimmed(), handler.dimmed());
 
             // Optional: egress calls from this handler
-            let egress: Vec<_> = graph.http_calls.iter().filter(|e| e.caller == *handler).collect();
+            let egress: Vec<_> = graph
+                .http_calls
+                .iter()
+                .filter(|e| e.caller == *handler)
+                .collect();
             for (idx, e) in egress.iter().enumerate() {
                 let method = e.method.as_str();
                 let m = match method {
@@ -942,7 +946,11 @@ fn output_summary_formatted(
                     _ => format!("{:6}", method).normal(),
                 };
 
-                let connector = if idx + 1 == egress.len() { "└─" } else { "├─" };
+                let connector = if idx + 1 == egress.len() {
+                    "└─"
+                } else {
+                    "├─"
+                };
                 println!(
                     "               {} {} {} {}",
                     connector.dimmed(),
