@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.27] - 2026-02-03
+
+### Fixed
+
+- `unfault graph`: avoid showing egress target ports as "Listens on" ports.
+- `unfault graph`: resolve cross-workspace egress using local egress ports even when the persisted server session is older.
+- `unfault graph`: show resolved target workspace name next to egress target when available.
+
 ## [0.6.26] - 2026-02-03
 
 ### Added

@@ -626,7 +626,7 @@ pub async fn execute_stats(args: StatsArgs) -> Result<i32> {
                     sid
                 );
             }
-            api_client.graph_stats(&config.api_key, &sid).await
+            api_client.graph_stats(&config.api_key, &sid, None).await
         }
         ResolvedIdentifier::WorkspaceId(wid) => {
             if args.verbose {
@@ -637,7 +637,7 @@ pub async fn execute_stats(args: StatsArgs) -> Result<i32> {
                 );
             }
             api_client
-                .graph_stats_by_workspace(&config.api_key, &wid)
+                .graph_stats_by_workspace(&config.api_key, &wid, None)
                 .await
         }
     };
@@ -725,12 +725,35 @@ pub async fn execute_summary(args: SummaryArgs) -> Result<i32> {
         }
     };
 
+    // Extract egress ports from the local graph so the API can resolve them
+    // even if the persisted server session is older.
+    let egress_ports: Vec<u16> = {
+        let re = regex::Regex::new(r":(\d{2,5})(?:/|$)").expect("valid regex");
+        let mut ports: Vec<u16> = graph
+            .http_calls
+            .iter()
+            .filter_map(|e| {
+                let hay = e.url.as_deref().unwrap_or(&e.remote);
+                let cap = re.captures(hay)?;
+                let p: u16 = cap.get(1)?.as_str().parse().ok()?;
+                Some(p)
+            })
+            .collect();
+        ports.sort();
+        ports.dedup();
+        ports
+    };
+
     // Fetch stats from API (to verify connection and get persisted data)
     let api_stats = match &identifier {
-        ResolvedIdentifier::SessionId(sid) => api_client.graph_stats(&config.api_key, sid).await,
+        ResolvedIdentifier::SessionId(sid) => {
+            api_client
+                .graph_stats(&config.api_key, sid, Some(&egress_ports))
+                .await
+        }
         ResolvedIdentifier::WorkspaceId(wid) => {
             api_client
-                .graph_stats_by_workspace(&config.api_key, wid)
+                .graph_stats_by_workspace(&config.api_key, wid, Some(&egress_ports))
                 .await
         }
     };
@@ -948,6 +971,9 @@ fn format_egress_with_resolution(
             })
         });
 
+    // Build the base display first (what we already show today)
+    let base = format_egress_target(remote, url).to_string();
+
     // Look up cross-workspace link by port
     if let Some(p) = port {
         if let Some(link) = cross_workspace_links.iter().find(|l| l.egress_port == p) {
@@ -956,35 +982,18 @@ fn format_egress_with_resolution(
                 .as_deref()
                 .unwrap_or(&link.target_workspace_id);
 
-            // Find a matching route by method
-            let route_match = link
+            // If we have a route match, we can keep it for later, but per UX request
+            // we always show the workspace name in parentheses next to the target.
+            let _route_match = link
                 .routes
                 .iter()
                 .find(|r| r.method.eq_ignore_ascii_case(method));
 
-            if let Some(route) = route_match {
-                return format!(
-                    "{}:{}{} → {}::{}",
-                    workspace_name.bright_cyan(),
-                    p.to_string().bright_magenta(),
-                    route.path.bright_white(),
-                    workspace_name.dimmed(),
-                    route.handler.bright_green()
-                );
-            } else {
-                // No exact route match, just show workspace
-                return format!(
-                    "{}:{} {}",
-                    workspace_name.bright_cyan(),
-                    p.to_string().bright_magenta(),
-                    format!("({})", workspace_name).dimmed()
-                );
-            }
+            return format!("{} {}", base, format!("({})", workspace_name).dimmed());
         }
     }
 
-    // Fall back to standard formatting
-    format_egress_target(remote, url).to_string()
+    base
 }
 
 fn output_summary_formatted(
@@ -1026,15 +1035,39 @@ fn output_summary_formatted(
         );
     }
 
-    // Listening ports line (if any detected)
+    // Listening ports line (best-effort)
+    // We currently detect ports via env var defaults, which can include egress ports.
+    // Filter out ports that appear as egress targets in this graph to reduce false positives.
     if !graph.listening_ports.is_empty() {
-        let ports_str = graph
+        let re = regex::Regex::new(r":(\d{2,5})(?:/|$)").expect("valid regex");
+        let mut egress_ports: Vec<u16> = graph
+            .http_calls
+            .iter()
+            .filter_map(|e| {
+                let hay = e.url.as_deref().unwrap_or(&e.remote);
+                let cap = re.captures(hay)?;
+                let p: u16 = cap.get(1)?.as_str().parse().ok()?;
+                Some(p)
+            })
+            .collect();
+        egress_ports.sort();
+        egress_ports.dedup();
+
+        let ports: Vec<u16> = graph
             .listening_ports
             .iter()
-            .map(|p| p.to_string().bright_magenta().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("{} {}", "Listens on:".bold(), ports_str);
+            .copied()
+            .filter(|p| !egress_ports.contains(p))
+            .collect();
+
+        if !ports.is_empty() {
+            let ports_str = ports
+                .iter()
+                .map(|p| p.to_string().bright_magenta().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("{} {}", "Listens on:".bold(), ports_str);
+        }
     }
     println!();
 

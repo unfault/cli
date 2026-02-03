@@ -967,8 +967,20 @@ impl ApiClient {
         &self,
         api_key: &str,
         session_id: &str,
+        egress_ports: Option<&[u16]>,
     ) -> Result<GraphStatsResponse, ApiError> {
-        let url = format!("{}/api/v1/graph/stats/{}", self.base_url, session_id);
+        let mut url = format!("{}/api/v1/graph/stats/{}", self.base_url, session_id);
+
+        if let Some(ports) = egress_ports {
+            if !ports.is_empty() {
+                let ports_str = ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                url.push_str(&format!("?egress_ports={}", urlencoding::encode(&ports_str)));
+            }
+        }
 
         let response = self
             .client
@@ -1016,12 +1028,24 @@ impl ApiClient {
         &self,
         api_key: &str,
         workspace_id: &str,
+        egress_ports: Option<&[u16]>,
     ) -> Result<GraphStatsResponse, ApiError> {
-        let url = format!(
+        let mut url = format!(
             "{}/api/v1/graph/stats?workspace_id={}",
             self.base_url,
             urlencoding::encode(workspace_id)
         );
+
+        if let Some(ports) = egress_ports {
+            if !ports.is_empty() {
+                let ports_str = ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                url.push_str(&format!("&egress_ports={}", urlencoding::encode(&ports_str)));
+            }
+        }
 
         let response = self
             .client
