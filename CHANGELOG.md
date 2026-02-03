@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.24] - 2026-02-03
+
 ### Added
 
 - `unfault graph`: show outbound HTTP egress calls under entrypoints (and include remote server nodes/HTTP call edges in the summary).
