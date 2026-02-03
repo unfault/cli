@@ -235,6 +235,56 @@ pub struct RAGQueryResponse {
     pub routing_confidence: Option<f64>,
     /// Actionable hint when the query cannot be fully answered.
     pub hint: Option<String>,
+
+    /// Optional clarification payload with candidate targets.
+    #[serde(default)]
+    pub disambiguation: Option<RAGDisambiguation>,
+}
+
+/// Structured clarification payload (candidate targets).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGDisambiguation {
+    /// Routed intent for the query (usage/impact/dependencies/flow/etc.).
+    pub intent: String,
+    /// Why disambiguation is needed.
+    pub reason: String,
+    /// Short human-readable explanation.
+    pub message: Option<String>,
+    /// Per-token diagnostics and candidate lists.
+    #[serde(default)]
+    pub tokens: Vec<RAGDisambiguationToken>,
+}
+
+/// Disambiguation information for one extracted target token.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGDisambiguationToken {
+    /// Canonical token used for resolution.
+    pub token: String,
+    /// Raw token that appeared in the query (if different from canonical).
+    pub input_token: Option<String>,
+    /// Deterministic diagnostic for this token.
+    pub diagnostic: Option<String>,
+    /// Ranked candidates for this token.
+    #[serde(default)]
+    pub candidates: Vec<RAGDisambiguationCandidate>,
+}
+
+/// A suggested target the user can pick to refine the query.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGDisambiguationCandidate {
+    /// Candidate node type (file/function/class/etc.).
+    pub node_type: String,
+    pub name: Option<String>,
+    pub qualified_name: Option<String>,
+    pub path: Option<String>,
+    pub match_kind: Option<String>,
+    pub matched_field: Option<String>,
+    pub matched_value: Option<String>,
+    /// A safe token to paste into a follow-up query (usually quoted path or symbol).
+    pub rewrite: Option<String>,
+    /// Whether this is a weak match.
+    #[serde(default)]
+    pub is_weak: bool,
 }
 
 /// Graph context for impact/dependency queries.
@@ -697,5 +747,51 @@ mod tests {
         assert_eq!(response.sessions.len(), 1);
         assert_eq!(response.findings.len(), 1);
         assert_eq!(response.sources.len(), 1);
+    }
+
+    #[test]
+    fn test_rag_query_response_disambiguation_deserialization() {
+        let json = r#"{
+            "query": "show me the risks from main.rs",
+            "sessions": [],
+            "findings": [],
+            "sources": [],
+            "context_summary": "No relevant context found.",
+            "hint": "I found a few possible targets you can use.",
+            "disambiguation": {
+                "intent": "impact",
+                "reason": "target_not_found",
+                "message": "Pick one of these.",
+                "tokens": [
+                    {
+                        "token": "main.rs",
+                        "diagnostic": "target_not_found_in_graph",
+                        "candidates": [
+                            {
+                                "node_type": "file",
+                                "path": "src/main.rs",
+                                "match_kind": "boundary",
+                                "matched_field": "path",
+                                "matched_value": "src/main.rs",
+                                "rewrite": "\"src/main.rs\"",
+                                "is_weak": false
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+
+        let response: RAGQueryResponse = serde_json::from_str(json).unwrap();
+        let dis = response.disambiguation.expect("expected disambiguation");
+        assert_eq!(dis.intent, "impact");
+        assert_eq!(dis.reason, "target_not_found");
+        assert_eq!(dis.tokens.len(), 1);
+        assert_eq!(dis.tokens[0].token, "main.rs");
+        assert_eq!(dis.tokens[0].candidates.len(), 1);
+        assert_eq!(
+            dis.tokens[0].candidates[0].path.as_deref(),
+            Some("src/main.rs")
+        );
     }
 }

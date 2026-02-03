@@ -24,8 +24,8 @@ use termimad::MadSkin;
 use crate::api::ApiClient;
 use crate::api::llm::{LlmClient, build_llm_context};
 use crate::api::rag::{
-    ClientGraphData, RAGEnumerateContext, RAGEnumerateItem, RAGFlowContext, RAGFlowPathNode,
-    RAGGraphContext, RAGQueryRequest, RAGQueryResponse, RAGSloContext,
+    ClientGraphData, RAGDisambiguation, RAGEnumerateContext, RAGEnumerateItem, RAGFlowContext,
+    RAGFlowPathNode, RAGGraphContext, RAGQueryRequest, RAGQueryResponse, RAGSloContext,
 };
 use crate::config::Config;
 use crate::exit_codes::*;
@@ -1482,6 +1482,7 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
             || hint.contains("don't have any context")
             || hint.contains("no graph data")
             || hint.contains("no SLO data")
+            || hint.contains("possible targets")
             || hint.contains("issues found")  // "No X issues found in your codebase"
             || hint.contains("looks clean"); // "Your code looks clean"
 
@@ -1874,6 +1875,47 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
     )
 }
 
+fn render_disambiguation(disambiguation: &RAGDisambiguation) {
+    println!("{}", "Possible targets".bold());
+
+    if let Some(msg) = &disambiguation.message {
+        if !msg.trim().is_empty() {
+            println!("{}", msg.dimmed());
+        }
+    }
+
+    let mut idx: usize = 1;
+    for token in &disambiguation.tokens {
+        if disambiguation.tokens.len() > 1 {
+            println!();
+            println!("{} '{}'", "For".dimmed(), token.token.bold());
+        }
+
+        for cand in token.candidates.iter().take(10) {
+            let display = cand
+                .path
+                .as_deref()
+                .or(cand.qualified_name.as_deref())
+                .or(cand.name.as_deref())
+                .unwrap_or("<unknown>");
+
+            let weak = if cand.is_weak { " (weak)" } else { "" };
+            println!(
+                "  {}. {} {}{}",
+                idx,
+                display,
+                format!("[{}]", cand.node_type).dimmed(),
+                weak.dimmed()
+            );
+            idx += 1;
+        }
+
+        if let Some(suggest) = token.candidates.iter().find_map(|c| c.rewrite.as_deref()) {
+            println!("  {} {}", "Try:".dimmed(), suggest.bright_yellow());
+        }
+    }
+}
+
 fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
     let seed = quick_take_seed(response);
 
@@ -2169,6 +2211,12 @@ fn output_formatted(
             }
             println!();
         }
+    }
+
+    // If we have disambiguation candidates, render them as a list.
+    if let Some(disambiguation) = &response.disambiguation {
+        render_disambiguation(disambiguation);
+        println!();
     }
 
     // If we have flow context, render it prominently (this is the "semantic" answer)
@@ -2491,6 +2539,7 @@ mod tests {
             graph_stats: None,
             routing_confidence: None,
             hint: None,
+            disambiguation: None,
         };
 
         let take = build_no_llm_quick_take(&response).unwrap();
@@ -2525,6 +2574,7 @@ mod tests {
             graph_stats: None,
             routing_confidence: None,
             hint: None,
+            disambiguation: None,
         };
 
         let take = build_no_llm_quick_take(&response).unwrap();
@@ -2577,6 +2627,7 @@ mod tests {
             graph_stats: None,
             routing_confidence: None,
             hint: Some("Please specify a file path or symbol".to_string()),
+            disambiguation: None,
         };
 
         let reply = build_colleague_reply(&response);

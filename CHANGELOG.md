@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `unfault graph`: show outbound HTTP egress calls under entrypoints (and include remote server nodes/HTTP call edges in the summary).
+- `unfault ask`: render API-provided disambiguation candidates ("Possible targets") when a query can’t be resolved unambiguously.
 
 ### Changed
 
+- `unfault addon fault plan`: add `-q/--quiet` to print only the runnable `fault run ...` command.
 - Bumped dependency on `unfault-core` to 0.1.17
 
 ## [0.6.23] - 2026-02-02
