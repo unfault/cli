@@ -692,6 +692,31 @@ pub struct FunctionImpactResponse {
     pub impact_summary: String,
 }
 
+/// A route in a target workspace that matches an egress call.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CrossWorkspaceRoute {
+    /// HTTP method (GET, POST, etc.)
+    pub method: String,
+    /// Route path pattern (e.g., "/orders")
+    pub path: String,
+    /// Handler function name
+    pub handler: String,
+}
+
+/// A resolved cross-workspace HTTP call target.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CrossWorkspaceLink {
+    /// The port number from the egress call
+    pub egress_port: i32,
+    /// The workspace ID that listens on this port
+    pub target_workspace_id: String,
+    /// Human-readable name of the target workspace
+    pub target_workspace_name: Option<String>,
+    /// Routes in the target workspace
+    #[serde(default)]
+    pub routes: Vec<CrossWorkspaceRoute>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GraphStatsResponse {
     /// Number of file nodes
@@ -714,6 +739,9 @@ pub struct GraphStatsResponse {
     pub calls_edge_count: i32,
     /// Total number of edges
     pub total_edges: i32,
+    /// Resolved egress HTTP calls to other known workspaces
+    #[serde(default)]
+    pub cross_workspace_links: Vec<CrossWorkspaceLink>,
 }
 
 // =============================================================================

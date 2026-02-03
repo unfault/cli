@@ -776,10 +776,11 @@ pub async fn execute_summary(args: SummaryArgs) -> Result<i32> {
     };
 
     // Output results
+    let api_stats_ref = api_stats.ok();
     if args.json {
-        output_summary_json(&graph, api_stats.ok().as_ref(), slo_context.as_ref())?;
+        output_summary_json(&graph, api_stats_ref.as_ref(), slo_context.as_ref())?;
     } else {
-        output_summary_formatted(&graph, slo_context.as_ref(), args.verbose);
+        output_summary_formatted(&graph, api_stats_ref.as_ref(), slo_context.as_ref(), args.verbose);
     }
 
     Ok(EXIT_SUCCESS)
@@ -874,11 +875,117 @@ fn output_summary_json(
     Ok(())
 }
 
+/// Format an egress target for display.
+///
+/// Transforms raw remote identifiers into more readable formats:
+/// - `expr:f"{KITCHEN_URL}/orders"` → `{KITCHEN_URL}/orders` (external service)
+/// - `host:api.example.com` → `api.example.com`
+/// - `env:API_HOST` → `$API_HOST`
+fn format_egress_target(remote: &str, url: Option<&str>) -> colored::ColoredString {
+    // Try to extract path from URL if available
+    let path_hint = url
+        .and_then(|u| u.split('/').skip(3).next())
+        .map(|p| format!("/{}", p));
+
+    if let Some(stripped) = remote.strip_prefix("expr:") {
+        // For f-string expressions like `f"{KITCHEN_URL}/orders"`, extract the meaningful part
+        let clean = stripped
+            .trim_start_matches("f\"")
+            .trim_end_matches('"')
+            .to_string();
+        format!("{} {}", clean, "(external)".dimmed()).bright_magenta()
+    } else if let Some(host) = remote.strip_prefix("host:") {
+        // Direct host reference
+        if let Some(path) = path_hint {
+            format!("{}{}", host, path).bright_cyan()
+        } else {
+            host.to_string().bright_cyan()
+        }
+    } else if let Some(env) = remote.strip_prefix("env:") {
+        // Environment variable
+        format!("${} {}", env, "(env var)".dimmed()).bright_yellow()
+    } else {
+        // Fallback
+        remote.to_string().bright_white()
+    }
+}
+
+/// Format an egress target with cross-workspace resolution.
+///
+/// If the egress target matches a known workspace via listening_ports,
+/// displays the resolved workspace and matching routes.
+fn format_egress_with_resolution(
+    remote: &str,
+    url: Option<&str>,
+    method: &str,
+    cross_workspace_links: &[crate::api::graph::CrossWorkspaceLink],
+) -> String {
+    use regex::Regex;
+
+    // Try to extract port from the remote identifier
+    let port_re = Regex::new(r":(\d{2,5})(?:/|$)").ok();
+    let port: Option<i32> = port_re
+        .and_then(|re| re.captures(remote))
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse().ok())
+        .or_else(|| {
+            // Also try to extract from URL
+            url.and_then(|u| {
+                let re = Regex::new(r":(\d{2,5})(?:/|$)").ok()?;
+                re.captures(u)?.get(1)?.as_str().parse().ok()
+            })
+        });
+
+    // Look up cross-workspace link by port
+    if let Some(p) = port {
+        if let Some(link) = cross_workspace_links.iter().find(|l| l.egress_port == p) {
+            let workspace_name = link
+                .target_workspace_name
+                .as_deref()
+                .unwrap_or(&link.target_workspace_id);
+
+            // Find a matching route by method
+            let route_match = link
+                .routes
+                .iter()
+                .find(|r| r.method.eq_ignore_ascii_case(method));
+
+            if let Some(route) = route_match {
+                return format!(
+                    "{}:{}{} → {}::{}",
+                    workspace_name.bright_cyan(),
+                    p.to_string().bright_magenta(),
+                    route.path.bright_white(),
+                    workspace_name.dimmed(),
+                    route.handler.bright_green()
+                );
+            } else {
+                // No exact route match, just show workspace
+                return format!(
+                    "{}:{} {}",
+                    workspace_name.bright_cyan(),
+                    p.to_string().bright_magenta(),
+                    format!("({})", workspace_name).dimmed()
+                );
+            }
+        }
+    }
+
+    // Fall back to standard formatting
+    format_egress_target(remote, url).to_string()
+}
+
 fn output_summary_formatted(
     graph: &crate::session::graph_builder::SerializableGraph,
+    api_stats: Option<&GraphStatsResponse>,
     slo_context: Option<&crate::api::rag::RAGSloContext>,
     verbose: bool,
 ) {
+    // Extract cross-workspace links for egress resolution
+    let cross_links: &[crate::api::graph::CrossWorkspaceLink] = api_stats
+        .map(|s| s.cross_workspace_links.as_slice())
+        .unwrap_or(&[]);
+
     // Nodes summary line
     println!(
         "{} {} functions, {} classes, {} routes, {} remote servers",
@@ -897,6 +1004,17 @@ fn output_summary_formatted(
         graph.stats.http_call_edge_count.to_string().green(),
         graph.stats.import_edge_count.to_string().green()
     );
+
+    // Listening ports line (if any detected)
+    if !graph.listening_ports.is_empty() {
+        let ports_str = graph
+            .listening_ports
+            .iter()
+            .map(|p| p.to_string().bright_magenta().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("{} {}", "Listens on:".bold(), ports_str);
+    }
     println!();
 
     // Entry points (HTTP routes)
@@ -951,12 +1069,20 @@ fn output_summary_formatted(
                 } else {
                     "├─"
                 };
+
+                // Format egress target with cross-workspace resolution
+                let target = format_egress_with_resolution(
+                    &e.remote,
+                    e.url.as_deref(),
+                    method,
+                    cross_links,
+                );
                 println!(
                     "               {} {} {} {}",
                     connector.dimmed(),
-                    "Egress:".dimmed(),
+                    "→".dimmed(),
                     m,
-                    e.remote.bright_white()
+                    target
                 );
             }
         }
@@ -986,10 +1112,11 @@ fn output_summary_formatted(
                 _ => format!("{:6}", method).normal(),
             };
 
+            let target = format_egress_with_resolution(&e.remote, e.url.as_deref(), method, cross_links);
             println!(
                 "  {} {} {} {}",
                 method_colored,
-                e.remote.bright_white(),
+                target,
                 "←".dimmed(),
                 e.caller.dimmed()
             );
