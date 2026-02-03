@@ -10,15 +10,15 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use unfault_core::graph::{
-    CodeGraph, GraphEdgeKind, GraphNode, RemoteServerKind, build_code_graph,
+    build_code_graph, CodeGraph, GraphEdgeKind, GraphNode, RemoteServerKind,
 };
 use unfault_core::parse::ast::FileId;
 use unfault_core::parse::{go, python, rust as rust_parse, typescript};
-use unfault_core::semantics::SourceSemantics;
 use unfault_core::semantics::go::model::GoFileSemantics;
 use unfault_core::semantics::python::model::PyFileSemantics;
 use unfault_core::semantics::rust::{build_rust_semantics, model::RustFileSemantics};
 use unfault_core::semantics::typescript::model::TsFileSemantics;
+use unfault_core::semantics::SourceSemantics;
 use unfault_core::types::context::{Language, SourceFile};
 
 /// A serializable representation of the code graph for sending to the API.
@@ -50,6 +50,9 @@ pub struct SerializableGraph {
     pub framework_references: Vec<FrameworkReferenceEdge>,
     /// SLO nodes from observability providers
     pub slos: Vec<SloNode>,
+    /// Listening ports detected from env var defaults (e.g., PORT=8080)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub listening_ports: Vec<u16>,
     /// Graph statistics
     pub stats: GraphStats,
 }
@@ -302,11 +305,19 @@ pub fn build_local_graph(
         eprintln!("Parsed {} files successfully", semantics_entries.len());
     }
 
+    // Collect listening ports from all semantics (auto-detected from env var defaults)
+    let mut listening_ports: Vec<u16> = semantics_entries
+        .iter()
+        .flat_map(|(_, sem)| sem.detected_ports())
+        .collect();
+    listening_ports.sort();
+    listening_ports.dedup();
+
     // Build the code graph
     let code_graph = build_code_graph(&semantics_entries);
 
     // Serialize to our API-compatible format
-    Ok(serialize_graph(&code_graph))
+    Ok(serialize_graph(&code_graph, listening_ports))
 }
 
 /// Discover source files in a directory using ignore patterns.
@@ -346,7 +357,7 @@ fn detect_language(path: &Path) -> Option<Language> {
 }
 
 /// Serialize a CodeGraph to our API-compatible JSON format.
-fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
+fn serialize_graph(graph: &CodeGraph, listening_ports: Vec<u16>) -> SerializableGraph {
     let mut files = Vec::new();
     let mut functions = Vec::new();
     let mut imports = Vec::new();
@@ -695,6 +706,7 @@ fn serialize_graph(graph: &CodeGraph) -> SerializableGraph {
         http_calls,
         framework_references,
         slos,
+        listening_ports,
         stats: GraphStats {
             file_count: graph_stats.file_count,
             function_count: graph_stats.function_count,

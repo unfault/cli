@@ -35,17 +35,17 @@ use colored::Colorize;
 use log::debug;
 use rayon::prelude::*;
 
-use unfault_core::IntermediateRepresentation;
 use unfault_core::graph::build_code_graph;
 use unfault_core::parse::ast::FileId;
 use unfault_core::parse::{go, python, rust as rust_parse, typescript};
-use unfault_core::semantics::SourceSemantics;
 use unfault_core::semantics::go::model::GoFileSemantics;
 use unfault_core::semantics::python::model::PyFileSemantics;
 use unfault_core::semantics::rust::build_rust_semantics;
 use unfault_core::semantics::rust::model::RustFileSemantics;
 use unfault_core::semantics::typescript::model::TsFileSemantics;
+use unfault_core::semantics::SourceSemantics;
 use unfault_core::types::context::{Language, SourceFile};
+use unfault_core::IntermediateRepresentation;
 
 use super::semantics_cache::{CacheStats, SemanticsCache};
 
@@ -56,6 +56,15 @@ pub struct IrBuildResult {
     pub ir: IntermediateRepresentation,
     /// Cache statistics (hits, misses, etc.)
     pub cache_stats: CacheStats,
+}
+
+/// Workspace metadata for cross-workspace tracing.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceMetadata {
+    /// Unique identifier for this workspace (computed from git remote + meta files).
+    pub workspace_id: Option<String>,
+    /// Port(s) this service listens on, extracted from framework detection.
+    pub listening_ports: Vec<u16>,
 }
 
 /// Build an Intermediate Representation from files in a directory.
@@ -94,6 +103,30 @@ pub fn build_ir(
     workspace_path: &Path,
     file_paths: Option<&[PathBuf]>,
     verbose: bool,
+) -> Result<IntermediateRepresentation> {
+    build_ir_with_metadata(workspace_path, file_paths, verbose, None)
+}
+
+/// Build an Intermediate Representation with workspace metadata for cross-workspace tracing.
+///
+/// This is the full version that accepts workspace metadata (workspace_id, listening_ports)
+/// for enabling cross-workspace tracing between services.
+///
+/// # Arguments
+///
+/// * `workspace_path` - Path to the workspace directory
+/// * `file_paths` - Optional list of specific files to include (if None, discover all)
+/// * `verbose` - Enable verbose logging
+/// * `metadata` - Optional workspace metadata for cross-workspace tracing
+///
+/// # Returns
+///
+/// An [`IntermediateRepresentation`] containing semantics, code graph, and workspace metadata.
+pub fn build_ir_with_metadata(
+    workspace_path: &Path,
+    file_paths: Option<&[PathBuf]>,
+    verbose: bool,
+    metadata: Option<WorkspaceMetadata>,
 ) -> Result<IntermediateRepresentation> {
     // Determine files to process
     let files = match file_paths {
@@ -255,6 +288,14 @@ pub fn build_ir(
         eprintln!("Parsed {} files successfully", semantics_entries.len());
     }
 
+    // Collect listening ports from all semantics (auto-detected from env var defaults)
+    let mut detected_ports: Vec<u16> = all_semantics
+        .iter()
+        .flat_map(|s| s.detected_ports())
+        .collect();
+    detected_ports.sort();
+    detected_ports.dedup();
+
     // Build the code graph
     let code_graph = build_code_graph(&semantics_entries);
 
@@ -267,9 +308,25 @@ pub fn build_ir(
             stats.import_edge_count,
             stats.uses_library_edge_count
         );
+        if !detected_ports.is_empty() {
+            eprintln!("Detected listening ports: {:?}", detected_ports);
+        }
     }
 
-    Ok(IntermediateRepresentation::new(all_semantics, code_graph))
+    // Build IR with workspace metadata if provided
+    // Merge detected ports with explicitly provided ports
+    let metadata = metadata.unwrap_or_default();
+    let mut listening_ports = metadata.listening_ports;
+    listening_ports.extend(detected_ports);
+    listening_ports.sort();
+    listening_ports.dedup();
+
+    Ok(IntermediateRepresentation::with_workspace(
+        metadata.workspace_id,
+        listening_ports,
+        all_semantics,
+        code_graph,
+    ))
 }
 
 /// Build an Intermediate Representation with caching support.
@@ -283,6 +340,7 @@ pub fn build_ir(
 /// * `workspace_path` - Path to the workspace directory
 /// * `file_paths` - Optional list of specific files to include
 /// * `verbose` - Enable verbose logging
+/// * `content_overrides` - Optional map of file paths to content overrides (for LSP)
 ///
 /// # Returns
 ///
@@ -293,7 +351,7 @@ pub fn build_ir(
 /// ```rust,ignore
 /// use unfault::session::ir_builder::build_ir_cached;
 ///
-/// let result = build_ir_cached(&workspace_path, None, false, None)?;
+/// let result = build_ir_cached(&workspace_path, None, false, None, None)?;
 /// println!("Cache hit rate: {:.1}%", result.cache_stats.hit_rate());
 /// let ir_json = serde_json::to_string(&result.ir)?;
 /// ```
@@ -302,6 +360,31 @@ pub fn build_ir_cached(
     file_paths: Option<&[PathBuf]>,
     verbose: bool,
     content_overrides: Option<&std::collections::HashMap<PathBuf, String>>,
+) -> Result<IrBuildResult> {
+    build_ir_cached_with_metadata(workspace_path, file_paths, verbose, content_overrides, None)
+}
+
+/// Build an Intermediate Representation with caching and workspace metadata.
+///
+/// Full version that accepts workspace metadata for cross-workspace tracing.
+///
+/// # Arguments
+///
+/// * `workspace_path` - Path to the workspace directory
+/// * `file_paths` - Optional list of specific files to include
+/// * `verbose` - Enable verbose logging
+/// * `content_overrides` - Optional map of file paths to content overrides (for LSP)
+/// * `metadata` - Optional workspace metadata for cross-workspace tracing
+///
+/// # Returns
+///
+/// An [`IrBuildResult`] containing the IR and cache statistics.
+pub fn build_ir_cached_with_metadata(
+    workspace_path: &Path,
+    file_paths: Option<&[PathBuf]>,
+    verbose: bool,
+    content_overrides: Option<&std::collections::HashMap<PathBuf, String>>,
+    metadata: Option<WorkspaceMetadata>,
 ) -> Result<IrBuildResult> {
     let _total_start = Instant::now();
 
@@ -512,6 +595,14 @@ pub fn build_ir_cached(
         semantics_entries.push((file_id, Arc::new(semantics)));
     }
 
+    // Collect listening ports from all semantics (auto-detected from env var defaults)
+    let mut detected_ports: Vec<u16> = all_semantics
+        .iter()
+        .flat_map(|s| s.detected_ports())
+        .collect();
+    detected_ports.sort();
+    detected_ports.dedup();
+
     // Get final cache stats
     let cache_stats = cache.lock().unwrap().stats().clone();
 
@@ -524,6 +615,9 @@ pub fn build_ir_cached(
             cache_stats.hit_rate()
         );
         eprintln!("{} File read + cache: {}ms", "TIMING".yellow(), parse_ms);
+        if !detected_ports.is_empty() {
+            eprintln!("Detected listening ports: {:?}", detected_ports);
+        }
     }
 
     // Build the code graph
@@ -556,8 +650,20 @@ pub fn build_ir_cached(
     debug!("  - Calls edges: {}", stats.calls_edge_count);
     debug!("  - External modules: {}", stats.external_module_count);
 
-    // Create IR and log serialization details
-    let ir = IntermediateRepresentation::new(all_semantics, code_graph);
+    // Create IR with workspace metadata if provided
+    // Merge detected ports with explicitly provided ports
+    let metadata = metadata.unwrap_or_default();
+    let mut listening_ports = metadata.listening_ports;
+    listening_ports.extend(detected_ports);
+    listening_ports.sort();
+    listening_ports.dedup();
+
+    let ir = IntermediateRepresentation::with_workspace(
+        metadata.workspace_id,
+        listening_ports,
+        all_semantics,
+        code_graph,
+    );
 
     let serialization_start = Instant::now();
     match serde_json::to_string(&ir) {
@@ -572,6 +678,12 @@ pub fn build_ir_cached(
             );
             debug!("  - Serialization time: {}ms", serialization_ms);
             debug!("  - Semantics count: {}", ir.semantics.len());
+            if let Some(ref ws_id) = ir.workspace_id {
+                debug!("  - Workspace ID: {}", ws_id);
+            }
+            if !ir.listening_ports.is_empty() {
+                debug!("  - Listening ports: {:?}", ir.listening_ports);
+            }
         }
         Err(e) => {
             debug!("[GRAPH] Failed to serialize IR: {}", e);
@@ -649,6 +761,21 @@ mod tests {
         assert!(result.is_ok());
         let ir = result.unwrap();
         assert_eq!(ir.file_count(), 0);
+    }
+
+    #[test]
+    fn test_build_ir_with_workspace_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("main.py"), "print('ok')\n").unwrap();
+
+        let meta = WorkspaceMetadata {
+            workspace_id: Some("wks_test".to_string()),
+            listening_ports: vec![8080, 8081],
+        };
+
+        let ir = build_ir_with_metadata(temp_dir.path(), None, false, Some(meta)).unwrap();
+        assert_eq!(ir.workspace_id.as_deref(), Some("wks_test"));
+        assert_eq!(ir.listening_ports, vec![8080, 8081]);
     }
 
     #[test]
