@@ -900,7 +900,7 @@ fn format_egress_target(remote: &str, url: Option<&str>) -> colored::ColoredStri
             .to_string();
         format!("{} {}", clean, "(external)".dimmed()).bright_magenta()
     } else if let Some(host) = remote.strip_prefix("host:") {
-        // Direct host reference
+        // Direct host reference (legacy prefix)
         if let Some(path) = path_hint {
             format!("{}{}", host, path).bright_cyan()
         } else {
@@ -909,6 +909,13 @@ fn format_egress_target(remote: &str, url: Option<&str>) -> colored::ColoredStri
     } else if let Some(env) = remote.strip_prefix("env:") {
         // Environment variable
         format!("${} {}", env, "(env var)".dimmed()).bright_yellow()
+    } else if !remote.starts_with("expr:") && (remote.contains('.') || remote.contains(':')) {
+        // Host-like string without a prefix (what the graph currently emits for Host remotes)
+        if let Some(path) = path_hint {
+            format!("{}{}", remote, path).bright_cyan()
+        } else {
+            remote.to_string().bright_cyan()
+        }
     } else {
         // Fallback
         remote.to_string().bright_white()
@@ -1009,6 +1016,15 @@ fn output_summary_formatted(
         graph.stats.http_call_edge_count.to_string().green(),
         graph.stats.import_edge_count.to_string().green()
     );
+
+    // If the server has no persisted graph session, we can't resolve egress calls to known workspaces.
+    if api_stats.is_none() && !graph.http_calls.is_empty() {
+        println!(
+            "{} {}",
+            "ℹ".blue(),
+            "Cross-workspace resolution requires a server session. Run 'unfault review' to persist the graph.".dimmed()
+        );
+    }
 
     // Listening ports line (if any detected)
     if !graph.listening_ports.is_empty() {

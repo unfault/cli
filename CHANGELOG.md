@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.26] - 2026-02-03
+
+### Added
+
+- `unfault review`: propagate detected `listening_ports` to the API during graph ingest (enables cross-workspace HTTP tracing).
+- `unfault graph`: resolve outbound egress calls to known workspaces when the server has graph data (shows `service:port/path → service::handler`).
+
+### Fixed
+
+- `unfault graph`: format host remotes consistently (the graph emits host remotes without a `host:` prefix).
+- Clippy warnings are now clean with `-D warnings`.
+
+### Changed
+
+- Bumped dependency on `unfault-core` to 0.1.19
+
 ## [0.6.25] - 2026-02-03
 
 ### Added
