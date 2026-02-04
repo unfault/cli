@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.29] - 2026-02-04
+
+### Added
+
+- `unfault ask`: intent-based rendering that keeps the default output conversational ("colleague voice") while showing a compact, graph-driven workspace brief (entrypoints/hotspots/deps/cross-workspace) when available.
+
+### Changed
+
+- `unfault ask`: prefer telling a story from the graph for overview-style questions instead of leading with findings.
+
 ## [0.6.28] - 2026-02-04
 
 ### Added
@@ -328,7 +338,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
-[Unreleased]: https://github.com/unfault/cli/compare/v0.6.28...HEAD
+[Unreleased]: https://github.com/unfault/cli/compare/v0.6.29...HEAD
+[0.6.29]: https://github.com/unfault/cli/compare/v0.6.28...v0.6.29
 [0.6.28]: https://github.com/unfault/cli/compare/v0.6.27...v0.6.28
 [0.6.27]: https://github.com/unfault/cli/compare/v0.6.26...v0.6.27
 [0.6.26]: https://github.com/unfault/cli/compare/v0.6.25...v0.6.26
