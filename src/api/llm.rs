@@ -1096,6 +1096,150 @@ pub fn build_llm_context(response: &crate::api::rag::RAGQueryResponse) -> String
     parts.join("\n")
 }
 
+pub fn build_llm_context_with_local_code(
+    response: &crate::api::rag::RAGQueryResponse,
+    workspace_path: Option<&std::path::Path>,
+    graph_data: Option<&crate::api::rag::ClientGraphData>,
+) -> String {
+    let mut parts: Vec<String> = vec![build_llm_context(response)];
+
+    let Some(root) = workspace_path else {
+        return parts.join("\n");
+    };
+
+    let mut candidate_paths: Vec<String> = Vec::new();
+    if let Some(ctx) = &response.workspace_context {
+        candidate_paths.extend(ctx.entrypoints.iter().take(3).cloned());
+        candidate_paths.extend(ctx.central_files.iter().take(3).map(|f| f.path.clone()));
+    }
+    if let Some(flow) = &response.flow_context {
+        for p in &flow.paths {
+            for n in p.iter().take(6) {
+                if let Some(fp) = &n.path {
+                    candidate_paths.push(fp.clone());
+                }
+            }
+        }
+    }
+    candidate_paths.sort();
+    candidate_paths.dedup();
+    candidate_paths.truncate(5);
+
+    if candidate_paths.is_empty() {
+        return parts.join("\n");
+    }
+
+    let mut excerpts: Vec<String> = Vec::new();
+    for rel in candidate_paths {
+        let abs = root.join(&rel);
+        let Ok(text) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+
+        // Keep context tight.
+        let mut kept: Vec<String> = Vec::new();
+        let mut lines = text.lines().enumerate().peekable();
+        while let Some((idx, line)) = lines.next() {
+            let l = line.trim_start();
+
+            let is_route = l.starts_with("@app.")
+                || l.starts_with("@router.")
+                || l.starts_with("@app.get(")
+                || l.starts_with("@app.post(")
+                || l.starts_with("@app.put(")
+                || l.starts_with("@app.patch(")
+                || l.starts_with("@app.delete(");
+
+            let is_model = l.starts_with("class ") && l.contains("BaseModel") && l.ends_with(":");
+            let is_http =
+                l.contains("httpx.") || l.contains("client.get") || l.contains("client.post");
+            let is_env = l.contains("os.getenv")
+                || l.contains("_URL")
+                || l.contains("_HOST")
+                || l.contains("_PORT");
+
+            if !(is_route || is_model || is_http || is_env) {
+                continue;
+            }
+
+            // Capture a small window around the match.
+            let start = idx.saturating_sub(0);
+            let mut buf = Vec::new();
+            buf.push(format!("{:4} | {}", start + 1, line));
+
+            // For decorators and class defs, capture a few following lines.
+            let follow = if is_model { 20 } else { 6 };
+            for _ in 0..follow {
+                let Some((j, nxt)) = lines.peek().cloned() else {
+                    break;
+                };
+                let nxt_trim = nxt.trim();
+                if nxt_trim.is_empty() {
+                    break;
+                }
+                // Stop at next top-level def/class after a model block.
+                if is_model
+                    && (nxt.starts_with("class ")
+                        || nxt.starts_with("def ")
+                        || nxt.starts_with("@"))
+                {
+                    break;
+                }
+                let _ = lines.next();
+                buf.push(format!("{:4} | {}", j + 1, nxt));
+            }
+
+            kept.extend(buf);
+            if kept.len() > 120 {
+                break;
+            }
+        }
+
+        if kept.is_empty() {
+            continue;
+        }
+
+        excerpts.push(format!(
+            "\n## Code excerpts ({})\n```\n{}\n```",
+            rel,
+            kept.join("\n")
+        ));
+    }
+
+    if !excerpts.is_empty() {
+        parts.push("\n# Local code context".to_string());
+        parts.extend(excerpts);
+    }
+
+    // Optionally include a compact route list from local graph, if the question
+    // asks for routes but the response doesn't already contain enumerate context.
+    if response.enumerate_context.is_none() {
+        if let Some(gd) = graph_data {
+            let ql = response.query.to_lowercase();
+            if ql.contains("route") || ql.contains("endpoint") {
+                let mut routes: Vec<String> = Vec::new();
+                for f in &gd.functions {
+                    let hm = f.get("http_method").and_then(|v| v.as_str()).unwrap_or("");
+                    let hp = f.get("http_path").and_then(|v| v.as_str()).unwrap_or("");
+                    if !hm.is_empty() && !hp.is_empty() {
+                        routes.push(format!("{} {}", hm.to_uppercase(), hp));
+                    }
+                }
+                routes.sort();
+                routes.dedup();
+                if !routes.is_empty() {
+                    parts.push("\n## Routes (from local graph)".to_string());
+                    for r in routes.into_iter().take(20) {
+                        parts.push(format!("- {}", r));
+                    }
+                }
+            }
+        }
+    }
+
+    parts.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1229,5 +1373,12 @@ mod tests {
         assert!(context.contains("http.timeout"));
         assert!(context.contains("High"));
         assert!(context.contains("api/client.py:42"));
+    }
+
+    #[test]
+    fn test_build_llm_context_with_local_code_no_workspace_path_is_ok() {
+        let response = base_response("No context");
+        let context = build_llm_context_with_local_code(&response, None, None);
+        assert!(context.contains("No context"));
     }
 }

@@ -22,7 +22,7 @@ use std::path::Path;
 use termimad::MadSkin;
 
 use crate::api::ApiClient;
-use crate::api::llm::{LlmClient, build_llm_context};
+use crate::api::llm::{LlmClient, build_llm_context_with_local_code};
 use crate::api::rag::{
     ClientGraphData, RAGDisambiguation, RAGEnumerateContext, RAGEnumerateItem, RAGFlowContext,
     RAGFlowPathNode, RAGGraphContext, RAGQueryRequest, RAGQueryResponse, RAGSloContext,
@@ -898,7 +898,11 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
             }
 
             // Build rich context for LLM
-            let llm_context = build_llm_context(&response);
+            let llm_context = build_llm_context_with_local_code(
+                &response,
+                Some(&workspace_path),
+                local_graph_data.as_ref(),
+            );
 
             // Create LLM client and generate response with streaming
             match LlmClient::new_with_options(llm_config, args.verbose) {
