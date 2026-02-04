@@ -1480,6 +1480,165 @@ fn is_broad_health_query(query: &str) -> bool {
         || q.contains("project health")
 }
 
+fn is_workspace_overview_query(query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+
+    if matches!(
+        q.as_str(),
+        "describe this workspace"
+            | "describe the workspace"
+            | "describe this repo"
+            | "describe this repository"
+            | "describe this codebase"
+            | "workspace overview"
+            | "project overview"
+            | "repo overview"
+            | "codebase overview"
+    ) {
+        return true;
+    }
+
+    // Loose match (keep conservative to avoid false positives).
+    (q.contains("describe") || q.contains("overview") || q.contains("summar"))
+        && (q.contains("workspace")
+            || q.contains("repo")
+            || q.contains("repository")
+            || q.contains("codebase")
+            || q.contains("project"))
+}
+
+fn should_show_health_section(response: &RAGQueryResponse, llm_response: Option<&str>) -> bool {
+    if llm_response.is_some() {
+        return false;
+    }
+    if !is_broad_health_query(&response.query) {
+        return false;
+    }
+    !response.findings.is_empty()
+        || !response.sessions.is_empty()
+        || response
+            .slo_context
+            .as_ref()
+            .is_some_and(|sc| !sc.slos.is_empty())
+}
+
+fn should_show_worth_a_look(
+    response: &RAGQueryResponse,
+    verbose: bool,
+    has_flow_context: bool,
+) -> bool {
+    if verbose {
+        return false;
+    }
+    if response.findings.is_empty() {
+        return false;
+    }
+    if has_flow_context {
+        return false;
+    }
+    if response.workspace_context.is_some() {
+        return false;
+    }
+    // Broad summaries should stay brief.
+    if is_broad_health_query(&response.query) {
+        return false;
+    }
+    // Workspace overviews should not devolve into findings dumps.
+    if is_workspace_overview_query(&response.query) {
+        return false;
+    }
+    true
+}
+
+fn render_health_section(response: &RAGQueryResponse) {
+    use std::collections::HashMap;
+
+    let mut rule_counts: HashMap<String, i32> = HashMap::new();
+    let mut file_counts: HashMap<String, i32> = HashMap::new();
+    let mut dim_counts: HashMap<String, i32> = HashMap::new();
+
+    for f in &response.findings {
+        if let Some(rule_id) = &f.rule_id {
+            *rule_counts.entry(rule_id.clone()).or_insert(0) += 1;
+        }
+        if let Some(path) = &f.file_path {
+            *file_counts.entry(path.clone()).or_insert(0) += 1;
+        }
+        if let Some(dim) = &f.dimension {
+            *dim_counts.entry(dim.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Fall back to session dimensions if findings lack them.
+    if dim_counts.is_empty() {
+        for s in &response.sessions {
+            for (dim, count) in &s.dimension_counts {
+                *dim_counts.entry(dim.clone()).or_insert(0) += *count;
+            }
+        }
+    }
+
+    println!("{}", "Health".bold());
+
+    if !dim_counts.is_empty() {
+        let mut dims: Vec<(&String, &i32)> = dim_counts.iter().collect();
+        dims.sort_by(|a, b| b.1.cmp(a.1));
+        let s = dims
+            .into_iter()
+            .take(3)
+            .map(|(d, c)| format!("{} ({})", d, c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Themes:".dimmed(), s);
+    }
+
+    if !rule_counts.is_empty() {
+        let mut rules: Vec<(&String, &i32)> = rule_counts.iter().collect();
+        rules.sort_by(|a, b| b.1.cmp(a.1));
+        let s = rules
+            .into_iter()
+            .take(4)
+            .map(|(r, c)| format!("{} ({})", describe_rule_id(r), c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Top gaps:".dimmed(), s);
+    }
+
+    if !file_counts.is_empty() {
+        let mut files: Vec<(&String, &i32)> = file_counts.iter().collect();
+        files.sort_by(|a, b| b.1.cmp(a.1));
+        let s = files
+            .into_iter()
+            .take(4)
+            .map(|(p, c)| format!("{} ({})", color_paths(p), c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Hotspots:".dimmed(), s);
+    }
+
+    if let Some(slo_context) = &response.slo_context {
+        if !slo_context.slos.is_empty() {
+            let total_routes =
+                slo_context.monitored_routes.len() + slo_context.unmonitored_routes.len();
+            if total_routes > 0 {
+                let coverage = (slo_context.monitored_routes.len() as f64 / total_routes as f64
+                    * 100.0)
+                    .round() as i32;
+                println!(
+                    "  {} {}/{} routes monitored ({}% coverage)",
+                    "SLOs:".dimmed(),
+                    slo_context.monitored_routes.len(),
+                    total_routes,
+                    coverage
+                );
+            }
+        }
+    }
+}
+
 /// Highlight unfault commands within a hint string.
 ///
 /// Finds patterns like 'unfault review --discover-observability' and highlights them.
@@ -2407,6 +2566,11 @@ fn output_formatted(
         println!();
     }
 
+    if should_show_health_section(response, llm_response) {
+        render_health_section(response);
+        println!();
+    }
+
     // If we have flow context, render it prominently (this is the "semantic" answer)
     if let Some(flow_context) = &response.flow_context {
         if !flow_context.paths.is_empty() || !flow_context.root_nodes.is_empty() {
@@ -2425,11 +2589,7 @@ fn output_formatted(
 
     // Show findings with code snippets (non-verbose mode)
     // Skip findings if we have good flow context - they're usually unrelated noise
-    if !response.findings.is_empty()
-        && !verbose
-        && !has_flow_context
-        && response.workspace_context.is_none()
-    {
+    if should_show_worth_a_look(response, verbose, has_flow_context) {
         println!("{}", "Worth a look".bold());
         println!();
         render_findings_with_snippets(&response.findings);
@@ -2782,6 +2942,96 @@ mod tests {
 
         let reply = build_colleague_reply(&response);
         assert!(!reply.trim().is_empty());
+    }
+
+    #[test]
+    fn test_workspace_overview_query_detection() {
+        assert!(is_workspace_overview_query("Describe this workspace"));
+        assert!(is_workspace_overview_query("workspace overview"));
+        assert!(is_workspace_overview_query(
+            "give me an overview of this repo"
+        ));
+        assert!(!is_workspace_overview_query("where is this used"));
+    }
+
+    #[test]
+    fn test_health_section_shown_for_broad_health_query() {
+        let response = RAGQueryResponse {
+            query: "How is this service doing in prod?".to_string(),
+            sessions: vec![],
+            findings: vec![
+                crate::api::rag::RAGFindingContext {
+                    finding_id: "f1".to_string(),
+                    rule_id: Some("python.http.missing_timeout".to_string()),
+                    dimension: Some("Reliability".to_string()),
+                    severity: Some("Medium".to_string()),
+                    file_path: Some("src/main.py".to_string()),
+                    line: Some(10),
+                    similarity: 0.9,
+                },
+                crate::api::rag::RAGFindingContext {
+                    finding_id: "f2".to_string(),
+                    rule_id: Some("python.http.missing_timeout".to_string()),
+                    dimension: Some("Reliability".to_string()),
+                    severity: Some("Medium".to_string()),
+                    file_path: Some("src/worker.py".to_string()),
+                    line: Some(42),
+                    similarity: 0.8,
+                },
+            ],
+            sources: vec![],
+            context_summary: "".to_string(),
+            topic_label: None,
+            graph_context: None,
+            flow_context: None,
+            slo_context: None,
+            enumerate_context: None,
+            graph_stats: None,
+            workspace_context: None,
+            routing_confidence: None,
+            hint: None,
+            disambiguation: None,
+        };
+
+        assert!(should_show_health_section(&response, None));
+        // For broad health queries, we should not default to dumping findings.
+        assert!(!should_show_worth_a_look(&response, false, false));
+
+        let take = build_no_llm_quick_take(&response).unwrap();
+        assert!(take.to_lowercase().contains("top gaps"));
+    }
+
+    #[test]
+    fn test_non_health_query_softened_finding_phrasing() {
+        let response = RAGQueryResponse {
+            query: "missing request timeout".to_string(),
+            sessions: vec![],
+            findings: vec![crate::api::rag::RAGFindingContext {
+                finding_id: "f1".to_string(),
+                rule_id: Some("python.http.missing_timeout".to_string()),
+                dimension: Some("Reliability".to_string()),
+                severity: Some("Medium".to_string()),
+                file_path: Some("src/main.py".to_string()),
+                line: Some(10),
+                similarity: 0.9,
+            }],
+            sources: vec![],
+            context_summary: "".to_string(),
+            topic_label: None,
+            graph_context: None,
+            flow_context: None,
+            slo_context: None,
+            enumerate_context: None,
+            graph_stats: None,
+            workspace_context: None,
+            routing_confidence: None,
+            hint: None,
+            disambiguation: None,
+        };
+
+        let take = build_no_llm_quick_take(&response).unwrap();
+        assert!(take.to_lowercase().contains("one place"));
+        assert!(!take.to_lowercase().contains("found 1 instance"));
     }
 
     #[test]
