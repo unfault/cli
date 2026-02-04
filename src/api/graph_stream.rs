@@ -874,10 +874,17 @@ pub fn encode_graph_stream(graph: &CodeGraph, mut ctx: IdContext) -> anyhow::Res
         };
 
         // Extract path from URL for http_call edges
+        // Handles both "http://localhost:8081/orders" and "localhost:8081/orders"
         let http_path = url.and_then(|u| {
-            u.find("://")
-                .and_then(|scheme_end| u[scheme_end + 3..].find('/'))
-                .map(|path_start| &u[u.find("://").unwrap() + 3 + path_start..])
+            if let Some(scheme_end) = u.find("://") {
+                // Has scheme: "http://localhost:8081/orders" -> "/orders"
+                u[scheme_end + 3..]
+                    .find('/')
+                    .map(|p| &u[scheme_end + 3 + p..])
+            } else {
+                // No scheme: "localhost:8081/orders" -> "/orders"
+                u.find('/').map(|p| &u[p..])
+            }
         });
 
         push_frame(
@@ -970,11 +977,18 @@ pub fn encode_edges_chunk(
             GraphEdgeKind::MonitoredBy => ("monitored_by", None, None, None),
         };
 
-        // Extract path from URL for http_call edges (e.g., "http://localhost:8081/orders" -> "/orders")
+        // Extract path from URL for http_call edges
+        // Handles both "http://localhost:8081/orders" and "localhost:8081/orders"
         let http_path = url.and_then(|u| {
-            u.find("://")
-                .and_then(|scheme_end| u[scheme_end + 3..].find('/'))
-                .map(|path_start| &u[u.find("://").unwrap() + 3 + path_start..])
+            if let Some(scheme_end) = u.find("://") {
+                // Has scheme: "http://localhost:8081/orders" -> "/orders"
+                u[scheme_end + 3..]
+                    .find('/')
+                    .map(|p| &u[scheme_end + 3 + p..])
+            } else {
+                // No scheme: "localhost:8081/orders" -> "/orders"
+                u.find('/').map(|p| &u[p..])
+            }
         });
 
         let frame = push_frame(
