@@ -1459,6 +1459,27 @@ fn quick_take_seed(response: &RAGQueryResponse) -> String {
     )
 }
 
+fn is_broad_health_query(query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+    // Broad, "how is it doing" style queries where a brief should be preferred.
+    q.contains("how is")
+        || q.contains("how's")
+        || q.contains("doing")
+        || q.contains("health")
+        || q.contains("status")
+        || q.contains("production")
+        || q.contains("prod")
+        || q.contains("reliab")
+        || q.contains("operab")
+        || q.contains("readiness")
+        || q.contains("are we ok")
+        || q.contains("is this service")
+        || q.contains("project health")
+}
+
 /// Highlight unfault commands within a hint string.
 ///
 /// Finds patterns like 'unfault review --discover-observability' and highlights them.
@@ -2197,6 +2218,42 @@ fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
                 rule_counts.iter().collect();
             rules.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
+            if is_broad_health_query(&response.query) {
+                let top_rules: Vec<String> = rules
+                    .iter()
+                    .take(3)
+                    .map(|(r, fs)| format!("{} ({})", describe_rule_id(r), fs.len()))
+                    .collect();
+
+                let mut files: Vec<&str> = response
+                    .findings
+                    .iter()
+                    .filter_map(|f| f.file_path.as_deref())
+                    .collect();
+                files.sort();
+                files.dedup();
+                let focus = if files.is_empty() {
+                    "".to_string()
+                } else if files.len() <= 3 {
+                    format!(" Focus: {}.", files.join(", "))
+                } else {
+                    format!(
+                        " Focus: {}, and {} more.",
+                        files[..2].join(", "),
+                        files.len() - 2
+                    )
+                };
+
+                if top_rules.is_empty() {
+                    return Some(format!(
+                        "I found a few reliability/operability signals in this workspace.{}",
+                        focus
+                    ));
+                }
+
+                return Some(format!("Top gaps: {}.{}", top_rules.join(", "), focus));
+            }
+
             // Build a response based on the top rules found
             let top_rule = rules[0].0;
             let top_findings = rules[0].1;
@@ -2214,9 +2271,9 @@ fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
             let rule_desc = describe_rule_id(top_rule);
 
             let mut take = if count == 1 {
-                format!("Found 1 instance of {}", rule_desc)
+                format!("One place looks like it has {}", rule_desc)
             } else {
-                format!("Found {} instances of {}", count, rule_desc)
+                format!("{} places look like they have {}", count, rule_desc)
             };
 
             // List affected files
