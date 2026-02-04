@@ -718,6 +718,31 @@ pub struct CrossWorkspaceLink {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InboundRouteCaller {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+    #[serde(default)]
+    pub call_count: i32,
+    #[serde(default)]
+    pub caller: Option<String>,
+    #[serde(default)]
+    pub source_route_method: Option<String>,
+    #[serde(default)]
+    pub source_route_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InboundRouteDependents {
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub handler: Option<String>,
+    #[serde(default)]
+    pub dependents: Vec<InboundRouteCaller>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GraphStatsResponse {
     /// Number of file nodes
     pub file_count: i32,
@@ -742,6 +767,10 @@ pub struct GraphStatsResponse {
     /// Resolved egress HTTP calls to other known workspaces
     #[serde(default)]
     pub cross_workspace_links: Vec<CrossWorkspaceLink>,
+
+    /// Inbound dependents per HTTP route (best-effort).
+    #[serde(default)]
+    pub inbound_route_dependents: Vec<InboundRouteDependents>,
 }
 
 // =============================================================================

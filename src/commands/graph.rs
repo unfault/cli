@@ -1177,6 +1177,20 @@ fn output_summary_formatted(
         .map(|s| s.cross_workspace_links.as_slice())
         .unwrap_or(&[]);
 
+    // Inbound dependents (workspaces calling into our routes)
+    let mut inbound_by_route: std::collections::HashMap<
+        (String, String),
+        Vec<crate::api::graph::InboundRouteCaller>,
+    > = std::collections::HashMap::new();
+    if let Some(stats) = api_stats {
+        for r in &stats.inbound_route_dependents {
+            inbound_by_route.insert(
+                (r.method.to_uppercase(), r.path.clone()),
+                r.dependents.clone(),
+            );
+        }
+    }
+
     // Workspace name
     println!("{} {}", "Workspace:".bold(), workspace_label.cyan());
 
@@ -1264,6 +1278,54 @@ fn output_summary_formatted(
 
             // Second line: handler
             println!("           {} {}", "└─".dimmed(), handler.dimmed());
+
+            // Optional: inbound callers for this route (from other workspaces)
+            if let Some(deps) = inbound_by_route.get(&(method.to_uppercase(), path.to_string())) {
+                if !deps.is_empty() {
+                    // Show up to 3 callers.
+                    for (idx, d) in deps.iter().take(3).enumerate() {
+                        let name = d
+                            .workspace_name
+                            .as_deref()
+                            .unwrap_or(d.workspace_id.as_str());
+                        let from = match (
+                            d.source_route_method.as_deref(),
+                            d.source_route_path.as_deref(),
+                        ) {
+                            (Some(m), Some(p)) if !m.is_empty() && !p.is_empty() => {
+                                format!(" from {} {}", m.to_uppercase(), p)
+                            }
+                            _ => d
+                                .caller
+                                .as_deref()
+                                .map(|c| format!(" via {}", c))
+                                .unwrap_or_default(),
+                        };
+
+                        let connector = if idx + 1 == deps.len().min(3) {
+                            "└─"
+                        } else {
+                            "├─"
+                        };
+
+                        println!(
+                            "               {} {} {}{}",
+                            connector.dimmed(),
+                            "←".dimmed(),
+                            name.dimmed(),
+                            from.dimmed(),
+                        );
+                    }
+
+                    if deps.len() > 3 {
+                        println!(
+                            "               {} ... and {} more",
+                            "".dimmed(),
+                            (deps.len() - 3).to_string().cyan()
+                        );
+                    }
+                }
+            }
 
             // Optional: egress calls reachable from this handler (transitive)
             let egress = collect_transitive_http_calls(graph, handler);
