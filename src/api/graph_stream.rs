@@ -87,7 +87,7 @@ struct NodeRecord<'a> {
 }
 
 #[derive(Serialize)]
-struct EdgeRecord {
+struct EdgeRecord<'a> {
     #[serde(rename = "type")]
     record_type: &'static str,
 
@@ -97,6 +97,14 @@ struct EdgeRecord {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     items: Option<Vec<String>>,
+
+    // HTTP call metadata (for http_call edges)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_method: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -843,20 +851,34 @@ pub fn encode_graph_stream(graph: &CodeGraph, mut ctx: IdContext) -> anyhow::Res
             continue;
         }
 
-        let (edge_type, items) = match &graph.graph[edge_idx] {
-            GraphEdgeKind::Contains => ("contains", None),
-            GraphEdgeKind::Imports => ("imports", None),
-            GraphEdgeKind::ImportsFrom { items } => ("imports_from", Some(items.clone())),
-            GraphEdgeKind::Calls => ("calls", None),
-            GraphEdgeKind::Inherits => ("inherits", None),
-            GraphEdgeKind::UsesLibrary => ("uses_library", None),
-            GraphEdgeKind::HttpCall { .. } => ("http_call", None),
-            GraphEdgeKind::FastApiAppOwnsRoute => ("fastapi_app_owns_route", None),
-            GraphEdgeKind::FastApiAppHasMiddleware => ("fastapi_app_has_middleware", None),
-            GraphEdgeKind::DependencyInjection => ("dependency_injection", None),
-            GraphEdgeKind::FastApiAppLifespan => ("fastapi_app_lifespan", None),
-            GraphEdgeKind::MonitoredBy => ("monitored_by", None),
+        let edge = &graph.graph[edge_idx];
+        let (edge_type, items, http_method, url) = match edge {
+            GraphEdgeKind::Contains => ("contains", None, None, None),
+            GraphEdgeKind::Imports => ("imports", None, None, None),
+            GraphEdgeKind::ImportsFrom { items } => {
+                ("imports_from", Some(items.clone()), None, None)
+            }
+            GraphEdgeKind::Calls => ("calls", None, None, None),
+            GraphEdgeKind::Inherits => ("inherits", None, None, None),
+            GraphEdgeKind::UsesLibrary => ("uses_library", None, None, None),
+            GraphEdgeKind::HttpCall { method, url, .. } => {
+                ("http_call", None, Some(method.as_str()), url.as_deref())
+            }
+            GraphEdgeKind::FastApiAppOwnsRoute => ("fastapi_app_owns_route", None, None, None),
+            GraphEdgeKind::FastApiAppHasMiddleware => {
+                ("fastapi_app_has_middleware", None, None, None)
+            }
+            GraphEdgeKind::DependencyInjection => ("dependency_injection", None, None, None),
+            GraphEdgeKind::FastApiAppLifespan => ("fastapi_app_lifespan", None, None, None),
+            GraphEdgeKind::MonitoredBy => ("monitored_by", None, None, None),
         };
+
+        // Extract path from URL for http_call edges
+        let http_path = url.and_then(|u| {
+            u.find("://")
+                .and_then(|scheme_end| u[scheme_end + 3..].find('/'))
+                .map(|path_start| &u[u.find("://").unwrap() + 3 + path_start..])
+        });
 
         push_frame(
             &mut raw,
@@ -866,6 +888,9 @@ pub fn encode_graph_stream(graph: &CodeGraph, mut ctx: IdContext) -> anyhow::Res
                 target_node_id,
                 edge_type,
                 items,
+                http_method,
+                http_path,
+                url,
             },
         )?;
     }
@@ -923,20 +948,34 @@ pub fn encode_edges_chunk(
             continue;
         }
 
-        let (edge_type, items) = match &graph.graph[*edge_idx] {
-            GraphEdgeKind::Contains => ("contains", None),
-            GraphEdgeKind::Imports => ("imports", None),
-            GraphEdgeKind::ImportsFrom { items } => ("imports_from", Some(items.clone())),
-            GraphEdgeKind::Calls => ("calls", None),
-            GraphEdgeKind::Inherits => ("inherits", None),
-            GraphEdgeKind::UsesLibrary => ("uses_library", None),
-            GraphEdgeKind::HttpCall { .. } => ("http_call", None),
-            GraphEdgeKind::FastApiAppOwnsRoute => ("fastapi_app_owns_route", None),
-            GraphEdgeKind::FastApiAppHasMiddleware => ("fastapi_app_has_middleware", None),
-            GraphEdgeKind::DependencyInjection => ("dependency_injection", None),
-            GraphEdgeKind::FastApiAppLifespan => ("fastapi_app_lifespan", None),
-            GraphEdgeKind::MonitoredBy => ("monitored_by", None),
+        let edge = &graph.graph[*edge_idx];
+        let (edge_type, items, http_method, url) = match edge {
+            GraphEdgeKind::Contains => ("contains", None, None, None),
+            GraphEdgeKind::Imports => ("imports", None, None, None),
+            GraphEdgeKind::ImportsFrom { items } => {
+                ("imports_from", Some(items.clone()), None, None)
+            }
+            GraphEdgeKind::Calls => ("calls", None, None, None),
+            GraphEdgeKind::Inherits => ("inherits", None, None, None),
+            GraphEdgeKind::UsesLibrary => ("uses_library", None, None, None),
+            GraphEdgeKind::HttpCall { method, url, .. } => {
+                ("http_call", None, Some(method.as_str()), url.as_deref())
+            }
+            GraphEdgeKind::FastApiAppOwnsRoute => ("fastapi_app_owns_route", None, None, None),
+            GraphEdgeKind::FastApiAppHasMiddleware => {
+                ("fastapi_app_has_middleware", None, None, None)
+            }
+            GraphEdgeKind::DependencyInjection => ("dependency_injection", None, None, None),
+            GraphEdgeKind::FastApiAppLifespan => ("fastapi_app_lifespan", None, None, None),
+            GraphEdgeKind::MonitoredBy => ("monitored_by", None, None, None),
         };
+
+        // Extract path from URL for http_call edges (e.g., "http://localhost:8081/orders" -> "/orders")
+        let http_path = url.and_then(|u| {
+            u.find("://")
+                .and_then(|scheme_end| u[scheme_end + 3..].find('/'))
+                .map(|path_start| &u[u.find("://").unwrap() + 3 + path_start..])
+        });
 
         let frame = push_frame(
             &mut raw,
@@ -946,6 +985,9 @@ pub fn encode_edges_chunk(
                 target_node_id,
                 edge_type,
                 items,
+                http_method,
+                http_path,
+                url,
             },
         )?;
 
