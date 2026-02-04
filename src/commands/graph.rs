@@ -868,11 +868,27 @@ fn output_summary_json(
         .iter()
         .filter(|f| f.is_handler && f.http_method.is_some())
         .map(|f| {
+            let egress = collect_transitive_http_calls(graph, &f.qualified_name)
+                .into_iter()
+                .map(|(e, via)| {
+                    serde_json::json!({
+                        "method": e.method,
+                        "remote": e.remote,
+                        "caller": e.caller,
+                        "file": e.caller_file,
+                        "library": e.library,
+                        "url": e.url,
+                        "via": via,
+                    })
+                })
+                .collect::<Vec<_>>();
+
             serde_json::json!({
                 "method": f.http_method,
                 "path": f.http_path,
                 "handler": f.qualified_name,
-                "file": f.file_path
+                "file": f.file_path,
+                "egress": egress,
             })
         })
         .collect();
@@ -944,6 +960,104 @@ fn output_summary_json(
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+fn collect_transitive_http_calls<'a>(
+    graph: &'a crate::session::graph_builder::SerializableGraph,
+    handler: &str,
+) -> Vec<(&'a crate::session::graph_builder::HttpCallEdge, Option<String>)> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    // Build adjacency from call edges
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for c in &graph.calls {
+        adj.entry(c.caller.as_str())
+            .or_default()
+            .push(c.callee.as_str());
+    }
+
+    // Pre-index http calls by caller
+    let mut http_by_caller: HashMap<&str, Vec<&crate::session::graph_builder::HttpCallEdge>> =
+        HashMap::new();
+    for e in &graph.http_calls {
+        http_by_caller
+            .entry(e.caller.as_str())
+            .or_default()
+            .push(e);
+    }
+
+    // Traverse call graph from handler and track the first hop under the handler.
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut via_first: HashMap<&str, &str> = HashMap::new();
+    let mut q: VecDeque<&str> = VecDeque::new();
+
+    visited.insert(handler);
+    via_first.insert(handler, handler);
+    q.push_back(handler);
+
+    while let Some(cur) = q.pop_front() {
+        let Some(nexts) = adj.get(cur) else {
+            continue;
+        };
+
+        for &callee in nexts {
+            if visited.contains(callee) {
+                continue;
+            }
+
+            visited.insert(callee);
+            let v = if cur == handler {
+                callee
+            } else {
+                *via_first.get(cur).unwrap_or(&handler)
+            };
+            via_first.insert(callee, v);
+            q.push_back(callee);
+        }
+    }
+
+    // Collect egress from any reachable function, de-duplicated.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct Key {
+        method: String,
+        remote: String,
+        url: Option<String>,
+        via: Option<String>,
+    }
+
+    let mut seen: HashSet<Key> = HashSet::new();
+    let mut out: Vec<(&crate::session::graph_builder::HttpCallEdge, Option<String>)> = Vec::new();
+
+    for &f in &visited {
+        let Some(edges) = http_by_caller.get(f) else {
+            continue;
+        };
+        for &e in edges {
+            let via = if f == handler {
+                None
+            } else {
+                via_first.get(f).map(|v| v.to_string())
+            };
+
+            let key = Key {
+                method: e.method.clone(),
+                remote: e.remote.clone(),
+                url: e.url.clone(),
+                via: via.clone(),
+            };
+            if seen.insert(key) {
+                out.push((e, via));
+            }
+        }
+    }
+
+    // Stable, predictable ordering (direct calls first)
+    out.sort_by(|(a, via_a), (b, via_b)| {
+        (via_a.is_some(), via_a.clone(), a.method.clone(), a.remote.clone(), a.url.clone())
+            .cmp(&(via_b.is_some(), via_b.clone(), b.method.clone(), b.remote.clone(), b.url.clone()))
+    });
+
+    out
 }
 
 /// Format an egress target for display.
@@ -1139,13 +1253,9 @@ fn output_summary_formatted(
             // Second line: handler
             println!("           {} {}", "└─".dimmed(), handler.dimmed());
 
-            // Optional: egress calls from this handler
-            let egress: Vec<_> = graph
-                .http_calls
-                .iter()
-                .filter(|e| e.caller == *handler)
-                .collect();
-            for (idx, e) in egress.iter().enumerate() {
+            // Optional: egress calls reachable from this handler (transitive)
+            let egress = collect_transitive_http_calls(graph, handler);
+            for (idx, (e, via)) in egress.iter().enumerate() {
                 let method = e.method.as_str();
                 let m = match method {
                     "GET" => format!("{:6}", method).green(),
@@ -1165,12 +1275,17 @@ fn output_summary_formatted(
                 // Format egress target with cross-workspace resolution
                 let target =
                     format_egress_with_resolution(&e.remote, e.url.as_deref(), method, cross_links);
+                let via_suffix = via
+                    .as_deref()
+                    .map(|v| format!(" {}", format!("(via {})", v).dimmed()))
+                    .unwrap_or_default();
                 println!(
-                    "               {} {} {} {}",
+                    "               {} {} {} {}{}",
                     connector.dimmed(),
                     "→".dimmed(),
                     m,
-                    target
+                    target,
+                    via_suffix
                 );
             }
         }
@@ -2598,6 +2713,92 @@ pub fn execute_dump(args: DumpArgs) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_collect_transitive_http_calls_tracks_via_first_hop() {
+        use crate::session::graph_builder::{CallEdge, GraphStats, HttpCallEdge, SerializableGraph};
+
+        let graph = SerializableGraph {
+            node_count: 0,
+            edge_count: 0,
+            files: vec![],
+            functions: vec![],
+            imports: vec![],
+            contains: vec![],
+            calls: vec![
+                CallEdge {
+                    caller: "create_order".to_string(),
+                    callee: "pass_order".to_string(),
+                    caller_file: "main.py".to_string(),
+                },
+                CallEdge {
+                    caller: "pass_order".to_string(),
+                    callee: "helper".to_string(),
+                    caller_file: "main.py".to_string(),
+                },
+                // cycle back to the handler should not loop
+                CallEdge {
+                    caller: "helper".to_string(),
+                    callee: "create_order".to_string(),
+                    caller_file: "main.py".to_string(),
+                },
+            ],
+            dependency_injections: vec![],
+            library_usage: vec![],
+            remote_servers: vec![],
+            http_calls: vec![
+                HttpCallEdge {
+                    caller: "create_order".to_string(),
+                    caller_file: "main.py".to_string(),
+                    remote: "host:api.example.com:443".to_string(),
+                    method: "GET".to_string(),
+                    library: "httpx".to_string(),
+                    url: Some("https://api.example.com/foo".to_string()),
+                },
+                HttpCallEdge {
+                    caller: "pass_order".to_string(),
+                    caller_file: "main.py".to_string(),
+                    remote: "localhost:8081".to_string(),
+                    method: "POST".to_string(),
+                    library: "httpx".to_string(),
+                    url: Some("http://localhost:8081/cook".to_string()),
+                },
+                HttpCallEdge {
+                    caller: "helper".to_string(),
+                    caller_file: "main.py".to_string(),
+                    remote: "localhost:8081".to_string(),
+                    method: "GET".to_string(),
+                    library: "httpx".to_string(),
+                    url: Some("http://localhost:8081/status".to_string()),
+                },
+            ],
+            framework_references: vec![],
+            slos: vec![],
+            listening_ports: vec![],
+            stats: GraphStats {
+                file_count: 0,
+                function_count: 0,
+                class_count: 0,
+                route_count: 0,
+                import_edge_count: 0,
+                calls_edge_count: 0,
+                remote_server_count: 0,
+                http_call_edge_count: 0,
+            },
+        };
+
+        let egress = collect_transitive_http_calls(&graph, "create_order");
+        assert_eq!(egress.len(), 3);
+
+        // Direct call appears first and has no `via`.
+        assert_eq!(egress[0].0.caller, "create_order");
+        assert!(egress[0].1.is_none());
+
+        // Indirect calls are attributed to the first hop under the handler.
+        let mut via: Vec<Option<String>> = egress.into_iter().map(|(_, v)| v).collect();
+        via.sort();
+        assert_eq!(via, vec![None, Some("pass_order".to_string()), Some("pass_order".to_string())]);
+    }
 
     #[test]
     fn test_impact_args_with_session_id() {
