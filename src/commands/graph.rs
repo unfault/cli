@@ -965,7 +965,10 @@ fn output_summary_json(
 fn collect_transitive_http_calls<'a>(
     graph: &'a crate::session::graph_builder::SerializableGraph,
     handler: &str,
-) -> Vec<(&'a crate::session::graph_builder::HttpCallEdge, Option<String>)> {
+) -> Vec<(
+    &'a crate::session::graph_builder::HttpCallEdge,
+    Option<String>,
+)> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
     // Build adjacency from call edges
@@ -980,10 +983,7 @@ fn collect_transitive_http_calls<'a>(
     let mut http_by_caller: HashMap<&str, Vec<&crate::session::graph_builder::HttpCallEdge>> =
         HashMap::new();
     for e in &graph.http_calls {
-        http_by_caller
-            .entry(e.caller.as_str())
-            .or_default()
-            .push(e);
+        http_by_caller.entry(e.caller.as_str()).or_default().push(e);
     }
 
     // Traverse call graph from handler and track the first hop under the handler.
@@ -1053,8 +1053,20 @@ fn collect_transitive_http_calls<'a>(
 
     // Stable, predictable ordering (direct calls first)
     out.sort_by(|(a, via_a), (b, via_b)| {
-        (via_a.is_some(), via_a.clone(), a.method.clone(), a.remote.clone(), a.url.clone())
-            .cmp(&(via_b.is_some(), via_b.clone(), b.method.clone(), b.remote.clone(), b.url.clone()))
+        (
+            via_a.is_some(),
+            via_a.clone(),
+            a.method.clone(),
+            a.remote.clone(),
+            a.url.clone(),
+        )
+            .cmp(&(
+                via_b.is_some(),
+                via_b.clone(),
+                b.method.clone(),
+                b.remote.clone(),
+                b.url.clone(),
+            ))
     });
 
     out
@@ -2716,7 +2728,9 @@ mod tests {
 
     #[test]
     fn test_collect_transitive_http_calls_tracks_via_first_hop() {
-        use crate::session::graph_builder::{CallEdge, GraphStats, HttpCallEdge, SerializableGraph};
+        use crate::session::graph_builder::{
+            CallEdge, GraphStats, HttpCallEdge, SerializableGraph,
+        };
 
         let graph = SerializableGraph {
             node_count: 0,
@@ -2797,7 +2811,14 @@ mod tests {
         // Indirect calls are attributed to the first hop under the handler.
         let mut via: Vec<Option<String>> = egress.into_iter().map(|(_, v)| v).collect();
         via.sort();
-        assert_eq!(via, vec![None, Some("pass_order".to_string()), Some("pass_order".to_string())]);
+        assert_eq!(
+            via,
+            vec![
+                None,
+                Some("pass_order".to_string()),
+                Some("pass_order".to_string())
+            ]
+        );
     }
 
     #[test]
