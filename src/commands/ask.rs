@@ -1908,11 +1908,7 @@ fn render_workspace_context(
     }
 
     if !ctx.frameworks.is_empty() {
-        println!(
-            "  {} {}",
-            "Frameworks:".dimmed(),
-            ctx.frameworks.join(", ")
-        );
+        println!("  {} {}", "Frameworks:".dimmed(), ctx.frameworks.join(", "));
     }
 
     if let Some(stats) = graph_stats {
@@ -1971,10 +1967,7 @@ fn render_workspace_context(
             .iter()
             .take(6)
             .map(|w| {
-                let name = w
-                    .package_name
-                    .as_deref()
-                    .unwrap_or(w.workspace_id.as_str());
+                let name = w.package_name.as_deref().unwrap_or(w.workspace_id.as_str());
                 format!("{} ({})", name, w.edge_count)
             })
             .collect::<Vec<_>>()
@@ -1988,10 +1981,7 @@ fn render_workspace_context(
             .iter()
             .take(6)
             .map(|w| {
-                let name = w
-                    .package_name
-                    .as_deref()
-                    .unwrap_or(w.workspace_id.as_str());
+                let name = w.package_name.as_deref().unwrap_or(w.workspace_id.as_str());
                 format!("{} ({})", name, w.edge_count)
             })
             .collect::<Vec<_>>()

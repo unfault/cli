@@ -978,7 +978,10 @@ impl ApiClient {
                     .map(|p| p.to_string())
                     .collect::<Vec<_>>()
                     .join(",");
-                url.push_str(&format!("?egress_ports={}", urlencoding::encode(&ports_str)));
+                url.push_str(&format!(
+                    "?egress_ports={}",
+                    urlencoding::encode(&ports_str)
+                ));
             }
         }
 
@@ -1043,7 +1046,10 @@ impl ApiClient {
                     .map(|p| p.to_string())
                     .collect::<Vec<_>>()
                     .join(",");
-                url.push_str(&format!("&egress_ports={}", urlencoding::encode(&ports_str)));
+                url.push_str(&format!(
+                    "&egress_ports={}",
+                    urlencoding::encode(&ports_str)
+                ));
             }
         }
 
