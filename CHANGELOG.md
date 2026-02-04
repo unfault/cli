@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.32] - 2026-02-04
+
 ### Changed
 
-- `unfault ask --llm`: adjust the system/user prompts to favor a conversational, graph-based workspace story over a findings-only production-readiness framing.
+- `unfault ask --llm`: adjust the system/user prompts and LLM context packaging to favor a conversational, graph-based workspace story over a findings-only production-readiness framing.
 
 ## [0.6.31] - 2026-02-04
 
@@ -355,7 +357,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
-[Unreleased]: https://github.com/unfault/cli/compare/v0.6.31...HEAD
+[Unreleased]: https://github.com/unfault/cli/compare/v0.6.32...HEAD
+[0.6.32]: https://github.com/unfault/cli/compare/v0.6.31...v0.6.32
 [0.6.31]: https://github.com/unfault/cli/compare/v0.6.30...v0.6.31
 [0.6.30]: https://github.com/unfault/cli/compare/v0.6.29...v0.6.30
 [0.6.29]: https://github.com/unfault/cli/compare/v0.6.28...v0.6.29
