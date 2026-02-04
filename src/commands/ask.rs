@@ -1514,6 +1514,11 @@ fn should_show_health_section(response: &RAGQueryResponse, llm_response: Option<
     if llm_response.is_some() {
         return false;
     }
+    // If the API provided a structured workspace context, prefer that for broad
+    // questions. The health brief is a compatibility fallback.
+    if response.workspace_context.is_some() {
+        return false;
+    }
     if !is_broad_health_query(&response.query) {
         return false;
     }
@@ -1686,9 +1691,11 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
         return format!("{} {}", prefix, styled_hint);
     }
 
-    if let Some(ctx) = &response.workspace_context {
-        if !ctx.summary.trim().is_empty() {
-            return ctx.summary.trim().to_string();
+    if is_workspace_overview_query(&response.query) || is_broad_health_query(&response.query) {
+        if let Some(ctx) = &response.workspace_context {
+            if !ctx.summary.trim().is_empty() {
+                return ctx.summary.trim().to_string();
+            }
         }
     }
 
@@ -2562,8 +2569,13 @@ fn output_formatted(
     }
 
     if let Some(workspace_ctx) = &response.workspace_context {
-        render_workspace_context(workspace_ctx, response.graph_stats.as_ref(), verbose);
-        println!();
+        if verbose
+            || is_workspace_overview_query(&response.query)
+            || is_broad_health_query(&response.query)
+        {
+            render_workspace_context(workspace_ctx, response.graph_stats.as_ref(), verbose);
+            println!();
+        }
     }
 
     if should_show_health_section(response, llm_response) {
@@ -2904,6 +2916,71 @@ mod tests {
     }
 
     #[test]
+    fn test_workspace_context_does_not_override_flow_reply_for_non_overview_queries() {
+        let mut response = RAGQueryResponse {
+            query: "what calls login?".to_string(),
+            sessions: vec![],
+            findings: vec![],
+            sources: vec![],
+            context_summary: "".to_string(),
+            topic_label: None,
+            graph_context: None,
+            flow_context: Some(crate::api::rag::RAGFlowContext {
+                query: Some("what calls login?".to_string()),
+                root_nodes: vec![],
+                paths: vec![vec![
+                    crate::api::rag::RAGFlowPathNode {
+                        node_id: "n1".to_string(),
+                        name: "handler".to_string(),
+                        path: Some("src/main.py".to_string()),
+                        node_type: "function".to_string(),
+                        depth: 0,
+                        http_method: None,
+                        http_path: None,
+                        description: None,
+                        category: None,
+                    },
+                    crate::api::rag::RAGFlowPathNode {
+                        node_id: "n2".to_string(),
+                        name: "login".to_string(),
+                        path: Some("src/auth.py".to_string()),
+                        node_type: "function".to_string(),
+                        depth: 1,
+                        http_method: None,
+                        http_path: None,
+                        description: None,
+                        category: None,
+                    },
+                ]],
+            }),
+            slo_context: None,
+            enumerate_context: None,
+            graph_stats: None,
+            workspace_context: None,
+            routing_confidence: None,
+            hint: None,
+            disambiguation: None,
+        };
+
+        response.workspace_context = Some(crate::api::rag::RAGWorkspaceContext {
+            kind: Some("service".to_string()),
+            languages: std::collections::HashMap::new(),
+            frameworks: vec![],
+            entrypoints: vec![],
+            central_files: vec![],
+            top_dependencies: vec![],
+            depended_on_by: vec![],
+            depends_on: vec![],
+            remote_servers: vec![],
+            summary: "This workspace looks like a service in python.".to_string(),
+        });
+
+        let reply = build_colleague_reply(&response);
+        assert!(reply.contains("→"), "unexpected reply: {reply}");
+        assert!(!reply.contains("This workspace looks"));
+    }
+
+    #[test]
     fn test_no_llm_quick_take_findings() {
         let response = RAGQueryResponse {
             query: "what should I worry about".to_string(),
@@ -3002,6 +3079,40 @@ mod tests {
     }
 
     #[test]
+    fn test_health_section_hidden_when_workspace_context_present() {
+        let response = RAGQueryResponse {
+            query: "How is this service doing in prod?".to_string(),
+            sessions: vec![],
+            findings: vec![],
+            sources: vec![],
+            context_summary: "".to_string(),
+            topic_label: None,
+            graph_context: None,
+            flow_context: None,
+            slo_context: None,
+            enumerate_context: None,
+            graph_stats: None,
+            workspace_context: Some(crate::api::rag::RAGWorkspaceContext {
+                kind: Some("service".to_string()),
+                languages: std::collections::HashMap::new(),
+                frameworks: vec![],
+                entrypoints: vec![],
+                central_files: vec![],
+                top_dependencies: vec![],
+                depended_on_by: vec![],
+                depends_on: vec![],
+                remote_servers: vec![],
+                summary: "This workspace looks like a service in python.".to_string(),
+            }),
+            routing_confidence: None,
+            hint: None,
+            disambiguation: None,
+        };
+
+        assert!(!should_show_health_section(&response, None));
+    }
+
+    #[test]
     fn test_non_health_query_softened_finding_phrasing() {
         let response = RAGQueryResponse {
             query: "missing request timeout".to_string(),
@@ -3032,6 +3143,31 @@ mod tests {
         let take = build_no_llm_quick_take(&response).unwrap();
         assert!(take.to_lowercase().contains("one place"));
         assert!(!take.to_lowercase().contains("found 1 instance"));
+    }
+
+    #[test]
+    fn test_golden_questions_routing_smoke() {
+        let cases = vec![
+            ("Describe this workspace", true, false),
+            ("workspace overview", true, false),
+            ("How is this service doing in prod?", false, true),
+            ("Is this production ready?", false, true),
+            ("what calls login?", false, false),
+            ("list routes", false, false),
+        ];
+
+        for (q, expect_overview, expect_health) in cases {
+            assert_eq!(
+                is_workspace_overview_query(q),
+                expect_overview,
+                "workspace_overview for '{q}'"
+            );
+            assert_eq!(
+                is_broad_health_query(q),
+                expect_health,
+                "broad_health for '{q}'"
+            );
+        }
     }
 
     #[test]
