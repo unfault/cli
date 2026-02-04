@@ -1510,30 +1510,241 @@ fn is_workspace_overview_query(query: &str) -> bool {
             || q.contains("project"))
 }
 
-fn should_show_health_section(response: &RAGQueryResponse, llm_response: Option<&str>) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderIntent {
+    Overview,
+    Operability,
+    Flow,
+    Impact,
+    Dependencies,
+    Enumerate,
+    Observability,
+    Findings,
+    Sessions,
+    Unknown,
+}
+
+fn workspace_one_liner(
+    ctx: &RAGWorkspaceContext,
+    graph_stats: Option<&std::collections::HashMap<String, i32>>,
+) -> String {
+    let kind = ctx.kind.as_deref().unwrap_or("workspace");
+
+    let mut langs: Vec<(&String, &i32)> = ctx.languages.iter().collect();
+    langs.sort_by(|a, b| b.1.cmp(a.1));
+    let primary_lang = langs.first().map(|(l, _)| l.as_str()).unwrap_or("unknown");
+
+    let fw = if ctx.frameworks.is_empty() {
+        "".to_string()
+    } else {
+        format!(" ({})", ctx.frameworks.join(", "))
+    };
+
+    let scale = graph_stats.map(|stats| {
+        let file_count = stats.get("file_count").copied().unwrap_or(0);
+        let fn_count = stats.get("function_count").copied().unwrap_or(0);
+        let route_count = stats.get("route_count").copied().unwrap_or(0);
+        if file_count == 0 && fn_count == 0 && route_count == 0 {
+            "".to_string()
+        } else {
+            format!(" Scale: {file_count} files, {fn_count} functions, {route_count} routes.")
+        }
+    });
+
+    let start = ctx
+        .entrypoints
+        .first()
+        .or_else(|| ctx.central_files.first().map(|f| &f.path));
+
+    let mut s = format!("This looks like a {primary_lang} {kind}{fw}.");
+    if let Some(scale) = scale {
+        if !scale.is_empty() {
+            s.push_str(&scale);
+        }
+    }
+    if let Some(p) = start {
+        s.push_str(&format!(" If you want a starting point, begin at {}.", p));
+    }
+
+    s
+}
+
+fn render_workspace_brief(
+    ctx: &RAGWorkspaceContext,
+    graph_stats: Option<&std::collections::HashMap<String, i32>>,
+) {
+    println!("{}", "At a glance".bold());
+
+    // Keep the brief compact (supporting evidence for the one-liner).
+    if !ctx.entrypoints.is_empty() {
+        println!(
+            "  {} {}",
+            "Entrypoints:".dimmed(),
+            ctx.entrypoints
+                .iter()
+                .take(4)
+                .map(|p| color_paths(p))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if !ctx.central_files.is_empty() {
+        println!(
+            "  {} {}",
+            "Hotspots:".dimmed(),
+            ctx.central_files
+                .iter()
+                .take(4)
+                .map(|f| color_paths(&f.path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if !ctx.top_dependencies.is_empty() {
+        println!(
+            "  {} {}",
+            "Dependencies:".dimmed(),
+            ctx.top_dependencies
+                .iter()
+                .take(8)
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if !ctx.depends_on.is_empty() {
+        let s = ctx
+            .depends_on
+            .iter()
+            .take(5)
+            .map(|w| {
+                let name = w.package_name.as_deref().unwrap_or(w.workspace_id.as_str());
+                format!("{} ({})", name, w.edge_count)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Depends on:".dimmed(), s);
+    }
+
+    if !ctx.depended_on_by.is_empty() {
+        let s = ctx
+            .depended_on_by
+            .iter()
+            .take(5)
+            .map(|w| {
+                let name = w.package_name.as_deref().unwrap_or(w.workspace_id.as_str());
+                format!("{} ({})", name, w.edge_count)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Depended by:".dimmed(), s);
+    }
+
+    if !ctx.remote_servers.is_empty() {
+        println!(
+            "  {} {}",
+            "Outbound:".dimmed(),
+            ctx.remote_servers
+                .iter()
+                .take(6)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if let Some(stats) = graph_stats {
+        let file_count = stats.get("file_count").copied().unwrap_or(0);
+        let fn_count = stats.get("function_count").copied().unwrap_or(0);
+        let route_count = stats.get("route_count").copied().unwrap_or(0);
+        if file_count > 0 || fn_count > 0 || route_count > 0 {
+            println!(
+                "  {} {} files, {} functions, {} routes",
+                "Scale:".dimmed(),
+                file_count,
+                fn_count,
+                route_count
+            );
+        }
+    }
+}
+
+fn classify_render_intent(response: &RAGQueryResponse, llm_response: Option<&str>) -> RenderIntent {
     if llm_response.is_some() {
-        return false;
+        return RenderIntent::Unknown;
     }
-    // If the API provided a structured workspace context, prefer that for broad
-    // questions. The health brief is a compatibility fallback.
-    if response.workspace_context.is_some() {
-        return false;
+
+    let q = response.query.as_str();
+
+    let has_flow_context = response
+        .flow_context
+        .as_ref()
+        .is_some_and(|fc| !fc.paths.is_empty() || !fc.root_nodes.is_empty());
+    if has_flow_context {
+        return RenderIntent::Flow;
     }
-    if !is_broad_health_query(&response.query) {
-        return false;
+
+    if let Some(gc) = &response.graph_context {
+        if graph_context_has_data(gc) {
+            match gc.query_type.as_str() {
+                "impact" => return RenderIntent::Impact,
+                "dependencies" | "library" => return RenderIntent::Dependencies,
+                "centrality" => return RenderIntent::Overview,
+                _ => {}
+            }
+        }
     }
-    !response.findings.is_empty()
+
+    if response.enumerate_context.is_some() {
+        return RenderIntent::Enumerate;
+    }
+
+    if response
+        .slo_context
+        .as_ref()
+        .is_some_and(|sc| !sc.slos.is_empty())
+    {
+        return RenderIntent::Observability;
+    }
+
+    // Broad intent routing based on the user query.
+    // These should win over generic findings/session summaries.
+    if is_workspace_overview_query(q) {
+        return RenderIntent::Overview;
+    }
+    if is_broad_health_query(q) {
+        return RenderIntent::Operability;
+    }
+
+    if !response.findings.is_empty() {
+        return RenderIntent::Findings;
+    }
+    if !response.sessions.is_empty() {
+        return RenderIntent::Sessions;
+    }
+
+    RenderIntent::Unknown
+}
+
+fn should_show_health_section(response: &RAGQueryResponse, llm_response: Option<&str>) -> bool {
+    matches!(
+        classify_render_intent(response, llm_response),
+        RenderIntent::Operability
+    ) && (!response.findings.is_empty()
         || !response.sessions.is_empty()
         || response
             .slo_context
             .as_ref()
-            .is_some_and(|sc| !sc.slos.is_empty())
+            .is_some_and(|sc| !sc.slos.is_empty()))
 }
 
 fn should_show_worth_a_look(
     response: &RAGQueryResponse,
+    llm_response: Option<&str>,
     verbose: bool,
-    has_flow_context: bool,
 ) -> bool {
     if verbose {
         return false;
@@ -1541,21 +1752,11 @@ fn should_show_worth_a_look(
     if response.findings.is_empty() {
         return false;
     }
-    if has_flow_context {
-        return false;
-    }
-    if response.workspace_context.is_some() {
-        return false;
-    }
-    // Broad summaries should stay brief.
-    if is_broad_health_query(&response.query) {
-        return false;
-    }
-    // Workspace overviews should not devolve into findings dumps.
-    if is_workspace_overview_query(&response.query) {
-        return false;
-    }
-    true
+
+    matches!(
+        classify_render_intent(response, llm_response),
+        RenderIntent::Findings
+    )
 }
 
 fn render_health_section(response: &RAGQueryResponse) {
@@ -1586,7 +1787,7 @@ fn render_health_section(response: &RAGQueryResponse) {
         }
     }
 
-    println!("{}", "Health".bold());
+    println!("{}", "Worth checking".bold());
 
     if !dim_counts.is_empty() {
         let mut dims: Vec<(&String, &i32)> = dim_counts.iter().collect();
@@ -1609,7 +1810,7 @@ fn render_health_section(response: &RAGQueryResponse) {
             .map(|(r, c)| format!("{} ({})", describe_rule_id(r), c))
             .collect::<Vec<_>>()
             .join(", ");
-        println!("  {} {}", "Top gaps:".dimmed(), s);
+        println!("  {} {}", "Gaps:".dimmed(), s);
     }
 
     if !file_counts.is_empty() {
@@ -1691,12 +1892,13 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
         return format!("{} {}", prefix, styled_hint);
     }
 
-    if is_workspace_overview_query(&response.query) || is_broad_health_query(&response.query) {
-        if let Some(ctx) = &response.workspace_context {
-            if !ctx.summary.trim().is_empty() {
-                return ctx.summary.trim().to_string();
+    match classify_render_intent(response, None) {
+        RenderIntent::Overview | RenderIntent::Operability => {
+            if let Some(ctx) = &response.workspace_context {
+                return workspace_one_liner(ctx, response.graph_stats.as_ref());
             }
         }
+        _ => {}
     }
 
     // Handle enumerate context (how many routes, list functions, etc.)
@@ -2412,12 +2614,16 @@ fn build_no_llm_quick_take(response: &RAGQueryResponse) -> Option<String> {
 
                 if top_rules.is_empty() {
                     return Some(format!(
-                        "I found a few reliability/operability signals in this workspace.{}",
+                        "I found a few operability signals in this workspace.{}",
                         focus
                     ));
                 }
 
-                return Some(format!("Top gaps: {}.{}", top_rules.join(", "), focus));
+                return Some(format!(
+                    "A few things worth checking next: {}.{}",
+                    top_rules.join(", "),
+                    focus
+                ));
             }
 
             // Build a response based on the top rules found
@@ -2505,18 +2711,14 @@ fn output_formatted(
     _has_llm: bool,
     streamed: bool,
 ) {
-    // Check if we have flow context (indicates a "how does X work?" type query)
-    let has_flow_context = response
-        .flow_context
-        .as_ref()
-        .is_some_and(|fc| !fc.paths.is_empty() || !fc.root_nodes.is_empty());
+    let intent = classify_render_intent(response, llm_response);
 
     let has_graph_context = response
         .graph_context
         .as_ref()
         .is_some_and(|gc| graph_context_has_data(gc));
 
-    let _has_structured_context = has_flow_context || has_graph_context;
+    let _has_structured_context = has_graph_context;
 
     // Print LLM response if available (this is the main answer)
     // If streamed=true, the response was already printed in real-time
@@ -2543,13 +2745,6 @@ fn output_formatted(
         }
     }
 
-    // Check if we have meaningful flow context
-    let has_flow_context = response
-        .flow_context
-        .as_ref()
-        .map(|fc| !fc.paths.is_empty() || !fc.root_nodes.is_empty())
-        .unwrap_or(false);
-
     // Default path: print a short colleague-style reply first.
     if llm_response.is_none() {
         let reply = build_colleague_reply(response);
@@ -2569,11 +2764,11 @@ fn output_formatted(
     }
 
     if let Some(workspace_ctx) = &response.workspace_context {
-        if verbose
-            || is_workspace_overview_query(&response.query)
-            || is_broad_health_query(&response.query)
-        {
+        if verbose {
             render_workspace_context(workspace_ctx, response.graph_stats.as_ref(), verbose);
+            println!();
+        } else if matches!(intent, RenderIntent::Overview | RenderIntent::Operability) {
+            render_workspace_brief(workspace_ctx, response.graph_stats.as_ref());
             println!();
         }
     }
@@ -2601,7 +2796,7 @@ fn output_formatted(
 
     // Show findings with code snippets (non-verbose mode)
     // Skip findings if we have good flow context - they're usually unrelated noise
-    if should_show_worth_a_look(response, verbose, has_flow_context) {
+    if should_show_worth_a_look(response, llm_response, verbose) {
         println!("{}", "Worth a look".bold());
         println!();
         render_findings_with_snippets(&response.findings);
@@ -3072,10 +3267,14 @@ mod tests {
 
         assert!(should_show_health_section(&response, None));
         // For broad health queries, we should not default to dumping findings.
-        assert!(!should_show_worth_a_look(&response, false, false));
+        assert!(!should_show_worth_a_look(&response, None, false));
 
         let take = build_no_llm_quick_take(&response).unwrap();
-        assert!(take.to_lowercase().contains("top gaps"));
+        let lower = take.to_lowercase();
+        assert!(
+            lower.contains("worth checking") || lower.contains("worth checking next"),
+            "unexpected take: {take}"
+        );
     }
 
     #[test]
@@ -3168,6 +3367,111 @@ mod tests {
                 "broad_health for '{q}'"
             );
         }
+    }
+
+    #[test]
+    fn test_classify_render_intent_basics() {
+        let base = RAGQueryResponse {
+            query: "Describe this workspace".to_string(),
+            sessions: vec![],
+            findings: vec![],
+            sources: vec![],
+            context_summary: "".to_string(),
+            topic_label: None,
+            graph_context: None,
+            flow_context: None,
+            slo_context: None,
+            enumerate_context: None,
+            graph_stats: None,
+            workspace_context: None,
+            routing_confidence: None,
+            hint: None,
+            disambiguation: None,
+        };
+
+        // Flow beats everything.
+        let mut r = base.clone();
+        r.flow_context = Some(crate::api::rag::RAGFlowContext {
+            query: Some("what calls login?".to_string()),
+            root_nodes: vec![],
+            paths: vec![vec![crate::api::rag::RAGFlowPathNode {
+                node_id: "n1".to_string(),
+                name: "login".to_string(),
+                path: Some("src/auth.py".to_string()),
+                node_type: "function".to_string(),
+                depth: 0,
+                http_method: None,
+                http_path: None,
+                description: None,
+                category: None,
+            }]],
+        });
+        assert_eq!(classify_render_intent(&r, None), RenderIntent::Flow);
+
+        // Enumerate.
+        let mut r = base.clone();
+        r.enumerate_context = Some(crate::api::rag::RAGEnumerateContext {
+            query_target: "routes".to_string(),
+            count: 1,
+            items: vec![],
+            truncated: false,
+            summary: "Found 1 route".to_string(),
+        });
+        assert_eq!(classify_render_intent(&r, None), RenderIntent::Enumerate);
+
+        // Observability.
+        let mut r = base.clone();
+        r.slo_context = Some(crate::api::rag::RAGSloContext {
+            monitored_routes: vec![],
+            unmonitored_routes: vec![],
+            slos: vec![crate::api::rag::RAGSloInfo {
+                id: "1".to_string(),
+                name: "slo".to_string(),
+                provider: "gcp".to_string(),
+                path_pattern: None,
+                http_method: None,
+                target_percent: Some(99.9),
+                current_percent: None,
+                error_budget_remaining: None,
+                timeframe: None,
+                dashboard_url: None,
+            }],
+            summary: Some("ok".to_string()),
+        });
+        assert_eq!(
+            classify_render_intent(&r, None),
+            RenderIntent::Observability
+        );
+
+        // Workspace overview when workspace_context is present.
+        let mut r = base.clone();
+        r.workspace_context = Some(crate::api::rag::RAGWorkspaceContext {
+            kind: Some("service".to_string()),
+            languages: std::collections::HashMap::new(),
+            frameworks: vec![],
+            entrypoints: vec![],
+            central_files: vec![],
+            top_dependencies: vec![],
+            depended_on_by: vec![],
+            depends_on: vec![],
+            remote_servers: vec![],
+            summary: "This workspace looks like a service".to_string(),
+        });
+        assert_eq!(classify_render_intent(&r, None), RenderIntent::Overview);
+
+        // Findings fallback.
+        let mut r = base;
+        r.query = "what should I worry about".to_string();
+        r.findings = vec![crate::api::rag::RAGFindingContext {
+            finding_id: "f1".to_string(),
+            rule_id: Some("python.http.missing_timeout".to_string()),
+            dimension: Some("Reliability".to_string()),
+            severity: Some("Medium".to_string()),
+            file_path: Some("src/main.py".to_string()),
+            line: Some(10),
+            similarity: 0.9,
+        }];
+        assert_eq!(classify_render_intent(&r, None), RenderIntent::Findings);
     }
 
     #[test]
