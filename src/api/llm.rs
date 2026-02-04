@@ -420,6 +420,7 @@ You may be given structured context (workspace overview, routes/flows, dependenc
 Guidelines:
 - Answer the user’s question first, in a natural colleague voice (1–3 sentences).
 - Prefer telling the story from structure and behavior (languages, frameworks, entrypoints, key modules, routes, call paths, dependencies).
+- The user intent is to make sense of the codebase and reason about it.
 - Use findings only when (a) the user asked about issues/risks, or (b) they are directly relevant to the question.
 - Be grounded: only claim what the provided context supports. If you’re unsure, say what’s missing.
 - Cite concrete anchors when available: file paths, endpoints, symbols.
@@ -1027,6 +1028,29 @@ pub fn build_llm_context(response: &crate::api::rag::RAGQueryResponse) -> String
                     .join(" -> ");
                 parts.push(format!("- Path {}: {}", i + 1, s));
             }
+        }
+    }
+
+    if let Some(en) = &response.enumerate_context {
+        parts.push("\n## Enumerate".to_string());
+        parts.push(en.summary.clone());
+        for item in en.items.iter().take(30) {
+            if item.item_type == "route" {
+                let method = item.http_method.as_deref().unwrap_or("");
+                let path = item.http_path.as_deref().unwrap_or("");
+                if !method.is_empty() && !path.is_empty() {
+                    parts.push(format!("- {} {}", method, path));
+                    continue;
+                }
+            }
+            parts.push(format!("- {}", item.name));
+        }
+        if en.truncated {
+            parts.push(format!(
+                "(Showing first {} of {}.)",
+                en.items.len(),
+                en.count
+            ));
         }
     }
 
