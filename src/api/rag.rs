@@ -229,6 +229,10 @@ pub struct RAGQueryResponse {
     /// Basic graph statistics, always included when graph data is available.
     #[serde(default)]
     pub graph_stats: Option<std::collections::HashMap<String, i32>>,
+
+    /// Workspace-level structural overview for queries like "Describe this workspace".
+    #[serde(default)]
+    pub workspace_context: Option<RAGWorkspaceContext>,
     /// Confidence score for query intent classification (0-1).
     /// Low confidence suggests the query may not be well understood.
     #[serde(default)]
@@ -239,6 +243,64 @@ pub struct RAGQueryResponse {
     /// Optional clarification payload with candidate targets.
     #[serde(default)]
     pub disambiguation: Option<RAGDisambiguation>,
+}
+
+/// A dependency/library frequently used in the workspace.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGWorkspaceDependency {
+    pub name: String,
+    #[serde(default)]
+    pub file_count: i32,
+}
+
+/// A cross-workspace dependency summary.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGWorkspaceLink {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub edge_count: i32,
+    #[serde(default)]
+    pub package_name: Option<String>,
+    #[serde(default)]
+    pub git_remote: Option<String>,
+}
+
+/// A file that is structurally central in the workspace.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGWorkspaceCentralFile {
+    pub path: String,
+    #[serde(default)]
+    pub score: i32,
+    #[serde(default)]
+    pub importer_count: i32,
+    #[serde(default)]
+    pub import_count: i32,
+    #[serde(default)]
+    pub route_count: i32,
+}
+
+/// Workspace-level structural overview.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RAGWorkspaceContext {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub languages: HashMap<String, i32>,
+    #[serde(default)]
+    pub frameworks: Vec<String>,
+    #[serde(default)]
+    pub entrypoints: Vec<String>,
+    #[serde(default)]
+    pub central_files: Vec<RAGWorkspaceCentralFile>,
+    #[serde(default)]
+    pub top_dependencies: Vec<RAGWorkspaceDependency>,
+    #[serde(default)]
+    pub depended_on_by: Vec<RAGWorkspaceLink>,
+    #[serde(default)]
+    pub depends_on: Vec<RAGWorkspaceLink>,
+    #[serde(default)]
+    pub remote_servers: Vec<String>,
+    pub summary: String,
 }
 
 /// Structured clarification payload (candidate targets).

@@ -26,6 +26,7 @@ use crate::api::llm::{LlmClient, build_llm_context};
 use crate::api::rag::{
     ClientGraphData, RAGDisambiguation, RAGEnumerateContext, RAGEnumerateItem, RAGFlowContext,
     RAGFlowPathNode, RAGGraphContext, RAGQueryRequest, RAGQueryResponse, RAGSloContext,
+    RAGWorkspaceContext,
 };
 use crate::config::Config;
 use crate::exit_codes::*;
@@ -1505,6 +1506,12 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
         return format!("{} {}", prefix, styled_hint);
     }
 
+    if let Some(ctx) = &response.workspace_context {
+        if !ctx.summary.trim().is_empty() {
+            return ctx.summary.trim().to_string();
+        }
+    }
+
     // Handle enumerate context (how many routes, list functions, etc.)
     if let Some(enumerate_context) = &response.enumerate_context {
         let opener = pick_variant(
@@ -1875,6 +1882,135 @@ fn build_colleague_reply(response: &RAGQueryResponse) -> String {
     )
 }
 
+fn render_workspace_context(
+    ctx: &RAGWorkspaceContext,
+    graph_stats: Option<&std::collections::HashMap<String, i32>>,
+    _verbose: bool,
+) {
+    println!("{}", "Workspace".bold());
+
+    if let Some(kind) = &ctx.kind {
+        if !kind.trim().is_empty() {
+            println!("  {} {}", "Kind:".dimmed(), kind.bright_white());
+        }
+    }
+
+    if !ctx.languages.is_empty() {
+        let mut langs: Vec<(&String, &i32)> = ctx.languages.iter().collect();
+        langs.sort_by(|a, b| b.1.cmp(a.1));
+        let s = langs
+            .into_iter()
+            .take(4)
+            .map(|(l, c)| format!("{} ({})", l, c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Languages:".dimmed(), s);
+    }
+
+    if !ctx.frameworks.is_empty() {
+        println!(
+            "  {} {}",
+            "Frameworks:".dimmed(),
+            ctx.frameworks.join(", ")
+        );
+    }
+
+    if let Some(stats) = graph_stats {
+        let file_count = stats.get("file_count").copied().unwrap_or(0);
+        let fn_count = stats.get("function_count").copied().unwrap_or(0);
+        let route_count = stats.get("route_count").copied().unwrap_or(0);
+        if file_count > 0 || fn_count > 0 || route_count > 0 {
+            println!(
+                "  {} {} files, {} functions, {} routes",
+                "Scale:".dimmed(),
+                file_count,
+                fn_count,
+                route_count
+            );
+        }
+    }
+
+    if !ctx.entrypoints.is_empty() {
+        println!(
+            "  {} {}",
+            "Entrypoints:".dimmed(),
+            ctx.entrypoints
+                .iter()
+                .take(4)
+                .map(|p| color_paths(p))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if !ctx.central_files.is_empty() {
+        let top = ctx
+            .central_files
+            .iter()
+            .take(5)
+            .map(|f| color_paths(&f.path))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Hotspots:".dimmed(), top);
+    }
+
+    if !ctx.top_dependencies.is_empty() {
+        let deps = ctx
+            .top_dependencies
+            .iter()
+            .take(8)
+            .map(|d| d.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Dependencies:".dimmed(), deps);
+    }
+
+    if !ctx.depended_on_by.is_empty() {
+        let s = ctx
+            .depended_on_by
+            .iter()
+            .take(6)
+            .map(|w| {
+                let name = w
+                    .package_name
+                    .as_deref()
+                    .unwrap_or(w.workspace_id.as_str());
+                format!("{} ({})", name, w.edge_count)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Depended by:".dimmed(), s);
+    }
+
+    if !ctx.depends_on.is_empty() {
+        let s = ctx
+            .depends_on
+            .iter()
+            .take(6)
+            .map(|w| {
+                let name = w
+                    .package_name
+                    .as_deref()
+                    .unwrap_or(w.workspace_id.as_str());
+                format!("{} ({})", name, w.edge_count)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Depends on:".dimmed(), s);
+    }
+
+    if !ctx.remote_servers.is_empty() {
+        let remotes = ctx
+            .remote_servers
+            .iter()
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {} {}", "Outbound:".dimmed(), remotes);
+    }
+}
+
 fn render_disambiguation(disambiguation: &RAGDisambiguation) {
     println!("{}", "Possible targets".bold());
 
@@ -2219,6 +2355,11 @@ fn output_formatted(
         println!();
     }
 
+    if let Some(workspace_ctx) = &response.workspace_context {
+        render_workspace_context(workspace_ctx, response.graph_stats.as_ref(), verbose);
+        println!();
+    }
+
     // If we have flow context, render it prominently (this is the "semantic" answer)
     if let Some(flow_context) = &response.flow_context {
         if !flow_context.paths.is_empty() || !flow_context.root_nodes.is_empty() {
@@ -2237,7 +2378,11 @@ fn output_formatted(
 
     // Show findings with code snippets (non-verbose mode)
     // Skip findings if we have good flow context - they're usually unrelated noise
-    if !response.findings.is_empty() && !verbose && !has_flow_context {
+    if !response.findings.is_empty()
+        && !verbose
+        && !has_flow_context
+        && response.workspace_context.is_none()
+    {
         println!("{}", "Worth a look".bold());
         println!();
         render_findings_with_snippets(&response.findings);
@@ -2537,6 +2682,7 @@ mod tests {
             slo_context: None,
             enumerate_context: None,
             graph_stats: None,
+            workspace_context: None,
             routing_confidence: None,
             hint: None,
             disambiguation: None,
@@ -2572,6 +2718,7 @@ mod tests {
             slo_context: None,
             enumerate_context: None,
             graph_stats: None,
+            workspace_context: None,
             routing_confidence: None,
             hint: None,
             disambiguation: None,
@@ -2625,6 +2772,7 @@ mod tests {
             slo_context: None,
             enumerate_context: None,
             graph_stats: None,
+            workspace_context: None,
             routing_confidence: None,
             hint: Some("Please specify a file path or symbol".to_string()),
             disambiguation: None,
