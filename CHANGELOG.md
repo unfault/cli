@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `unfault ask --llm`: adjust the system/user prompts to favor a conversational, graph-based workspace story over a findings-only production-readiness framing.
+
 ## [0.6.31] - 2026-02-04
 
 ### Fixed

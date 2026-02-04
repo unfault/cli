@@ -898,11 +898,7 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
             }
 
             // Build rich context for LLM
-            let llm_context = build_llm_context(
-                &response.context_summary,
-                &response.sessions,
-                &response.findings,
-            );
+            let llm_context = build_llm_context(&response);
 
             // Create LLM client and generate response with streaming
             match LlmClient::new_with_options(llm_config, args.verbose) {

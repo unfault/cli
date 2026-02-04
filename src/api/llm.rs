@@ -412,31 +412,36 @@ impl LlmClient {
 
     /// Build the system prompt for the LLM.
     fn build_system_prompt(&self) -> String {
-        r#"You are Unfault, an AI assistant that helps developers understand the health of their codebase.
+        r#"You are Unfault — a pragmatic engineering teammate.
 
-You analyze code quality findings from static analysis and provide actionable insights.
+Your job is to help the developer understand what this workspace is, how it is structured, and how it behaves.
+You may be given structured context (workspace overview, routes/flows, dependencies, cross-workspace links) and sometimes findings from reviews.
 
-When answering questions:
-- Be concise and direct: you are a SRE-in-their-pocket
-- Focus on the most important issues first (Critical > High > Medium > Low)
-- Group related findings when helpful
-- Suggest specific actions to improve code quality
-- Use technical language appropriate for developers
-- You cannot offer to look further into it and it's a one-off response
-- Be kind and professional
+Guidelines:
+- Answer the user’s question first, in a natural colleague voice (1–3 sentences).
+- Prefer telling the story from structure and behavior (languages, frameworks, entrypoints, key modules, routes, call paths, dependencies).
+- Use findings only when (a) the user asked about issues/risks, or (b) they are directly relevant to the question.
+- Be grounded: only claim what the provided context supports. If you’re unsure, say what’s missing.
+- Cite concrete anchors when available: file paths, endpoints, symbols.
+- If blocked by a missing target, ask one clarifying question and also provide a best-effort answer with explicit assumptions.
+- Keep it tight. Use short bullets only when they improve scanability.
 
-If the context doesn't contain relevant information, say so clearly rather than making assumptions."#.to_string()
+Never invent code. Do not claim you ran commands or opened files beyond the provided context."#
+            .to_string()
     }
 
     /// Build the user prompt with query and context.
     fn build_user_prompt(&self, query: &str, context: &str) -> String {
         format!(
-            r#"**User Question:** {}
-
-**Analysis Context:**
+            r#"User question:
 {}
 
-Based on this context, please answer the user's question about their codebase health."#,
+Context (ground truth, may be incomplete):
+{}
+
+Task:
+Answer the user’s question using the context. Prefer workspace structure/behavior over findings unless the user asked for issues.
+If helpful, end with 1–2 suggested follow-up questions the user can ask next."#,
             query, context
         )
     }
@@ -966,16 +971,75 @@ Based on this context, please answer the user's question about their codebase he
     }
 }
 
-/// Build a rich context string from RAG response for LLM consumption.
-pub fn build_llm_context(
-    context_summary: &str,
-    sessions: &[crate::api::rag::RAGSessionContext],
-    findings: &[crate::api::rag::RAGFindingContext],
-) -> String {
-    let mut parts = vec![context_summary.to_string()];
+/// Build a rich context string from a RAG response for LLM consumption.
+pub fn build_llm_context(response: &crate::api::rag::RAGQueryResponse) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(ctx) = &response.workspace_context {
+        parts.push("## Workspace".to_string());
+        parts.push(ctx.summary.clone());
+
+        if !ctx.entrypoints.is_empty() {
+            parts.push(format!("Entrypoints: {}", ctx.entrypoints.join(", ")));
+        }
+
+        if !ctx.central_files.is_empty() {
+            let top = ctx
+                .central_files
+                .iter()
+                .take(5)
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("Hotspots: {}", top));
+        }
+
+        if !ctx.top_dependencies.is_empty() {
+            let deps = ctx
+                .top_dependencies
+                .iter()
+                .take(10)
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("Dependencies: {}", deps));
+        }
+
+        if !ctx.remote_servers.is_empty() {
+            parts.push(format!(
+                "Outbound remotes: {}",
+                ctx.remote_servers.join(", ")
+            ));
+        }
+    }
+
+    if let Some(flow) = &response.flow_context {
+        if !flow.paths.is_empty() {
+            parts.push("\n## Flow".to_string());
+            if let Some(q) = &flow.query {
+                parts.push(format!("Query: {}", q));
+            }
+            for (i, path) in flow.paths.iter().take(5).enumerate() {
+                let s = path
+                    .iter()
+                    .map(|n| n.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" -> ");
+                parts.push(format!("- Path {}: {}", i + 1, s));
+            }
+        }
+    }
+
+    if !response.context_summary.trim().is_empty() {
+        parts.push("\n## Retrieved context".to_string());
+        parts.push(response.context_summary.clone());
+    }
+
+    let sessions = &response.sessions;
+    let findings = &response.findings;
 
     if !sessions.is_empty() {
-        parts.push("\n### Session Details:".to_string());
+        parts.push("\n## Sessions".to_string());
         for session in sessions {
             let workspace = session.workspace_label.as_deref().unwrap_or("Unknown");
             parts.push(format!(
@@ -1006,7 +1070,7 @@ pub fn build_llm_context(
     }
 
     if !findings.is_empty() {
-        parts.push("\n### Top Findings:".to_string());
+        parts.push("\n## Findings".to_string());
         for finding in findings {
             let rule = finding.rule_id.as_deref().unwrap_or("unknown");
             let severity = finding.severity.as_deref().unwrap_or("unknown");
@@ -1035,6 +1099,27 @@ pub fn build_llm_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::rag::RAGQueryResponse;
+
+    fn base_response(context_summary: &str) -> RAGQueryResponse {
+        RAGQueryResponse {
+            query: "q".to_string(),
+            sessions: vec![],
+            findings: vec![],
+            sources: vec![],
+            context_summary: context_summary.to_string(),
+            topic_label: None,
+            graph_context: None,
+            flow_context: None,
+            slo_context: None,
+            enumerate_context: None,
+            graph_stats: None,
+            workspace_context: None,
+            routing_confidence: None,
+            hint: None,
+            disambiguation: None,
+        }
+    }
 
     #[test]
     fn test_build_system_prompt() {
@@ -1050,7 +1135,8 @@ mod tests {
         };
         let prompt = client.build_system_prompt();
         assert!(prompt.contains("Unfault"));
-        assert!(prompt.contains("code"));
+        assert!(prompt.contains("engineering teammate"));
+        assert!(!prompt.contains("SRE-in-their-pocket"));
     }
 
     #[test]
@@ -1067,6 +1153,7 @@ mod tests {
         let prompt = client.build_user_prompt("How is my service?", "Context here");
         assert!(prompt.contains("How is my service?"));
         assert!(prompt.contains("Context here"));
+        assert!(prompt.contains("Task:"));
     }
 
     #[test]
@@ -1095,8 +1182,9 @@ mod tests {
 
     #[test]
     fn test_build_llm_context_empty() {
-        let context = build_llm_context("No findings", &[], &[]);
-        assert_eq!(context, "No findings");
+        let response = base_response("No context");
+        let context = build_llm_context(&response);
+        assert!(context.contains("No context"));
     }
 
     #[test]
@@ -1113,7 +1201,9 @@ mod tests {
             severity_counts: [("High".to_string(), 3)].into_iter().collect(),
         }];
 
-        let context = build_llm_context("Summary", &sessions, &[]);
+        let mut response = base_response("Summary");
+        response.sessions = sessions;
+        let context = build_llm_context(&response);
         assert!(context.contains("my-service"));
         assert!(context.contains("10 findings"));
         assert!(context.contains("Stability"));
@@ -1133,7 +1223,9 @@ mod tests {
             similarity: 0.78,
         }];
 
-        let context = build_llm_context("Summary", &[], &findings);
+        let mut response = base_response("Summary");
+        response.findings = findings;
+        let context = build_llm_context(&response);
         assert!(context.contains("http.timeout"));
         assert!(context.contains("High"));
         assert!(context.contains("api/client.py:42"));
