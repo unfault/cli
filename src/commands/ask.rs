@@ -1870,6 +1870,9 @@ fn is_workspace_overview_query(query: &str) -> bool {
         || q.contains("framework")
         || q.contains("stack")
         || q.contains("tech stack")
+        || q.contains("purpose")
+        || q.contains("what is this for")
+        || q.contains("what does this")
         || q.contains("architecture")
         || q.contains("structure")
         || q.contains("layout")
@@ -3600,6 +3603,9 @@ mod tests {
         ));
         assert!(is_workspace_overview_query(
             "What language/framework is this and what are the entrypoints?"
+        ));
+        assert!(is_workspace_overview_query(
+            "Tell me the purpose of this workspace?"
         ));
         assert!(!is_workspace_overview_query("where is this used"));
     }
