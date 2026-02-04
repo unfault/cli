@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Use correct command hint to configure llm
+
 ## [0.6.27] - 2026-02-03
 
 ### Fixed

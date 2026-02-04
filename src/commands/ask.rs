@@ -520,7 +520,7 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
     let llm_response = if args.llm {
         if !config.llm_ready() {
             eprintln!(
-                "{} LLM not configured. Run `unfault llm setup` to enable AI-powered answers.",
+                "{} LLM not configured. Run `unfault config llm` to enable AI-powered answers.",
                 "⚠".yellow()
             );
             eprintln!();
