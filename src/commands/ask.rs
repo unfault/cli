@@ -26,7 +26,7 @@ use crate::api::llm::{LlmClient, build_llm_context};
 use crate::api::rag::{
     ClientGraphData, RAGDisambiguation, RAGEnumerateContext, RAGEnumerateItem, RAGFlowContext,
     RAGFlowPathNode, RAGGraphContext, RAGQueryRequest, RAGQueryResponse, RAGSloContext,
-    RAGWorkspaceContext,
+    RAGWorkspaceCentralFile, RAGWorkspaceContext, RAGWorkspaceDependency,
 };
 use crate::config::Config;
 use crate::exit_codes::*;
@@ -250,6 +250,352 @@ fn graph_to_client_data(graph: &SerializableGraph) -> ClientGraphData {
     }
 }
 
+fn json_get_str(map: &HashMap<String, serde_json::Value>, key: &str) -> Option<String> {
+    map.get(key)?.as_str().map(|s| s.to_string())
+}
+
+fn extract_local_workspace_context(graph_data: &ClientGraphData) -> RAGWorkspaceContext {
+    // Languages
+    let mut languages: HashMap<String, i32> = HashMap::new();
+    for f in &graph_data.files {
+        if let Some(lang) = json_get_str(f, "language") {
+            let lang_lc = lang.trim().to_lowercase();
+            if !lang_lc.is_empty() {
+                *languages.entry(lang_lc).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Library usage -> deps
+    let mut lib_to_files: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    for u in &graph_data.library_usage {
+        let lib = json_get_str(u, "library").unwrap_or_default();
+        let lib = lib.trim();
+        if lib.is_empty() {
+            continue;
+        }
+        let file_path = json_get_str(u, "file_path").unwrap_or_default();
+        let file_path = file_path.trim();
+        if !file_path.is_empty() {
+            lib_to_files
+                .entry(lib.to_string())
+                .or_default()
+                .insert(file_path.to_string());
+        } else {
+            lib_to_files.entry(lib.to_string()).or_default();
+        }
+    }
+
+    let mut top_dependencies: Vec<RAGWorkspaceDependency> = lib_to_files
+        .iter()
+        .map(|(lib, files)| RAGWorkspaceDependency {
+            name: lib.clone(),
+            file_count: files.len() as i32,
+        })
+        .collect();
+    top_dependencies.sort_by(|a, b| b.file_count.cmp(&a.file_count));
+    top_dependencies.truncate(10);
+
+    // Framework detection (best effort)
+    let libs_lc: std::collections::HashSet<String> = top_dependencies
+        .iter()
+        .map(|d| d.name.to_lowercase())
+        .collect();
+    let mut frameworks: Vec<String> = Vec::new();
+    if libs_lc.contains("fastapi") {
+        frameworks.push("FastAPI".to_string());
+    } else if libs_lc.contains("starlette") {
+        frameworks.push("Starlette".to_string());
+    }
+    if libs_lc.contains("django") {
+        frameworks.push("Django".to_string());
+    }
+    if libs_lc.contains("flask") {
+        frameworks.push("Flask".to_string());
+    }
+    if libs_lc.contains("express") {
+        frameworks.push("Express".to_string());
+    }
+    if libs_lc.contains("axum") {
+        frameworks.push("Axum".to_string());
+    }
+
+    // Route distribution -> entrypoints
+    let mut routes_by_file: HashMap<String, i32> = HashMap::new();
+    for func in &graph_data.functions {
+        let fp = json_get_str(func, "file_path").unwrap_or_default();
+        let fp = fp.trim();
+        if fp.is_empty() {
+            continue;
+        }
+        let has_route = func.get("http_method").is_some() && func.get("http_path").is_some();
+        if has_route {
+            *routes_by_file.entry(fp.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let mut entrypoints: Vec<String> = routes_by_file.keys().cloned().collect();
+    entrypoints.sort_by(|a, b| routes_by_file.get(b).cmp(&routes_by_file.get(a)));
+    entrypoints.truncate(5);
+
+    // Import connectivity -> central files
+    let mut import_in: HashMap<String, i32> = HashMap::new();
+    let mut import_out: HashMap<String, i32> = HashMap::new();
+    for e in &graph_data.imports {
+        let src = json_get_str(e, "from_file").unwrap_or_default();
+        let src = src.trim();
+        let dst = json_get_str(e, "to_file").unwrap_or_default();
+        let dst = dst.trim();
+        if !src.is_empty() {
+            *import_out.entry(src.to_string()).or_insert(0) += 1;
+        }
+        if !dst.is_empty() {
+            *import_in.entry(dst.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let mut central_files: Vec<RAGWorkspaceCentralFile> = Vec::new();
+    let mut all_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for f in &graph_data.files {
+        if let Some(p) = json_get_str(f, "path") {
+            let p = p.trim();
+            if !p.is_empty() {
+                all_files.insert(p.to_string());
+            }
+        }
+    }
+    all_files.extend(import_in.keys().cloned());
+    all_files.extend(import_out.keys().cloned());
+    all_files.extend(routes_by_file.keys().cloned());
+
+    for p in all_files.iter() {
+        let imp_in = *import_in.get(p).unwrap_or(&0);
+        let imp_out = *import_out.get(p).unwrap_or(&0);
+        let r = *routes_by_file.get(p).unwrap_or(&0);
+        let score = imp_in * 3 + r * 6 + imp_out;
+        if score <= 0 {
+            continue;
+        }
+        central_files.push(RAGWorkspaceCentralFile {
+            path: p.clone(),
+            score,
+            importer_count: imp_in,
+            import_count: imp_out,
+            route_count: r,
+        });
+    }
+    central_files.sort_by(|a, b| b.score.cmp(&a.score));
+    central_files.truncate(5);
+
+    // Remote servers
+    let mut remote_servers: Vec<String> = Vec::new();
+    for r in &graph_data.remote_servers {
+        let mut s = json_get_str(r, "url")
+            .or_else(|| json_get_str(r, "host"))
+            .or_else(|| json_get_str(r, "name"))
+            .unwrap_or_default();
+        s = s.trim().to_string();
+        if s.is_empty() {
+            continue;
+        }
+        if let Some(rest) = s.strip_prefix("https://") {
+            s = rest.to_string();
+        } else if let Some(rest) = s.strip_prefix("http://") {
+            s = rest.to_string();
+        }
+        if let Some(host) = s.split('/').next() {
+            let host = host.trim();
+            if !host.is_empty() {
+                remote_servers.push(host.to_string());
+            }
+        }
+    }
+    remote_servers.sort();
+    remote_servers.dedup();
+    remote_servers.truncate(10);
+
+    let route_count = graph_data.stats.get("route_count").copied().unwrap_or(0);
+    let kind = if route_count > 0 {
+        "service"
+    } else {
+        "library"
+    };
+
+    let primary_lang = languages
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1))
+        .map(|(l, _)| l.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let fw_part = if frameworks.is_empty() {
+        "".to_string()
+    } else {
+        format!(" ({})", frameworks.join(", "))
+    };
+
+    let file_count = graph_data.stats.get("file_count").copied().unwrap_or(0);
+    let function_count = graph_data.stats.get("function_count").copied().unwrap_or(0);
+
+    let mut summary = format!(
+        "This workspace looks like a {kind} in {primary_lang}{fw_part}. Scale: {file_count} files, {function_count} functions, {route_count} routes."
+    );
+    if let Some(start) = entrypoints
+        .first()
+        .or_else(|| central_files.first().map(|f| &f.path))
+    {
+        summary.push_str(&format!(" If you want a starting point, begin at {start}."));
+    }
+
+    RAGWorkspaceContext {
+        kind: Some(kind.to_string()),
+        languages,
+        frameworks,
+        entrypoints,
+        central_files,
+        top_dependencies,
+        depended_on_by: vec![],
+        depends_on: vec![],
+        remote_servers,
+        summary,
+    }
+}
+
+fn parse_route_from_query(query: &str) -> Option<(String, String)> {
+    use regex::Regex;
+    let re = Regex::new(r"\b(?P<method>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(?P<path>/\S+)\b")
+        .ok()?;
+    let caps = re.captures(query)?;
+    let method = caps.name("method")?.as_str().to_uppercase();
+    let path = caps.name("path")?.as_str().to_string();
+    Some((method, path))
+}
+
+fn extract_local_flow_for_route(
+    graph_data: &ClientGraphData,
+    method: &str,
+    path: &str,
+) -> Option<RAGFlowContext> {
+    // Find handler function by http_method + http_path.
+    let mut handler_name: Option<String> = None;
+    let mut handler_file: Option<String> = None;
+    let mut func_by_name: HashMap<String, Option<String>> = HashMap::new();
+
+    for func in &graph_data.functions {
+        let name = json_get_str(func, "name").unwrap_or_default();
+        let qname = json_get_str(func, "qualified_name").unwrap_or_default();
+        let fp = json_get_str(func, "file_path");
+        let key = if !qname.trim().is_empty() {
+            qname.clone()
+        } else {
+            name.clone()
+        };
+        if !key.trim().is_empty() {
+            func_by_name.insert(key.clone(), fp.clone());
+        }
+
+        let hm = json_get_str(func, "http_method").unwrap_or_default();
+        let hp = json_get_str(func, "http_path").unwrap_or_default();
+        if hm.to_uppercase() == method && hp == path {
+            handler_name = Some(key);
+            handler_file = fp;
+        }
+    }
+
+    let handler_name = handler_name?;
+
+    // Build adjacency caller -> callees.
+    let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
+    for call in &graph_data.calls {
+        let caller = json_get_str(call, "caller").unwrap_or_default();
+        let callee = json_get_str(call, "callee").unwrap_or_default();
+        if caller.trim().is_empty() || callee.trim().is_empty() {
+            continue;
+        }
+        outgoing.entry(caller).or_default().push(callee);
+    }
+
+    let route_node = RAGFlowPathNode {
+        node_id: format!("route:{method}:{path}"),
+        name: format!("{method} {path}"),
+        path: handler_file.clone(),
+        node_type: "api_route".to_string(),
+        depth: 0,
+        http_method: Some(method.to_string()),
+        http_path: Some(path.to_string()),
+        description: None,
+        category: None,
+    };
+
+    let handler_node = RAGFlowPathNode {
+        node_id: format!("func:{}", handler_name),
+        name: handler_name.clone(),
+        path: handler_file,
+        node_type: "function".to_string(),
+        depth: 1,
+        http_method: Some(method.to_string()),
+        http_path: Some(path.to_string()),
+        description: None,
+        category: None,
+    };
+
+    // Follow one representative path up to depth 5.
+    let mut path_nodes: Vec<RAGFlowPathNode> = vec![route_node.clone(), handler_node];
+    let mut current = handler_name;
+    for depth in 2..=5 {
+        let next = outgoing.get(&current).and_then(|v| v.first()).cloned();
+        let Some(next) = next else { break };
+        let fp = func_by_name.get(&next).cloned().flatten();
+        path_nodes.push(RAGFlowPathNode {
+            node_id: format!("func:{}", next),
+            name: next.clone(),
+            path: fp,
+            node_type: "function".to_string(),
+            depth,
+            http_method: None,
+            http_path: None,
+            description: None,
+            category: None,
+        });
+        current = next;
+    }
+
+    Some(RAGFlowContext {
+        query: Some(format!("{method} {path}")),
+        root_nodes: vec![route_node],
+        paths: vec![path_nodes],
+    })
+}
+
+fn augment_response_with_local_context(
+    response: &mut RAGQueryResponse,
+    local_graph: Option<&ClientGraphData>,
+    local_workspace_context: Option<&RAGWorkspaceContext>,
+) {
+    if response.workspace_context.is_none() {
+        if let Some(ctx) = local_workspace_context {
+            response.workspace_context = Some(ctx.clone());
+        }
+    }
+
+    let needs_target = response
+        .disambiguation
+        .as_ref()
+        .map(|d| d.reason.to_lowercase().contains("needs"))
+        .unwrap_or(false);
+
+    if response.flow_context.is_none() && needs_target {
+        if let (Some(graph), Some((method, path))) =
+            (local_graph, parse_route_from_query(&response.query))
+        {
+            if let Some(flow) = extract_local_flow_for_route(graph, &method, &path) {
+                response.flow_context = Some(flow);
+                response.hint = None;
+                response.disambiguation = None;
+            }
+        }
+    }
+}
+
 /// Arguments for the ask command
 #[derive(Debug)]
 pub struct AskArgs {
@@ -459,6 +805,13 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
             .map(|graph| graph_to_client_data(&graph))
     };
 
+    let local_graph_data = graph_data.clone();
+
+    // Pre-compute local fallback contexts for older server deployments.
+    let local_workspace_context = local_graph_data
+        .as_ref()
+        .map(|gd| extract_local_workspace_context(gd));
+
     // Build request
     let request = RAGQueryRequest {
         query: args.query.clone(),
@@ -477,7 +830,7 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
     }
 
     // Execute query
-    let response = match api_client.query_rag(&config.api_key, &request).await {
+    let mut response = match api_client.query_rag(&config.api_key, &request).await {
         Ok(response) => response,
         Err(e) => {
             if e.is_auth_error() {
@@ -516,6 +869,12 @@ pub async fn execute(args: AskArgs) -> Result<i32> {
             return Ok(EXIT_ERROR);
         }
     };
+
+    augment_response_with_local_context(
+        &mut response,
+        local_graph_data.as_ref(),
+        local_workspace_context.as_ref(),
+    );
 
     // Run LLM only when explicitly requested.
     let llm_response = if args.llm {
@@ -1501,13 +1860,33 @@ fn is_workspace_overview_query(query: &str) -> bool {
         return true;
     }
 
-    // Loose match (keep conservative to avoid false positives).
-    (q.contains("describe") || q.contains("overview") || q.contains("summar"))
-        && (q.contains("workspace")
-            || q.contains("repo")
-            || q.contains("repository")
-            || q.contains("codebase")
-            || q.contains("project"))
+    let has_overview_verb =
+        q.contains("describe") || q.contains("overview") || q.contains("summar");
+    let has_container = q.contains("workspace")
+        || q.contains("repo")
+        || q.contains("repository")
+        || q.contains("codebase")
+        || q.contains("project")
+        || q.contains("this");
+
+    // Structural questions that should route to a workspace story.
+    let has_structure_cues = q.contains("language")
+        || q.contains("framework")
+        || q.contains("stack")
+        || q.contains("tech stack")
+        || q.contains("architecture")
+        || q.contains("structure")
+        || q.contains("layout")
+        || q.contains("entrypoint")
+        || q.contains("entry point")
+        || q.contains("entrypoints")
+        || q.contains("entry points")
+        || q.contains("where do i start")
+        || q.contains("starting point")
+        || q.contains("how is this wired")
+        || q.contains("wired together");
+
+    (has_overview_verb || has_structure_cues) && has_container
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3223,7 +3602,133 @@ mod tests {
         assert!(is_workspace_overview_query(
             "give me an overview of this repo"
         ));
+        assert!(is_workspace_overview_query(
+            "What language/framework is this and what are the entrypoints?"
+        ));
         assert!(!is_workspace_overview_query("where is this used"));
+    }
+
+    #[test]
+    fn test_extract_local_workspace_context_smoke() {
+        let graph = ClientGraphData {
+            files: vec![
+                HashMap::from([
+                    ("path".to_string(), serde_json::json!("main.py")),
+                    ("language".to_string(), serde_json::json!("python")),
+                ]),
+                HashMap::from([
+                    ("path".to_string(), serde_json::json!("deps.py")),
+                    ("language".to_string(), serde_json::json!("python")),
+                ]),
+            ],
+            functions: vec![HashMap::from([
+                ("name".to_string(), serde_json::json!("create_order")),
+                (
+                    "qualified_name".to_string(),
+                    serde_json::json!("create_order"),
+                ),
+                ("file_path".to_string(), serde_json::json!("main.py")),
+                ("http_method".to_string(), serde_json::json!("POST")),
+                ("http_path".to_string(), serde_json::json!("/orders")),
+            ])],
+            calls: vec![],
+            dependency_injections: vec![],
+            imports: vec![],
+            contains: vec![],
+            library_usage: vec![HashMap::from([
+                ("file_path".to_string(), serde_json::json!("main.py")),
+                ("library".to_string(), serde_json::json!("fastapi")),
+            ])],
+            remote_servers: vec![HashMap::from([(
+                "url".to_string(),
+                serde_json::json!("https://api.example.com/v1"),
+            )])],
+            http_calls: vec![],
+            slos: vec![],
+            stats: HashMap::from([
+                ("file_count".to_string(), 2),
+                ("function_count".to_string(), 1),
+                ("route_count".to_string(), 1),
+            ]),
+        };
+
+        let ctx = extract_local_workspace_context(&graph);
+        assert_eq!(ctx.kind.as_deref(), Some("service"));
+        assert_eq!(ctx.languages.get("python"), Some(&2));
+        assert!(ctx.frameworks.contains(&"FastAPI".to_string()));
+        assert!(ctx.entrypoints.contains(&"main.py".to_string()));
+        assert!(ctx.remote_servers.contains(&"api.example.com".to_string()));
+        assert!(!ctx.summary.trim().is_empty());
+    }
+
+    #[test]
+    fn test_augment_response_with_local_route_flow() {
+        let graph = ClientGraphData {
+            files: vec![HashMap::from([
+                ("path".to_string(), serde_json::json!("main.py")),
+                ("language".to_string(), serde_json::json!("python")),
+            ])],
+            functions: vec![
+                HashMap::from([
+                    ("name".to_string(), serde_json::json!("create_order")),
+                    (
+                        "qualified_name".to_string(),
+                        serde_json::json!("create_order"),
+                    ),
+                    ("file_path".to_string(), serde_json::json!("main.py")),
+                    ("http_method".to_string(), serde_json::json!("POST")),
+                    ("http_path".to_string(), serde_json::json!("/orders")),
+                ]),
+                HashMap::from([
+                    ("name".to_string(), serde_json::json!("send_to_kitchen")),
+                    (
+                        "qualified_name".to_string(),
+                        serde_json::json!("send_to_kitchen"),
+                    ),
+                    ("file_path".to_string(), serde_json::json!("main.py")),
+                ]),
+            ],
+            calls: vec![HashMap::from([
+                ("caller".to_string(), serde_json::json!("create_order")),
+                ("callee".to_string(), serde_json::json!("send_to_kitchen")),
+            ])],
+            dependency_injections: vec![],
+            imports: vec![],
+            contains: vec![],
+            library_usage: vec![],
+            remote_servers: vec![],
+            http_calls: vec![],
+            slos: vec![],
+            stats: HashMap::new(),
+        };
+
+        let mut response = RAGQueryResponse {
+            query: "How does POST /orders work?".to_string(),
+            sessions: vec![],
+            findings: vec![],
+            sources: vec![],
+            context_summary: "".to_string(),
+            topic_label: None,
+            graph_context: None,
+            flow_context: None,
+            slo_context: None,
+            enumerate_context: None,
+            graph_stats: None,
+            workspace_context: None,
+            routing_confidence: None,
+            hint: Some("Please specify a file path or symbol".to_string()),
+            disambiguation: Some(crate::api::rag::RAGDisambiguation {
+                intent: "semantic".to_string(),
+                reason: "needs_target".to_string(),
+                message: Some("Please provide a concrete file path".to_string()),
+                tokens: vec![],
+            }),
+        };
+
+        augment_response_with_local_context(&mut response, Some(&graph), None);
+        assert!(response.flow_context.is_some());
+        assert!(response.disambiguation.is_none());
+        assert!(response.hint.is_none());
     }
 
     #[test]
