@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.31] - 2026-02-04
+
+### Fixed
+
+- `unfault graph`: show outbound HTTP calls under entrypoints even when they happen in helper functions called by the route handler.
+
 ## [0.6.30] - 2026-02-04
 
 ### Added
@@ -345,7 +351,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
-[Unreleased]: https://github.com/unfault/cli/compare/v0.6.30...HEAD
+[Unreleased]: https://github.com/unfault/cli/compare/v0.6.31...HEAD
+[0.6.31]: https://github.com/unfault/cli/compare/v0.6.30...v0.6.31
 [0.6.30]: https://github.com/unfault/cli/compare/v0.6.29...v0.6.30
 [0.6.29]: https://github.com/unfault/cli/compare/v0.6.28...v0.6.29
 [0.6.28]: https://github.com/unfault/cli/compare/v0.6.27...v0.6.28
