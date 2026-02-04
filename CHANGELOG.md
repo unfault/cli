@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.28] - 2026-02-04
+
+### Added
+
+- `unfault ask`: when you ask for a workspace overview (e.g. "Describe this workspace"), show a structural summary (languages/frameworks/hotspots/deps) and cross-workspace links (top dependents/dependencies) when available.
+
 ### Fixed
 
 - Use correct command hint to configure llm
@@ -322,7 +328,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of Unfault CLI — a calm reviewer for thoughtful engineers
 
-[Unreleased]: https://github.com/unfault/cli/compare/v0.6.22...HEAD
+[Unreleased]: https://github.com/unfault/cli/compare/v0.6.28...HEAD
+[0.6.28]: https://github.com/unfault/cli/compare/v0.6.27...v0.6.28
+[0.6.27]: https://github.com/unfault/cli/compare/v0.6.26...v0.6.27
+[0.6.26]: https://github.com/unfault/cli/compare/v0.6.25...v0.6.26
+[0.6.25]: https://github.com/unfault/cli/compare/v0.6.24...v0.6.25
+[0.6.24]: https://github.com/unfault/cli/compare/v0.6.23...v0.6.24
+[0.6.23]: https://github.com/unfault/cli/compare/v0.6.22...v0.6.23
 [0.6.22]: https://github.com/unfault/cli/compare/v0.6.21...v0.6.22
 [0.6.17]: https://github.com/unfault/cli/compare/580bc99...HEAD
 [0.6.16]: https://github.com/unfault/cli/compare/v0.6.12...580bc99
