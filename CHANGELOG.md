@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.34] - 2026-02-05
+
+### Fixed
+
+- `unfault ask`: render route coverage labels like `[CALLED]` / `[MISSING]` when listing upstream endpoints.
+
 ## [0.6.33] - 2026-02-05
 
 ### Added
