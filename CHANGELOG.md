@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.33] - 2026-02-05
+
+### Added
+
+- `unfault graph --verbose`: print inbound dependents keys fetched from the API and the route keys being rendered to help diagnose missing upstream callers.
+
 ## [0.6.32] - 2026-02-04
 
 ### Changed
