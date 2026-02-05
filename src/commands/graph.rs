@@ -1256,6 +1256,55 @@ fn output_summary_formatted(
         .filter(|f| f.is_handler && f.http_method.is_some())
         .collect();
 
+    if verbose {
+        match api_stats {
+            Some(stats) => {
+                eprintln!(
+                    "debug: inbound_route_dependents from API: {}",
+                    stats.inbound_route_dependents.len()
+                );
+                for r in &stats.inbound_route_dependents {
+                    eprintln!(
+                        "debug: inbound key: {} {} (dependents={})",
+                        r.method.to_uppercase(),
+                        r.path,
+                        r.dependents.len()
+                    );
+                    for d in r.dependents.iter().take(10) {
+                        let name = d
+                            .workspace_name
+                            .as_deref()
+                            .unwrap_or(d.workspace_id.as_str());
+                        let src = match (
+                            d.source_route_method.as_deref(),
+                            d.source_route_path.as_deref(),
+                        ) {
+                            (Some(m), Some(p)) if !m.is_empty() && !p.is_empty() => {
+                                format!("{} {}", m.to_uppercase(), p)
+                            }
+                            _ => d
+                                .caller
+                                .as_deref()
+                                .map(|c| format!("via {}", c))
+                                .unwrap_or_else(|| "(no source route)".to_string()),
+                        };
+                        eprintln!("debug:   - {} (calls={}, {})", name, d.call_count, src);
+                    }
+                }
+
+                eprintln!("debug: route keys to render (first 10):");
+                for route in routes.iter().take(10) {
+                    let method = route.http_method.as_deref().unwrap_or("?").to_uppercase();
+                    let path = route.http_path.as_deref().unwrap_or("?");
+                    eprintln!("debug:   - {} {}", method, path);
+                }
+            }
+            None => {
+                eprintln!("debug: api_stats missing (no inbound_route_dependents)");
+            }
+        }
+    }
+
     if !routes.is_empty() {
         println!("{}", "Entry points:".bold());
         for route in routes.iter().take(3) {
@@ -1280,7 +1329,16 @@ fn output_summary_formatted(
             println!("           {} {}", "└─".dimmed(), handler.dimmed());
 
             // Optional: inbound callers for this route (from other workspaces)
-            if let Some(deps) = inbound_by_route.get(&(method.to_uppercase(), path.to_string())) {
+            let inbound_key = (method.to_uppercase(), path.to_string());
+            if verbose && !inbound_by_route.contains_key(&inbound_key) {
+                eprintln!(
+                    "debug: no inbound dependents for rendered route key: {} {} (known keys={})",
+                    inbound_key.0,
+                    inbound_key.1,
+                    inbound_by_route.len()
+                );
+            }
+            if let Some(deps) = inbound_by_route.get(&inbound_key) {
                 if !deps.is_empty() {
                     // Show up to 3 callers.
                     for (idx, d) in deps.iter().take(3).enumerate() {
