@@ -1635,24 +1635,39 @@ fn render_enumerate_context(enumerate_context: &RAGEnumerateContext, verbose: bo
 
             match item.item_type.as_str() {
                 "route" => {
-                    let method = item.http_method.as_deref().unwrap_or("?");
-                    let path = item.http_path.as_deref().unwrap_or("?");
+                    // For coverage-style route lists, the API may encode a status label
+                    // in the item name (e.g. "[MISSING] GET /status"). Preserve it.
+                    if item.name.starts_with("[") {
+                        let name_colored = if item.name.starts_with("[MISSING]") {
+                            item.name.red()
+                        } else if item.name.starts_with("[CALLED]") {
+                            item.name.green()
+                        } else if item.name.starts_with("[EXTRA]") {
+                            item.name.cyan()
+                        } else {
+                            item.name.normal()
+                        };
+                        println!("    {} {}", "•".dimmed(), name_colored);
+                    } else {
+                        let method = item.http_method.as_deref().unwrap_or("?");
+                        let path = item.http_path.as_deref().unwrap_or("?");
 
-                    // Color the HTTP method
-                    let method_colored = match method.to_uppercase().as_str() {
-                        "GET" => method.green(),
-                        "POST" => method.blue(),
-                        "PUT" | "PATCH" => method.yellow(),
-                        "DELETE" => method.red(),
-                        _ => method.normal(),
-                    };
+                        // Color the HTTP method
+                        let method_colored = match method.to_uppercase().as_str() {
+                            "GET" => method.green(),
+                            "POST" => method.blue(),
+                            "PUT" | "PATCH" => method.yellow(),
+                            "DELETE" => method.red(),
+                            _ => method.normal(),
+                        };
 
-                    println!(
-                        "    {} {} {}",
-                        "•".dimmed(),
-                        method_colored,
-                        path.bright_white()
-                    );
+                        println!(
+                            "    {} {} {}",
+                            "•".dimmed(),
+                            method_colored,
+                            path.bright_white()
+                        );
+                    }
 
                     if verbose {
                         if let Some(ref name) = item.qualified_name {
